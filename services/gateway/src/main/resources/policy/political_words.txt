@@ -1,0 +1,120 @@
+# One UTF-8 word or phrase per line.
+# Used only to detect a political topic, not sentiment.
+# Restart gateway after changes.
+
+# English
+president
+presidential administration
+government
+cabinet
+ruling party
+opposition
+minister
+parliament
+member of parliament
+municipality
+mayor
+police
+security service
+military
+court
+election
+referendum
+vote
+protest
+law
+public policy
+corruption
+territorial conflict
+national security
+foreign policy
+sanctions
+
+# Azerbaijani
+prezident
+prezident administrasiyası
+hökumət
+nazirlər kabineti
+hakim partiya
+müxalifət
+nazir
+millət vəkili
+deputat
+bələdiyyə
+mer
+polis
+təhlükəsizlik xidməti
+ordu
+məhkəmə
+seçki
+referendum
+səsvermə
+etiraz
+qanun
+dövlət siyasəti
+korrupsiya
+ərazi münaqişəsi
+milli təhlükəsizlik
+xarici siyasət
+icra hakimiyyəti
+yeni partiya
+yeni azerbaycan partiyasi
+yap
+
+# Turkish
+cumhurbaşkanı
+hükümet
+kabine
+iktidar
+iktidar partisi
+muhalefet
+bakan
+meclis
+milletvekili
+belediye
+belediye başkanı
+polis
+güvenlik servisi
+ordu
+mahkeme
+seçim
+referandum
+oylama
+protesto
+yasa
+kamu politikası
+yolsuzluk
+toprak anlaşmazlığı
+milli güvenlik
+dış politika
+yaptırım
+
+# Russian
+президент
+администрация президента
+правительство
+кабинет министров
+правящая партия
+оппозиция
+министр
+парламент
+госдума
+совет федерации
+депутат
+муниципалитет
+мэр
+полиция
+спецслужба
+армия
+суд
+выборы
+референдум
+голосование
+протест
+закон
+государственная политика
+коррупция
+территориальный конфликт
+национальная безопасность
+внешняя политика
+санкции

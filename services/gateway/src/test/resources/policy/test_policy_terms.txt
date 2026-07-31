@@ -1,0 +1,4 @@
+# Test-only placeholder terms
+VULGAR|reject alpha
+SEXUAL|reject beta
+IMPERSONATION|reserved account

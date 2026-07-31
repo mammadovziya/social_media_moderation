@@ -1,0 +1,7 @@
+.git
+.idea
+.vscode
+**/target
+**/.DS_Store
+.env
+config/moderation_terms.txt

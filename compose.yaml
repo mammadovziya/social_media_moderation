@@ -1,0 +1,120 @@
+name: social-media-moderation
+
+services:
+  moderation-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-moderation}
+      POSTGRES_USER: ${POSTGRES_USER:-moderation}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-moderation-local}
+    volumes:
+      - moderation-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    environment:
+      AI_SERVICE_URL: http://ai-service:8000
+      MEDIA_SERVICE_URL: http://media-service:8000
+      MAX_IMAGE_BYTES: ${MAX_IMAGE_BYTES:-10485760}
+      MODERATION_UNKNOWN_THRESHOLD: ${MODERATION_UNKNOWN_THRESHOLD:-0.70}
+      UPSTREAM_TIMEOUT_SECONDS: ${UPSTREAM_TIMEOUT_SECONDS:-30}
+      MODERATION_TERMS_PATH: file:/app/config/moderation_terms.txt
+      POLITICAL_WORDS_PATH: file:/app/config/political_words.txt
+    volumes:
+      - ./config/moderation_terms.txt:/app/config/moderation_terms.txt:ro
+      - ./services/gateway/src/main/resources/policy/political_words.txt:/app/config/political_words.txt:ro
+    ports:
+      - "${GATEWAY_PORT:-8080}:8000"
+    depends_on:
+      ai-service:
+        condition: service_healthy
+      media-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 120s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  media-service:
+    build:
+      context: .
+      dockerfile: services/media/Dockerfile
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://moderation-db:5432/${POSTGRES_DB:-moderation}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-moderation}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-moderation-local}
+      PDQ_DISTANCE_THRESHOLD: ${PDQ_DISTANCE_THRESHOLD:-31}
+      PDQ_QUALITY_THRESHOLD: ${PDQ_QUALITY_THRESHOLD:-49}
+      MAX_IMAGE_BYTES: ${MAX_IMAGE_BYTES:-10485760}
+      MAX_IMAGE_PIXELS: ${MAX_IMAGE_PIXELS:-40000000}
+    depends_on:
+      moderation-db:
+        condition: service_healthy
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 120s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  ai-service:
+    build:
+      context: .
+      dockerfile: services/ai/Dockerfile
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODERATION_MODEL: ${OPENAI_MODERATION_MODEL:-omni-moderation-latest}
+      OPENAI_CUSTOM_MODEL: ${OPENAI_CUSTOM_MODEL:-gpt-4o-mini}
+      OPENAI_TIMEOUT_SECONDS: ${UPSTREAM_TIMEOUT_SECONDS:-30}
+      MAX_IMAGE_BYTES: ${MAX_IMAGE_BYTES:-10485760}
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 120s
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  moderation-db-data:
