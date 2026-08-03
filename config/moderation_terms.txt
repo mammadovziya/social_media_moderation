@@ -24,7 +24,7 @@ IMPERSONATION|abbnak
 # SEXUAL TERMS: ENGLISH
 
 # Sexual terms: Azerbaijani
-# SEXUAL | `word`
+# SEXUAL|`word`
 
 # Sexual terms: Turkish and ASCII forms
 
