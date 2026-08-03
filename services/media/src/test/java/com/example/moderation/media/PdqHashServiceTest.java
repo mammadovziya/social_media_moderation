@@ -32,8 +32,8 @@ class PdqHashServiceTest {
 
     @BeforeEach
     void setUp() {
-        when(blockedHashIndex.nearestDistance(anyString()))
-                .thenReturn(OptionalInt.empty());
+        when(blockedHashIndex.findMatch(anyString()))
+                .thenReturn(new BlockedPdqHashIndex.SearchResult(false, OptionalInt.empty()));
     }
 
     @Test
@@ -61,8 +61,8 @@ class PdqHashServiceTest {
 
     @Test
     void matchesNearestIndexedHashAtTheThreshold() {
-        when(blockedHashIndex.nearestDistance(anyString()))
-                .thenReturn(OptionalInt.of(31));
+        when(blockedHashIndex.findMatch(anyString()))
+                .thenReturn(new BlockedPdqHashIndex.SearchResult(true, OptionalInt.of(31)));
 
         var result = service.analyze(patternedImage(), "post-101");
 
@@ -74,16 +74,16 @@ class PdqHashServiceTest {
     }
 
     @Test
-    void retainsNearestDistanceWhenItIsOutsideTheThreshold() {
-        when(blockedHashIndex.nearestDistance(anyString()))
-                .thenReturn(OptionalInt.of(32));
+    void reportsNoDistanceWhenThereIsNoMatch() {
+        when(blockedHashIndex.findMatch(anyString()))
+                .thenReturn(new BlockedPdqHashIndex.SearchResult(true, OptionalInt.empty()));
 
         var result = service.analyze(patternedImage(), "post-102");
 
         assertThat(result)
                 .containsEntry("qualityAccepted", true)
                 .containsEntry("matched", false)
-                .containsEntry("distance", 32)
+                .containsEntry("distance", -1)
                 .containsEntry("hasComparison", true);
     }
 

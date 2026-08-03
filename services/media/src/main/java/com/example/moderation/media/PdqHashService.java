@@ -3,7 +3,6 @@ package com.example.moderation.media;
 import java.awt.image.BufferedImage;
 import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.OptionalInt;
 import org.springframework.stereotype.Service;
 import pdqhashing.hasher.PDQHasher;
 import pdqhashing.types.HashAndQuality;
@@ -31,19 +30,17 @@ public class PdqHashService {
         PdqHash result = compute(source);
         repository.save(contentId, result.hash(), result.quality());
         boolean qualityAccepted = result.quality() > properties.pdqQualityThreshold();
-        Match match = qualityAccepted
-                ? match(
-                        blockedHashIndex.nearestDistance(result.hash()),
-                        properties.pdqDistanceThreshold())
-                : new Match(false, null);
+        BlockedPdqHashIndex.SearchResult match = qualityAccepted
+                ? blockedHashIndex.findMatch(result.hash())
+                : BlockedPdqHashIndex.SearchResult.skipped();
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("hash", result.hash());
         response.put("quality", result.quality());
         response.put("qualityAccepted", qualityAccepted);
-        response.put("matched", match.matched());
-        response.put("distance", match.distance() == null ? -1 : match.distance());
-        response.put("hasComparison", match.distance() != null);
+        response.put("matched", match.distance().isPresent());
+        response.put("distance", match.distance().orElse(-1));
+        response.put("hasComparison", match.hasHashes());
         response.put("distanceThreshold", properties.pdqDistanceThreshold());
         response.put("qualityThreshold", properties.pdqQualityThreshold());
         response.put("algorithm", "pdq-256");
@@ -70,15 +67,5 @@ public class PdqHashService {
         return PdqHashValue.parse(left).hammingDistance(PdqHashValue.parse(right));
     }
 
-    private static Match match(OptionalInt nearestDistance, int threshold) {
-        if (nearestDistance.isEmpty()) {
-            return new Match(false, null);
-        }
-        int distance = nearestDistance.getAsInt();
-        return new Match(distance <= threshold, distance);
-    }
-
     public record PdqHash(String hash, int quality) {}
-
-    public record Match(boolean matched, Integer distance) {}
 }

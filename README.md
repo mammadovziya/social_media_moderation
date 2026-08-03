@@ -7,11 +7,11 @@ It returns `ALLOW`, `BLOCK` or `UNKNOWN`.
 
 - `gateway` - public API and final decision
 - `ai-service` - OpenAI checks
-- `media-service` - image checks and PDQ matching
+- `media-service` - image checks, OCR and exact PDQ matching
 - `moderation-db` - PostgreSQL for PDQ hashes
 
-Blocked PDQ hashes are searched with an exact in-memory BK-tree. The media
-service rebuilds it only when a transactional database revision changes.
+Blocked PDQ hashes use an exact in-memory Hamming index. The media service
+rebuilds it only when a transactional database revision changes.
 
 Only the gateway is public. Posts accept text, an image or both. Comments and
 usernames accept text only. Posts must be about investment.
@@ -74,9 +74,9 @@ Accuracy tests use live OpenAI calls and need the Compose stack.
 ## TODO
 
 - finalize moderation rules and create a multilingual test set.
-- *multiple hashing, rotations
+- support rotated images and multiple image hashes.
 - cache, async moderation
-- add logging, tracing, metrics observiabilaty
+- add logs, tracing and metrics.
 - measure OCR accuracy with real image fixtures before adding direct OCR rules.
 - add authentication, rate limits and audit logs.
 - test every model or prompt update.

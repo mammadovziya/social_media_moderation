@@ -16,11 +16,12 @@ class BlockedPdqHashIndexTest {
     private static final String ALL_BITS_HASH = "f".repeat(64);
 
     private final PdqHashRepository repository = mock(PdqHashRepository.class);
-    private final BlockedPdqHashIndex index = new BlockedPdqHashIndex(repository);
+    private final BlockedPdqHashIndex index =
+            new BlockedPdqHashIndex(repository, properties(31));
 
     @Test
     void rejectsInvalidQueryBeforeReadingTheRepository() {
-        assertThatThrownBy(() -> index.nearestDistance("0".repeat(63) + "z"))
+        assertThatThrownBy(() -> index.findMatch("0".repeat(63) + "z"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("PDQ hashes must contain exactly 64 hexadecimal characters");
 
@@ -33,8 +34,16 @@ class BlockedPdqHashIndexTest {
         when(repository.loadBlockedHashesSnapshot())
                 .thenReturn(new PdqHashRepository.BlockedHashesSnapshot(0L, List.of()));
 
-        assertThat(index.nearestDistance(ZERO_HASH)).isEmpty();
-        assertThat(index.nearestDistance(ALL_BITS_HASH)).isEmpty();
+        assertThat(index.findMatch(ZERO_HASH))
+                .satisfies(result -> {
+                    assertThat(result.hasHashes()).isFalse();
+                    assertThat(result.distance()).isEmpty();
+                });
+        assertThat(index.findMatch(ALL_BITS_HASH))
+                .satisfies(result -> {
+                    assertThat(result.hasHashes()).isFalse();
+                    assertThat(result.distance()).isEmpty();
+                });
 
         verify(repository, times(2)).blockedHashesRevision();
         verify(repository).loadBlockedHashesSnapshot();
@@ -50,12 +59,33 @@ class BlockedPdqHashIndexTest {
                         new PdqHashRepository.BlockedHashesSnapshot(
                                 2L, List.of(ALL_BITS_HASH, ALL_BITS_HASH)));
 
-        assertThat(index.nearestDistance(ZERO_HASH)).hasValue(0);
-        assertThat(index.nearestDistance(ALL_BITS_HASH)).hasValue(256);
-        assertThat(index.nearestDistance(ALL_BITS_HASH)).hasValue(0);
-        assertThat(index.nearestDistance(ZERO_HASH)).hasValue(256);
+        assertThat(index.findMatch(ZERO_HASH).distance()).hasValue(0);
+        assertThat(index.findMatch(ALL_BITS_HASH))
+                .satisfies(result -> {
+                    assertThat(result.hasHashes()).isTrue();
+                    assertThat(result.distance()).isEmpty();
+                });
+        assertThat(index.findMatch(ALL_BITS_HASH).distance()).hasValue(0);
+        assertThat(index.findMatch(ZERO_HASH))
+                .satisfies(result -> {
+                    assertThat(result.hasHashes()).isTrue();
+                    assertThat(result.distance()).isEmpty();
+                });
 
         verify(repository, times(4)).blockedHashesRevision();
         verify(repository, times(2)).loadBlockedHashesSnapshot();
+    }
+
+    private static MediaProperties properties(int distanceThreshold) {
+        return new MediaProperties(
+                distanceThreshold,
+                49,
+                10_485_760,
+                40_000_000,
+                false,
+                "aze+eng+rus+tur",
+                10,
+                20_000,
+                2);
     }
 }
