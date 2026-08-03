@@ -23,16 +23,19 @@ public class MediaController {
     private final ImageDecoder decoder;
     private final PdqHashService pdq;
     private final PdqHashRepository repository;
+    private final OcrService ocr;
 
     public MediaController(
             MediaProperties properties,
             ImageDecoder decoder,
             PdqHashService pdq,
-            PdqHashRepository repository) {
+            PdqHashRepository repository,
+            OcrService ocr) {
         this.properties = properties;
         this.decoder = decoder;
         this.pdq = pdq;
         this.repository = repository;
+        this.ocr = ocr;
     }
 
     @GetMapping("/healthz")
@@ -42,10 +45,15 @@ public class MediaController {
 
     @GetMapping("/readyz")
     public Map<String, Object> ready() {
+        if (!ocr.ready()) {
+            throw new ResponseStatusException(
+                    HttpStatus.SERVICE_UNAVAILABLE, "OCR is not ready");
+        }
         return Map.of(
                 "status", "ready",
                 "hashAlgorithm", "pdq-256",
-                "observedHashCount", repository.observedHashCount());
+                "observedHashCount", repository.observedHashCount(),
+                "ocr", Map.of("status", ocr.readinessStatus()));
     }
 
     @PostMapping(
@@ -66,9 +74,11 @@ public class MediaController {
         byte[] bytes = image.getBytes();
         try {
             DecodedImage decoded = decoder.decode(bytes);
+            OcrResult ocrResult = ocr.analyze(decoded.image());
             return Map.of(
                     "status", "ok",
                     "pdq", pdq.analyze(decoded.image(), contentId),
+                    "ocr", ocrResult.asMap(),
                     "image",
                             Map.of(
                                     "width", decoded.image().getWidth(),

@@ -69,6 +69,11 @@ services:
       PDQ_QUALITY_THRESHOLD: ${PDQ_QUALITY_THRESHOLD:-49}
       MAX_IMAGE_BYTES: ${MAX_IMAGE_BYTES:-10485760}
       MAX_IMAGE_PIXELS: ${MAX_IMAGE_PIXELS:-40000000}
+      OCR_ENABLED: ${OCR_ENABLED:-false}
+      OCR_LANGUAGES: ${OCR_LANGUAGES:-aze+eng+rus+tur}
+      OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-10}
+      OCR_MAX_TEXT_CHARS: ${OCR_MAX_TEXT_CHARS:-20000}
+      OCR_MAX_CONCURRENT: ${OCR_MAX_CONCURRENT:-2}
     depends_on:
       moderation-db:
         condition: service_healthy

@@ -8,6 +8,11 @@ FROM eclipse-temurin:21-jre-jammy
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        curl \
+       tesseract-ocr \
+       tesseract-ocr-aze \
+       tesseract-ocr-eng \
+       tesseract-ocr-rus \
+       tesseract-ocr-tur \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /workspace/services/media/target/media-0.1.0-SNAPSHOT.jar app.jar
