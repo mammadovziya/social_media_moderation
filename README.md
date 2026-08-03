@@ -70,8 +70,11 @@ Accuracy tests use live OpenAI calls and need the Compose stack.
 
 ## TODO
 
-- Finalize moderation rules and create a multilingual test set.
-- Measure OCR accuracy with real image fixtures before adding direct OCR rules.
-- Add authentication, rate limits and audit logs.
-- Add metrics and alerts.
-- Test every model or prompt update.
+- finalize moderation rules and create a multilingual test set.
+- better search -> [ANN](https://en.wikipedia.org/wiki/Nearest_neighbor_search), [VP-tree]()https://en.wikipedia.org/wiki/Vantage-point_tree, [BK-tree](https://en.wikipedia.org/wiki/BK-tree)
+- *multiple hashing, rotations
+- cache, async moderation
+- add logging, tracing, metrics observiabilaty
+- measure OCR accuracy with real image fixtures before adding direct OCR rules.
+- add authentication, rate limits and audit logs.
+- test every model or prompt update.
