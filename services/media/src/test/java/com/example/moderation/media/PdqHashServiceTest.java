@@ -1,6 +1,7 @@
 package com.example.moderation.media;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -8,12 +9,13 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.awt.image.BufferedImage;
-import java.util.List;
+import java.util.OptionalInt;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class PdqHashServiceTest {
     private final PdqHashRepository repository = mock(PdqHashRepository.class);
+    private final BlockedPdqHashIndex blockedHashIndex = mock(BlockedPdqHashIndex.class);
     private final PdqHashService service = new PdqHashService(
             new MediaProperties(
                     31,
@@ -25,11 +27,13 @@ class PdqHashServiceTest {
                     10,
                     20_000,
                     2),
-            repository);
+            repository,
+            blockedHashIndex);
 
     @BeforeEach
     void setUp() {
-        when(repository.findBlockedHashes()).thenReturn(List.of());
+        when(blockedHashIndex.nearestDistance(anyString()))
+                .thenReturn(OptionalInt.empty());
     }
 
     @Test
@@ -49,18 +53,49 @@ class PdqHashServiceTest {
         assertThat(PdqHashService.hammingDistance(
                         "0".repeat(63) + "1", "0".repeat(64)))
                 .isEqualTo(1);
+        assertThatThrownBy(() -> PdqHashService.hammingDistance(
+                        "0".repeat(65), "0".repeat(64)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("PDQ hashes must contain exactly 64 hexadecimal characters");
     }
 
     @Test
-    void closestHashUsesPdqThreshold() {
-        assertThat(PdqHashService.closest(
-                                "0".repeat(63) + "3",
-                                List.of("0".repeat(63) + "1"),
-                                1)
-                        .matched())
-                .isTrue();
-        assertThat(PdqHashService.closest("0".repeat(64), List.of(), 31).distance())
-                .isNull();
+    void matchesNearestIndexedHashAtTheThreshold() {
+        when(blockedHashIndex.nearestDistance(anyString()))
+                .thenReturn(OptionalInt.of(31));
+
+        var result = service.analyze(patternedImage(), "post-101");
+
+        assertThat(result)
+                .containsEntry("qualityAccepted", true)
+                .containsEntry("matched", true)
+                .containsEntry("distance", 31)
+                .containsEntry("hasComparison", true);
+    }
+
+    @Test
+    void retainsNearestDistanceWhenItIsOutsideTheThreshold() {
+        when(blockedHashIndex.nearestDistance(anyString()))
+                .thenReturn(OptionalInt.of(32));
+
+        var result = service.analyze(patternedImage(), "post-102");
+
+        assertThat(result)
+                .containsEntry("qualityAccepted", true)
+                .containsEntry("matched", false)
+                .containsEntry("distance", 32)
+                .containsEntry("hasComparison", true);
+    }
+
+    @Test
+    void reportsNoComparisonWhenTheBlockedIndexIsEmpty() {
+        var result = service.analyze(patternedImage(), "post-103");
+
+        assertThat(result)
+                .containsEntry("qualityAccepted", true)
+                .containsEntry("matched", false)
+                .containsEntry("distance", -1)
+                .containsEntry("hasComparison", false);
     }
 
     @Test
