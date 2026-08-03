@@ -10,6 +10,9 @@ It returns `ALLOW`, `BLOCK` or `UNKNOWN`.
 - `media-service` - image checks and PDQ matching
 - `moderation-db` - PostgreSQL for PDQ hashes
 
+Blocked PDQ hashes are searched with an exact in-memory BK-tree. The media
+service rebuilds it only when a transactional database revision changes.
+
 Only the gateway is public. Posts accept text, an image or both. Comments and
 usernames accept text only. Posts must be about investment.
 
@@ -71,7 +74,6 @@ Accuracy tests use live OpenAI calls and need the Compose stack.
 ## TODO
 
 - finalize moderation rules and create a multilingual test set.
-- better search -> [ANN](https://en.wikipedia.org/wiki/Nearest_neighbor_search), [VP-tree]()https://en.wikipedia.org/wiki/Vantage-point_tree, [BK-tree](https://en.wikipedia.org/wiki/BK-tree)
 - *multiple hashing, rotations
 - cache, async moderation
 - add logging, tracing, metrics observiabilaty

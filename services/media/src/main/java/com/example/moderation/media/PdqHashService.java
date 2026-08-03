@@ -1,15 +1,12 @@
 package com.example.moderation.media;
 
 import java.awt.image.BufferedImage;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
+import java.util.OptionalInt;
 import org.springframework.stereotype.Service;
 import pdqhashing.hasher.PDQHasher;
-import pdqhashing.types.Hash256;
 import pdqhashing.types.HashAndQuality;
-import pdqhashing.types.PDQHashFormatException;
 
 @Service
 public class PdqHashService {
@@ -18,11 +15,16 @@ public class PdqHashService {
 
     private final MediaProperties properties;
     private final PdqHashRepository repository;
+    private final BlockedPdqHashIndex blockedHashIndex;
     private final PDQHasher hasher = new PDQHasher();
 
-    public PdqHashService(MediaProperties properties, PdqHashRepository repository) {
+    public PdqHashService(
+            MediaProperties properties,
+            PdqHashRepository repository,
+            BlockedPdqHashIndex blockedHashIndex) {
         this.properties = properties;
         this.repository = repository;
+        this.blockedHashIndex = blockedHashIndex;
     }
 
     public Map<String, Object> analyze(BufferedImage source, String contentId) {
@@ -30,9 +32,8 @@ public class PdqHashService {
         repository.save(contentId, result.hash(), result.quality());
         boolean qualityAccepted = result.quality() > properties.pdqQualityThreshold();
         Match match = qualityAccepted
-                ? closest(
-                        result.hash(),
-                        repository.findBlockedHashes(),
+                ? match(
+                        blockedHashIndex.nearestDistance(result.hash()),
                         properties.pdqDistanceThreshold())
                 : new Match(false, null);
 
@@ -66,22 +67,15 @@ public class PdqHashService {
     }
 
     public static int hammingDistance(String left, String right) {
-        try {
-            return Hash256.fromHexString(left)
-                    .hammingDistance(Hash256.fromHexString(right));
-        } catch (PDQHashFormatException exception) {
-            throw new IllegalArgumentException(
-                    "PDQ hashes must contain exactly 64 hexadecimal characters",
-                    exception);
-        }
+        return PdqHashValue.parse(left).hammingDistance(PdqHashValue.parse(right));
     }
 
-    public static Match closest(String hash, List<String> knownHashes, int threshold) {
-        return knownHashes.stream()
-                .map(known -> hammingDistance(hash, known))
-                .min(Comparator.naturalOrder())
-                .map(distance -> new Match(distance <= threshold, distance))
-                .orElseGet(() -> new Match(false, null));
+    private static Match match(OptionalInt nearestDistance, int threshold) {
+        if (nearestDistance.isEmpty()) {
+            return new Match(false, null);
+        }
+        int distance = nearestDistance.getAsInt();
+        return new Match(distance <= threshold, distance);
     }
 
     public record PdqHash(String hash, int quality) {}
