@@ -7,22 +7,26 @@ import org.springframework.stereotype.Component;
 @Component
 public class BlockedPdqHashIndex {
     private final PdqHashRepository repository;
+    private final int distanceThreshold;
     private final Object rebuildLock = new Object();
     private final AtomicReference<CachedIndex> cachedIndex =
-            new AtomicReference<>(new CachedIndex(-1, PdqBkTree.empty()));
+            new AtomicReference<>(new CachedIndex(-1, PdqHammingIndex.empty()));
 
-    public BlockedPdqHashIndex(PdqHashRepository repository) {
+    public BlockedPdqHashIndex(PdqHashRepository repository, MediaProperties properties) {
         this.repository = repository;
+        this.distanceThreshold = properties.pdqDistanceThreshold();
     }
 
-    public OptionalInt nearestDistance(String hash) {
+    public SearchResult findMatch(String hash) {
         PdqHashValue target = PdqHashValue.parse(hash);
         long observedRevision = repository.blockedHashesRevision();
         CachedIndex current = cachedIndex.get();
         if (current.revision() < observedRevision) {
             current = rebuild(observedRevision);
         }
-        return current.tree().nearestDistance(target);
+        return new SearchResult(
+                current.index().size() > 0,
+                current.index().nearestWithin(target, distanceThreshold));
     }
 
     private CachedIndex rebuild(long observedRevision) {
@@ -39,11 +43,23 @@ public class BlockedPdqHashIndex {
                         "Blocked PDQ hash snapshot is older than its observed revision");
             }
             CachedIndex replacement = new CachedIndex(
-                    snapshot.revision(), PdqBkTree.fromHexStrings(snapshot.hashes()));
+                    snapshot.revision(), PdqHammingIndex.fromHexStrings(snapshot.hashes()));
             cachedIndex.set(replacement);
             return replacement;
         }
     }
 
-    private record CachedIndex(long revision, PdqBkTree tree) {}
+    public record SearchResult(boolean hasHashes, OptionalInt distance) {
+        public SearchResult {
+            if (distance == null) {
+                throw new IllegalArgumentException("PDQ match distance must not be null");
+            }
+        }
+
+        static SearchResult skipped() {
+            return new SearchResult(false, OptionalInt.empty());
+        }
+    }
+
+    private record CachedIndex(long revision, PdqHammingIndex index) {}
 }

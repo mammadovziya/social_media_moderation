@@ -31,6 +31,19 @@ record PdqHashValue(long word0, long word1, long word2, long word3)
                 + Long.bitCount(word3 ^ other.word3);
     }
 
+    int band(int index) {
+        if (index < 0 || index >= 16) {
+            throw new IllegalArgumentException("PDQ band index must be between 0 and 15");
+        }
+        long word = switch (index / 4) {
+            case 0 -> word0;
+            case 1 -> word1;
+            case 2 -> word2;
+            default -> word3;
+        };
+        return (int) ((word >>> ((index % 4) * 16)) & 0xffffL);
+    }
+
     @Override
     public int compareTo(PdqHashValue other) {
         int comparison = Long.compareUnsigned(word0, other.word0);
