@@ -52,6 +52,9 @@ curl http://localhost:8080/v1/moderate \
 `contentType`: `POST`, `COMMENT` or `USERNAME`.
 Images: JPEG, PNG or GIF, only for posts.
 
+Errors include a stable code, a short message and the request ID:
+`{"error":"INVALID_INPUT","message":"contentType is required.","requestId":"..."}`
+
 `UNKNOWN` means the service could not make a reliable final decision, for
 example because an analyzer was unavailable or the result was ambiguous. Posts
 that are clearly not about investment return `BLOCK / NOT_INVESTMENT`; an
