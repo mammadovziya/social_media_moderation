@@ -45,6 +45,8 @@ import org.springframework.web.server.ResponseStatusException;
 @Tag(name = "Moderation")
 public class ModerationController {
     private static final Logger log = LoggerFactory.getLogger(ModerationController.class);
+    private static final int MAX_ANALYSIS_TEXT_CHARS = 20_000;
+    private static final String IMAGE_TEXT_LABEL = "Image text:\n";
     private static final Set<String> ALLOWED_IMAGE_TYPES =
             Set.of("image/jpeg", "image/png", "image/gif");
 
@@ -186,6 +188,7 @@ public class ModerationController {
 
         Map<String, Object> media = null;
         Map<String, Object> ai;
+        String analysisText = text;
         if (image == null) {
             ai = analyzeText(contentId, type, text, requestId);
         } else {
@@ -195,13 +198,14 @@ public class ModerationController {
                     ? "upload"
                     : image.getOriginalFilename();
             media = analyzeMedia(bytes, filename, imageContentType, contentId, requestId);
+            analysisText = imageAnalysisText(text, media);
             ai = analyzeImage(
                     bytes,
                     filename,
                     imageContentType,
                     contentId,
                     type,
-                    text,
+                    analysisText,
                     requestId);
         }
 
@@ -227,8 +231,42 @@ public class ModerationController {
                         : null,
                 type == ContentType.USERNAME
                         ? null
-                        : politicsSignal(classification, text),
+                        : politicsSignal(classification, analysisText),
                 image == null ? null : imageMatch(media));
+    }
+
+    static String imageAnalysisText(String originalText, Map<String, Object> media) {
+        Map<String, Object> ocr = DecisionPolicy.nestedMap(media, "ocr");
+        if (!"ok".equals(ocr.get("status"))
+                || !(ocr.get("text") instanceof String imageText)
+                || imageText.isBlank()) {
+            return originalText;
+        }
+
+        String label = originalText.isEmpty() ? IMAGE_TEXT_LABEL : "\n\n" + IMAGE_TEXT_LABEL;
+        int textLimit = MAX_ANALYSIS_TEXT_CHARS - originalText.length() - label.length();
+        if (textLimit <= 0) {
+            return originalText;
+        }
+
+        String limitedImageText = limitWithoutSplittingSurrogate(imageText, textLimit);
+        if (limitedImageText.isEmpty()) {
+            return originalText;
+        }
+        return originalText + label + limitedImageText;
+    }
+
+    private static String limitWithoutSplittingSurrogate(String value, int maxChars) {
+        if (value.length() <= maxChars) {
+            return value;
+        }
+        int end = maxChars;
+        if (end > 0
+                && Character.isHighSurrogate(value.charAt(end - 1))
+                && Character.isLowSurrogate(value.charAt(end))) {
+            end--;
+        }
+        return value.substring(0, end);
     }
 
     private Violation localViolation(ContentType type, String text) {

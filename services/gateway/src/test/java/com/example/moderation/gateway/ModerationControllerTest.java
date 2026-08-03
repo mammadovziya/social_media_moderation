@@ -56,6 +56,10 @@ class ModerationControllerTest {
                         any(byte[].class), eq("post.png"), eq("image/png"), eq("post-2")))
                 .thenReturn(Map.of(
                         "status", "ok",
+                        "ocr",
+                        Map.of(
+                                "status", "ok",
+                                "text", "Government image caption"),
                         "pdq",
                         Map.of(
                                 "matched", false,
@@ -66,7 +70,7 @@ class ModerationControllerTest {
                         eq("image/png"),
                         eq("post-2"),
                         eq(ContentType.POST),
-                        eq("Combined post text")))
+                        eq("Combined post text\n\nImage text:\nGovernment image caption")))
                 .thenReturn(successfulAi("not_related", "critical_or_negative"));
 
         ModerationResponse result = controller.moderate(
@@ -84,6 +88,68 @@ class ModerationControllerTest {
         assertThat(result.violation()).isEqualTo(Violation.NOT_INVESTMENT);
         assertThat(result.imageMatch()).isEqualTo(ImageMatch.NOT_MATCHED);
         assertThat(result.politics()).isEqualTo(Politics.CRITICAL_OR_NEGATIVE);
+    }
+
+    @Test
+    void usesOcrTextForPoliticalFallback() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        MockMultipartFile image = new MockMultipartFile(
+                "image", "post.png", "image/png", new byte[] {1, 2, 3});
+        when(clients.analyzeMedia(
+                        any(byte[].class), eq("post.png"), eq("image/png"), eq("post-ocr")))
+                .thenReturn(Map.of(
+                        "status", "ok",
+                        "ocr", Map.of("status", "ok", "text", "Government policy"),
+                        "pdq", Map.of("matched", false, "qualityAccepted", true)));
+        when(clients.analyzeImageAi(
+                        any(byte[].class),
+                        eq("post.png"),
+                        eq("image/png"),
+                        eq("post-ocr"),
+                        eq(ContentType.POST),
+                        eq("Market update\n\nImage text:\nGovernment policy")))
+                .thenReturn(successfulAi("related", "not_related"));
+
+        ModerationResponse result = controller(clients)
+                .moderate(
+                        "post-ocr",
+                        "post",
+                        "Market update",
+                        image,
+                        null,
+                        new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.politics()).isEqualTo(Politics.UNCERTAIN);
+    }
+
+    @Test
+    void keepsOriginalTextWhenOcrCannotBeUsed() {
+        String original = new String("Original post text");
+
+        assertThat(ModerationController.imageAnalysisText(original, null)).isSameAs(original);
+        assertThat(ModerationController.imageAnalysisText(
+                        original, Map.of("ocr", Map.of("status", "disabled"))))
+                .isSameAs(original);
+        assertThat(ModerationController.imageAnalysisText(
+                        original, Map.of("ocr", Map.of("status", "error"))))
+                .isSameAs(original);
+        assertThat(ModerationController.imageAnalysisText(
+                        original,
+                        Map.of("ocr", Map.of("status", "ok", "text", "  \n  "))))
+                .isSameAs(original);
+    }
+
+    @Test
+    void limitsOcrTextWithoutSplittingSurrogatePair() {
+        String original = "x".repeat(19_982);
+
+        String result = ModerationController.imageAnalysisText(
+                original, Map.of("ocr", Map.of("status", "ok", "text", "abc😀tail")));
+
+        assertThat(result).hasSizeLessThanOrEqualTo(20_000);
+        assertThat(result).endsWith("\n\nImage text:\nabc");
+        assertThat(Character.isHighSurrogate(result.charAt(result.length() - 1))).isFalse();
     }
 
     @Test
