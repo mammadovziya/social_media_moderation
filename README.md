@@ -28,6 +28,11 @@ docker compose up --build -d
 docker compose ps
 ```
 
+OCR is disabled by default. To read text from post images, set
+`OCR_ENABLED=true` in `.env` and rebuild once with `docker compose up --build -d`.
+The media image already includes Tesseract and Azerbaijani, English, Russian and
+Turkish language packs. Change `OCR_LANGUAGES` if fewer languages are needed.
+
 Swagger UI: <http://localhost:8080/swagger-ui.html>
 
 ## API
@@ -66,6 +71,7 @@ Accuracy tests use live OpenAI calls and need the Compose stack.
 ## TODO
 
 - Finalize moderation rules and create a multilingual test set.
+- Measure OCR accuracy with real image fixtures before adding direct OCR rules.
 - Add authentication, rate limits and audit logs.
 - Add metrics and alerts.
 - Test every model or prompt update.

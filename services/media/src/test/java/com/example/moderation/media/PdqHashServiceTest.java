@@ -15,7 +15,16 @@ import org.junit.jupiter.api.Test;
 class PdqHashServiceTest {
     private final PdqHashRepository repository = mock(PdqHashRepository.class);
     private final PdqHashService service = new PdqHashService(
-            new MediaProperties(31, 49, 10_485_760, 40_000_000),
+            new MediaProperties(
+                    31,
+                    49,
+                    10_485_760,
+                    40_000_000,
+                    false,
+                    "aze+eng+rus+tur",
+                    10,
+                    20_000,
+                    2),
             repository);
 
     @BeforeEach

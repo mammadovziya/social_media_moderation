@@ -36,3 +36,8 @@ media:
   pdq-quality-threshold: ${PDQ_QUALITY_THRESHOLD:49}
   max-image-bytes: ${MAX_IMAGE_BYTES:10485760}
   max-image-pixels: ${MAX_IMAGE_PIXELS:40000000}
+  ocr-enabled: ${OCR_ENABLED:false}
+  ocr-languages: ${OCR_LANGUAGES:aze+eng+rus+tur}
+  ocr-timeout-seconds: ${OCR_TIMEOUT_SECONDS:10}
+  ocr-max-text-chars: ${OCR_MAX_TEXT_CHARS:20000}
+  ocr-max-concurrent: ${OCR_MAX_CONCURRENT:2}
