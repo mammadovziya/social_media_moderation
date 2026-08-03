@@ -47,7 +47,13 @@ class OpenApiDocumentationTest {
                 .andExpect(jsonPath(
                                 "$.components.schemas.ModerationResponse"
                                         + ".properties.decision.enum",
-                                contains("ALLOW", "BLOCK", "UNKNOWN")));
+                                contains("ALLOW", "BLOCK", "UNKNOWN")))
+                .andExpect(jsonPath(
+                        "$.components.schemas.ApiError.properties", hasKey("error")))
+                .andExpect(jsonPath(
+                        "$.components.schemas.ApiError.properties", hasKey("message")))
+                .andExpect(jsonPath(
+                        "$.components.schemas.ApiError.properties", hasKey("requestId")));
     }
 
     @Test
