@@ -75,6 +75,11 @@ example because an analyzer was unavailable or the result was ambiguous. Posts
 that are clearly not about investment return `BLOCK / NOT_INVESTMENT`; an
 uncertain investment classification returns `UNKNOWN / NOT_INVESTMENT`.
 
+Image responses include bounded diagnostic `ocrText` when OCR extracted text
+from the current upload. The field can contain low-confidence or truncated OCR,
+so it is evidence rather than ground truth. It is not written to application
+logs or the decision audit.
+
 The tracked moderation policy list is `config/moderation_terms.txt`.
 Restart the gateway after changing it.
 

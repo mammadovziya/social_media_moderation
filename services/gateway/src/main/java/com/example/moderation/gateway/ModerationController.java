@@ -222,6 +222,7 @@ public class ModerationController {
                     null,
                     null,
                     null,
+                    null,
                     DecisionPolicy.POLICY_VERSION);
         }
 
@@ -314,6 +315,7 @@ public class ModerationController {
                         ? null
                         : politicsSignal(classification, analysisText),
                 match,
+                image == null ? null : responseOcrText(media),
                 DecisionPolicy.POLICY_VERSION);
     }
 
@@ -344,6 +346,11 @@ public class ModerationController {
             return "";
         }
         return limitWithoutSplittingSurrogate(text, MAX_ANALYSIS_TEXT_CHARS);
+    }
+
+    static String responseOcrText(Map<String, Object> media) {
+        String text = currentOcrText(media);
+        return text.isBlank() ? null : text;
     }
 
     private void persistImageDecisionAudit(
