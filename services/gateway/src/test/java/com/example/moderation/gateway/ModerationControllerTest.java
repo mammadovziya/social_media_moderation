@@ -12,6 +12,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.example.moderation.gateway.api.ContentType;
 import com.example.moderation.gateway.api.Decision;
 import com.example.moderation.gateway.api.ImageMatch;
@@ -52,6 +53,9 @@ class ModerationControllerTest {
         assertThat(result.investment()).isEqualTo(Investment.RELATED);
         assertThat(result.politics()).isEqualTo(Politics.NOT_RELATED);
         assertThat(result.imageMatch()).isNull();
+        assertThat(result.ocrText()).isNull();
+        assertThat(new ObjectMapper().writeValueAsString(result))
+                .doesNotContain("\"ocrText\"");
     }
 
     @Test
@@ -228,6 +232,7 @@ class ModerationControllerTest {
         assertThat(result.decision()).isEqualTo(Decision.BLOCK);
         assertThat(result.violation()).isEqualTo(Violation.NOT_INVESTMENT);
         assertThat(result.imageMatch()).isEqualTo(ImageMatch.NOT_MATCHED);
+        assertThat(result.ocrText()).isEqualTo("Government image caption");
         assertThat(result.politics()).isEqualTo(Politics.CRITICAL_OR_NEGATIVE);
         ArgumentCaptor<ImageDecisionAuditPayload> audit =
                 ArgumentCaptor.forClass(ImageDecisionAuditPayload.class);
@@ -358,6 +363,31 @@ class ModerationControllerTest {
         assertThat(result).hasSizeLessThanOrEqualTo(20_000);
         assertThat(result).endsWith("\n\nImage text:\nabc");
         assertThat(Character.isHighSurrogate(result.charAt(result.length() - 1))).isFalse();
+    }
+
+    @Test
+    void returnsBoundedDiagnosticOcrTextAndOmitsUnavailableText() {
+        String extracted = "x".repeat(19_999) + "😀tail";
+
+        String result = ModerationController.responseOcrText(Map.of(
+                "ocr",
+                Map.of(
+                        "status", "ok",
+                        "text", extracted,
+                        "confidenceAccepted", false,
+                        "truncated", true)));
+
+        assertThat(result).hasSizeLessThanOrEqualTo(20_000);
+        assertThat(Character.isHighSurrogate(result.charAt(result.length() - 1))).isFalse();
+        assertThat(ModerationController.responseOcrText(
+                        Map.of("ocr", Map.of("status", "no_text"))))
+                .isNull();
+        assertThat(ModerationController.responseOcrText(
+                        Map.of("ocr", Map.of("status", "error"))))
+                .isNull();
+        assertThat(ModerationController.responseOcrText(
+                        Map.of("ocr", Map.of("status", "ok", "text", "  \n  "))))
+                .isNull();
     }
 
     @Test

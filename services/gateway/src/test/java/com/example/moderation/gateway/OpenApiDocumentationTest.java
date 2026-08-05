@@ -49,6 +49,10 @@ class OpenApiDocumentationTest {
                                         + ".properties.decision.enum",
                                 contains("ALLOW", "BLOCK", "UNKNOWN")))
                 .andExpect(jsonPath(
+                                "$.components.schemas.ModerationResponse"
+                                        + ".properties.ocrText.maxLength")
+                        .value(20_000))
+                .andExpect(jsonPath(
                         "$.components.schemas.ApiError.properties", hasKey("error")))
                 .andExpect(jsonPath(
                         "$.components.schemas.ApiError.properties", hasKey("message")))
