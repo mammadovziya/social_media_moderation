@@ -1,115 +1,202 @@
-# Social Media Moderation
+# Minimal social-media moderation
 
-Java 21 / Spring Boot service for checking posts, comments and usernames.
-It returns `ALLOW`, `BLOCK` or `UNKNOWN`.
+A single Java 21 / Spring Boot service that combines two deterministic controls
+with three fixed OpenAI models:
 
-## Services
+- exact SHA-256 blocking for explicitly governed image bytes;
+- reviewed, high-precision moderation terms for submitted text;
+- `omni-moderation-latest` and `gpt-4o-mini` as parallel current-content
+  analyzers;
+- `gpt-5.6-terra` as the automated final adjudicator.
 
-- `gateway` - public API and final decision
-- `ai-service` - OpenAI checks
-- `media-service` - image validation, OCR, exact identity and candidate fusion
-- `visual-retrieval` - candidate-only ORB/LSH retrieval with geometric verification
-- `moderation-db` - PostgreSQL for reference metadata, descriptors and append-only audits
+There is no OCR service, perceptual hash, visual-retrieval service, database, or
+human-review queue. A model/configuration failure returns `UNKNOWN`; callers
+must not convert `UNKNOWN` to `ALLOW`.
 
-SHA-256 over the original upload bytes is the only identity signal. PDQ,
-masked PDQ and local-feature matches retrieve bounded reference candidates;
-they never block directly. `TEXT_DEPENDENT` and composition candidates are
-re-evaluated against current OCR/pixels by `gpt-5.6-terra`. A fallible image
-classifier block is also only a proposal until Terra confirms it. Missing or
-inconsistent required evidence returns `UNKNOWN`; there is no human-review
-queue.
+## Why exact SHA-256
 
-References and their derived descriptors are immutable/versioned. Final image
-decisions are written synchronously to an append-only metadata audit without
-raw image, OCR or post text. The audit binds actual and configured models,
-complete moderation/classification/adjudication request profiles, expected and
-observed AI configuration, OCR/decoder runtimes, visual snapshot identity, and
-the canonical decision configuration. Configuration mismatch is preserved for
-diagnosis and produces `UNKNOWN` instead of trusting incompatible evidence.
+SHA-256 answers one narrow question: “Are these the exact same upload bytes as
+a governed blocked reference?” Equality can block directly and uses no model
+API. A changed pixel, metadata edit, recompression, resize, or new text overlay
+changes the digest, so the file does not inherit the old decision. The current
+content then goes through all three AI checks.
 
-Only the gateway is public. Posts accept text, an image or both. Comments and
-usernames accept text only. Posts must be about investment.
+This avoids the false-block failure where a perceptual hash treats two images
+with the same background but different words as the same policy object. It also
+means SHA-256 does not catch transformations; the AI path owns that judgment.
 
-## Run
+## Decision flow
+
+1. Validate request shape and image byte, format, dimension, pixel, and static
+   GIF limits.
+2. Hash the untouched original upload bytes once.
+3. On an exact governed digest match, return `BLOCK` with `confidence: 1.0`
+   without calling a model.
+4. Match reviewed moderation terms against submitted text. A match returns a
+   deterministic `BLOCK` with `confidence: 1.0`, also without a model call.
+5. Otherwise call `omni-moderation-latest` and `gpt-4o-mini` in parallel on the
+   current request.
+6. Give the current content and both validated signals to `gpt-5.6-terra` for a
+   final decision. Invalid, missing, mismatched, or conflicting evidence
+   returns `UNKNOWN`.
+
+The service never adds an upload to the exact-hash catalogue. That file is an
+operator-controlled policy input loaded at startup.
+
+## Run locally
+
+Copy the safe template:
 
 ```bash
 cp .env.example .env
 ```
 
-Set `OPENAI_API_KEY` and `POSTGRES_PASSWORD`. Review the tracked
-`config/moderation_terms.txt` policy list; do not place secrets in it. Each line
-must use `VIOLATION|term` format. Then start:
+Provider access is disabled by default. Exact-hash and local-term requests
+remain testable; a request that needs AI returns `UNKNOWN` unless both
+`OPENAI_ENABLED=true` and `OPENAI_API_KEY` are deliberately configured.
 
 ```bash
 docker compose up --build -d
 docker compose ps
+curl -fsS http://localhost:8080/healthz
 ```
 
-The local Compose profile enables OCR because text-dependent image moderation
-cannot be demonstrated safely without it; standalone media configuration remains
-disabled unless `OCR_ENABLED=true` is set. The media image includes Tesseract and
-Azerbaijani, English, Russian and Turkish language packs. Change `OCR_LANGUAGES`
-if fewer languages are needed, then rebuild with `docker compose up --build -d`.
+Swagger UI is available at <http://localhost:8080/swagger-ui.html>.
 
-Swagger UI: <http://localhost:8080/swagger-ui.html>
+Do not set a funded API key or send AI-path requests until API-spend approval
+has been granted. The repository's automated tests use fakes and do not call a
+provider.
 
-## API
+## Manual curl checks
 
-`POST /v1/moderate` uses `multipart/form-data`.
+The endpoint is `POST /v1/moderate` with `multipart/form-data`.
+
+The production term file is empty by default. To test a deterministic term,
+add a reviewed temporary row such as `CATEGORY|LANGUAGE|YOUR_TEST_PHRASE` to
+`config/moderation_terms.txt`, restart the gateway, and submit that exact phrase.
+The request makes zero provider calls. Do not ship demo phrases as production
+policy.
 
 ```bash
-curl http://localhost:8080/v1/moderate \
-  -F 'contentId=post-1001' \
+curl -sS http://localhost:8080/v1/moderate \
+  -F 'contentId=local-term-test' \
+  -F 'contentType=COMMENT' \
+  -F 'text=YOUR_TEST_PHRASE'
+```
+
+To test exact image identity locally, first calculate the digest:
+
+```bash
+shasum -a 256 /absolute/path/to/image.png
+```
+
+Add the printed lowercase digest to `config/exact_sha256_references.txt` using
+the documented four-field format, restart the service, then submit those same
+bytes:
+
+```bash
+docker compose restart gateway
+curl -sS http://localhost:8080/v1/moderate \
+  -F 'contentId=exact-image-test' \
   -F 'contentType=POST' \
-  -F 'text=This post is about ETF investment.'
+  -F 'image=@/absolute/path/to/image.png;type=image/png'
 ```
 
-`contentType`: `POST`, `COMMENT` or `USERNAME`.
-Images: JPEG, PNG or GIF, only for posts.
-
-Errors include a stable code, a short message and the request ID:
-`{"error":"INVALID_INPUT","message":"contentType is required.","requestId":"..."}`
-
-`UNKNOWN` means the service could not make a reliable final decision, for
-example because an analyzer was unavailable or the result was ambiguous. Posts
-that are clearly not about investment return `BLOCK / NOT_INVESTMENT`; an
-uncertain investment classification returns `UNKNOWN / NOT_INVESTMENT`.
-
-Image responses include bounded diagnostic `ocrText` when OCR extracted text
-from the current upload. The field can contain low-confidence or truncated OCR,
-so it is evidence rather than ground truth. It is not written to application
-logs or the decision audit.
-
-The tracked moderation policy list is `config/moderation_terms.txt`.
-Restart the gateway after changing it.
-
-## Test
+The response has `imageMatch: "EXACT_MATCH"` and uses zero provider calls.
+Editing or re-encoding that image produces `NOT_MATCHED` and therefore needs
+the AI path. After explicit API-spend approval, set `OPENAI_ENABLED=true` and
+`OPENAI_API_KEY` in `.env`, recreate the service, and submit the changed image:
 
 ```bash
-docker run --rm -v "$PWD":/workspace -w /workspace \
-  maven:3.9.9-eclipse-temurin-21 mvn test
-
-VALIDATE_ONLY=1 ./tests/run-accuracy-tests.sh
-
-# Only after explicit approval to spend model API quota:
-CONFIRM_LIVE_API=1 MODERATION_BASE_URL=http://localhost:8080 \
-  ./tests/run-accuracy-tests.sh
+docker compose up -d --force-recreate gateway
+curl -sS http://localhost:8080/v1/moderate \
+  -F 'contentId=changed-image-test' \
+  -F 'contentType=POST' \
+  -F 'image=@/absolute/path/to/changed-image.png;type=image/png'
 ```
 
-Live accuracy tests use OpenAI calls and need the Compose stack. They fail
-closed before the first request unless `CONFIRM_LIVE_API=1` is present.
+`POST` accepts text, an image, or both. `COMMENT` and `USERNAME` require text
+and reject images. Supported image formats are JPEG, PNG, and static GIF.
 
-This workspace's architect-focused corpus, evaluators, and reports live under
-the git-ignored `local-demo/` directory and are intentionally not distributed
-through GitHub. Its live gateway evaluator refuses to send requests unless
-`--confirm-live-api` is supplied after explicit API-spend approval.
+## Response contract
+
+```json
+{
+  "contentId": "changed-image-test",
+  "contentType": "POST",
+  "decision": "BLOCK",
+  "category": "SEXUAL",
+  "confidence": 0.98,
+  "language": "en",
+  "imageMatch": "NOT_MATCHED",
+  "visibleText": "PORN",
+  "imageSha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "policyFingerprint": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+  "policyVersion": "minimal-sha-ai-v1"
+}
+```
+
+- `decision`: `ALLOW`, `BLOCK`, or `UNKNOWN`.
+- `category`: the final policy category; `ALLOW` uses `NONE`, while `UNKNOWN`
+  always uses `UNDETERMINED`.
+- `confidence`: bounded `0.0..1.0`. Deterministic identity/rule matches use
+  `1.0`; AI confidence is evidence supplied by the governed adjudication
+  contract, not a universally calibrated probability. Conclusive AI outcomes
+  below the versioned `0.80` release threshold become `UNKNOWN`.
+- `language`: `az`, `en`, `ru`, `tr`, `mixed`, `other`, or `und`. Deterministic
+  term blocks return `und` because rule metadata is not whole-content language
+  detection.
+- `imageMatch` and `imageSha256`: present only for image requests.
+- `visibleText`: optional text reported from the current image by the AI. It is
+  not local OCR and must not be treated as a complete transcript.
+- `policyFingerprint`: content-derived SHA-256 over policy catalogues, prompts,
+  fixed model IDs, reducer version, and the operator policy version.
+
+Errors use a stable code, message, and request ID.
+
+## Governed configuration
+
+`config/exact_sha256_references.txt`:
+
+```text
+REFERENCE_ID|64_lowercase_hex_sha256|CATEGORY|LANGUAGE
+```
+
+`config/moderation_terms.txt`:
+
+```text
+CATEGORY|LANGUAGE|TERM
+```
+
+Languages use `az`, `en`, `ru`, `tr`, `mixed`, `other`, or `und`. Categories must be a
+blockable response category. Both parsers reject malformed, duplicate, unsafe,
+or oversized input at startup; empty governed files are valid. Changes take
+effect after restart. Keep the
+catalogues reviewed and immutable through the deployment pipeline; never write
+them from the request path.
+
+The only provider models are hard-coded as `omni-moderation-latest`,
+`gpt-4o-mini`, and `gpt-5.6-terra`. Provider requests use `store: false` and
+strict structured outputs where supported. `OPENAI_ENABLED=false` is the
+default spend kill switch, the Compose port binds only to loopback, and a
+bounded concurrency gate prevents unbounded simultaneous model pipelines.
+
+## Offline verification
+
+```bash
+mvn test
+docker compose config --quiet
+```
+
+The tests mock provider HTTP and cover exact-byte identity, changed bytes,
+deterministic short circuits, strict catalogue parsing, image validation,
+model binding, malformed AI output, and fail-closed decisions. No OpenAI call
+is made by these commands.
 
 ## Production boundary
 
-The local implementation is an architecture and release-gate package, not an
-authorization to expose Compose publicly. Before deployment, provide tenant
-identity, service-to-service authentication, rate limits, encrypted retention,
-regional processing policy, observability/SLOs, immutable runtime/package
-pinning, and held-out production-scale retrieval and model calibration. The
-local retrieval gate passes; production release remains NO-GO. See
-`docs/image-moderation-architecture.md` for the current evidence.
+This branch is intentionally small enough for architectural review, but a
+public deployment still needs authenticated tenant identity, rate and spend
+limits, idempotency/result caching, secrets management, regional/privacy rules,
+audit telemetry, SLOs, and held-out multilingual calibration. See
+`docs/image-moderation-architecture.md` for invariants and release gates.

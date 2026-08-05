@@ -1,0 +1,8 @@
+# Governed exact-byte block catalogue (UTF-8).
+# Format: REFERENCE_ID|SHA256|CATEGORY|LANGUAGE
+#
+# SHA-256 is computed over the untouched upload bytes. A resized, recompressed,
+# or otherwise changed file does not match and must be judged by the AI path.
+# Never add observed uploads automatically. Catalogue updates require a reviewed
+# policy change and a service restart.
+# An empty catalogue is valid. Add only reviewed image-byte references.

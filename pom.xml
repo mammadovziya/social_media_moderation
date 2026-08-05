@@ -17,12 +17,10 @@
     <packaging>pom</packaging>
 
     <name>social-media-moderation</name>
-    <description>VM-ready Java moderation microservices demo</description>
+    <description>Minimal SHA-256 and AI social-media moderation service</description>
 
     <modules>
         <module>services/gateway</module>
-        <module>services/media</module>
-        <module>services/ai</module>
     </modules>
 
     <properties>
