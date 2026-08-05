@@ -1,40 +1,8 @@
-# Private moderation terms. Format: VIOLATION|term (UTF-8)
-# Terms match full words or phrases.
-# Add only reviewed terms. Restart gateway after changes.
+# Governed deterministic moderation terms (UTF-8).
+# Format: CATEGORY|LANGUAGE|TERM
+#
+# Only add high-precision terms that are safe to block without context. Matching
+# is Unicode-normalized and uses word/phrase boundaries. Contextual words belong
+# in the AI policy, not this file. Changes require review and a service restart.
 
-# Neutral markers used by the local accuracy suite
-VULGAR|reject alpha
-SEXUAL|reject beta
-
-# Reserved platform identity terms
-IMPERSONATION|admin
-IMPERSONATION|administrator
-IMPERSONATION|moderator
-IMPERSONATION|админ
-IMPERSONATION|администратор
-IMPERSONATION|модератор
-IMPERSONATION|inzibatçı
-IMPERSONATION|yönetici
-IMPERSONATION|abb
-IMPERSONATION|abbinvest
-IMPERSONATION|abbnak
-
-# Azerbaijani vulgar phrases
-# VULGAR|`word`
-# SEXUAL TERMS: ENGLISH
-
-# Sexual terms: Azerbaijani
-# SEXUAL|`word`
-
-# Sexual terms: Turkish and ASCII forms
-
-# Sexual terms: Russian
-
-# Vulgar terms: English
-
-# Vulgar terms: Azerbaijani
-# VULGAR|`word`
-
-# Vulgar terms: Turkish
-
-# Vulgar terms: Russion
+# An empty term set is valid. Add only reviewed, high-precision production rules.

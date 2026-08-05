@@ -33,22 +33,18 @@ springdoc:
     tags-sorter: alpha
 
 moderation:
-  ai-service-url: ${AI_SERVICE_URL:http://ai-service:8000}
-  media-service-url: ${MEDIA_SERVICE_URL:http://media-service:8000}
   max-image-bytes: ${MAX_IMAGE_BYTES:8388608}
-  max-image-request-bytes: ${MAX_IMAGE_REQUEST_BYTES:9437184}
-  upstream-timeout-seconds: ${UPSTREAM_TIMEOUT_SECONDS:45}
-  unknown-threshold: ${MODERATION_UNKNOWN_THRESHOLD:0.70}
-  expected-moderation-model: ${OPENAI_MODERATION_MODEL:omni-moderation-latest}
-  expected-moderation-profile-sha256: ${OPENAI_MODERATION_PROFILE_SHA256:0e9e994cef268f7a1437292c34b9b53a932ba64fc1c5e49f8eb1a9336a73f0fa}
-  expected-classification-model: ${OPENAI_CUSTOM_MODEL:gpt-4o-mini}
-  expected-classification-prompt-bundle-sha256: ${OPENAI_CLASSIFICATION_PROMPT_BUNDLE_SHA256:7b0ea4271fe59577592561ce2e2b177df7427d5419c6eaca1f53a10452d097cd}
-  expected-classification-profile-sha256: ${OPENAI_CLASSIFICATION_PROFILE_SHA256:67699dacd5fd8919367dcaacf7687404f820d638dbfc9efbf74a0b4c04c68fc8}
-  expected-adjudication-model: ${OPENAI_ADJUDICATION_MODEL:gpt-5.6-terra}
-  expected-adjudication-reasoning-effort: ${OPENAI_ADJUDICATION_REASONING_EFFORT:medium}
-  expected-adjudication-prompt-version: image-adjudication-v2
-  expected-adjudication-prompt-sha256: ${OPENAI_ADJUDICATION_PROMPT_SHA256:b066ec4efc4af83b6a477f3ca496ccddc716bfe84ffd4a6f5ff523a5468f6f29}
-  expected-adjudication-profile-sha256: ${OPENAI_ADJUDICATION_PROFILE_SHA256:06fcc036b886a71c2fd2ceae32bbbade6fa8cd0fd964cd29868073c0c6a91f81}
-  expected-open-ai-timeout-seconds: ${OPENAI_TIMEOUT_SECONDS:30}
+  max-image-width: ${MAX_IMAGE_WIDTH:8192}
+  max-image-height: ${MAX_IMAGE_HEIGHT:8192}
+  max-image-pixels: ${MAX_IMAGE_PIXELS:40000000}
+  exact-sha256-references-path: ${EXACT_SHA256_REFERENCES_PATH:file:./config/exact_sha256_references.txt}
   moderation-terms-path: ${MODERATION_TERMS_PATH:file:./config/moderation_terms.txt}
-  political-words-path: ${POLITICAL_WORDS_PATH:classpath:policy/political_words.txt}
+  policy-version: ${MODERATION_POLICY_VERSION:minimal-sha-ai-v1}
+
+openai:
+  enabled: ${OPENAI_ENABLED:false}
+  api-key: ${OPENAI_API_KEY:}
+  base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
+  timeout-seconds: ${OPENAI_TIMEOUT_SECONDS:60}
+  terra-reasoning-effort: ${OPENAI_TERRA_REASONING_EFFORT:medium}
+  max-concurrent-requests: ${OPENAI_MAX_CONCURRENT_REQUESTS:4}

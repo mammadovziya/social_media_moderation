@@ -4,7 +4,8 @@
 **/target
 **/.DS_Store
 **/*.swp
-.env
-config/moderation_terms.txt
+.env*
+!.env.example
+config/*.txt
 local-demo/
 .venv-orb/
