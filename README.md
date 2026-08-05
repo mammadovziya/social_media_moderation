@@ -7,11 +7,25 @@ It returns `ALLOW`, `BLOCK` or `UNKNOWN`.
 
 - `gateway` - public API and final decision
 - `ai-service` - OpenAI checks
-- `media-service` - image checks, OCR and exact PDQ matching
-- `moderation-db` - PostgreSQL for PDQ hashes
+- `media-service` - image validation, OCR, exact identity and candidate fusion
+- `visual-retrieval` - candidate-only ORB/LSH retrieval with geometric verification
+- `moderation-db` - PostgreSQL for reference metadata, descriptors and append-only audits
 
-Blocked PDQ hashes use an exact in-memory Hamming index. The media service
-rebuilds it only when a transactional database revision changes.
+SHA-256 over the original upload bytes is the only identity signal. PDQ,
+masked PDQ and local-feature matches retrieve bounded reference candidates;
+they never block directly. `TEXT_DEPENDENT` and composition candidates are
+re-evaluated against current OCR/pixels by `gpt-5.6-terra`. A fallible image
+classifier block is also only a proposal until Terra confirms it. Missing or
+inconsistent required evidence returns `UNKNOWN`; there is no human-review
+queue.
+
+References and their derived descriptors are immutable/versioned. Final image
+decisions are written synchronously to an append-only metadata audit without
+raw image, OCR or post text. The audit binds actual and configured models,
+complete moderation/classification/adjudication request profiles, expected and
+observed AI configuration, OCR/decoder runtimes, visual snapshot identity, and
+the canonical decision configuration. Configuration mismatch is preserved for
+diagnosis and produces `UNKNOWN` instead of trusting incompatible evidence.
 
 Only the gateway is public. Posts accept text, an image or both. Comments and
 usernames accept text only. Posts must be about investment.
@@ -22,19 +36,20 @@ usernames accept text only. Posts must be about investment.
 cp .env.example .env
 ```
 
-Set `OPENAI_API_KEY` and `POSTGRES_PASSWORD`. Create
-`config/moderation_terms.txt` locally; this private file is ignored by Git. Each
-line must use `VIOLATION|term` format. Then start:
+Set `OPENAI_API_KEY` and `POSTGRES_PASSWORD`. Review the tracked
+`config/moderation_terms.txt` policy list; do not place secrets in it. Each line
+must use `VIOLATION|term` format. Then start:
 
 ```bash
 docker compose up --build -d
 docker compose ps
 ```
 
-OCR is disabled by default. To read text from post images, set
-`OCR_ENABLED=true` in `.env` and rebuild once with `docker compose up --build -d`.
-The media image already includes Tesseract and Azerbaijani, English, Russian and
-Turkish language packs. Change `OCR_LANGUAGES` if fewer languages are needed.
+The local Compose profile enables OCR because text-dependent image moderation
+cannot be demonstrated safely without it; standalone media configuration remains
+disabled unless `OCR_ENABLED=true` is set. The media image includes Tesseract and
+Azerbaijani, English, Russian and Turkish language packs. Change `OCR_LANGUAGES`
+if fewer languages are needed, then rebuild with `docker compose up --build -d`.
 
 Swagger UI: <http://localhost:8080/swagger-ui.html>
 
@@ -60,7 +75,7 @@ example because an analyzer was unavailable or the result was ambiguous. Posts
 that are clearly not about investment return `BLOCK / NOT_INVESTMENT`; an
 uncertain investment classification returns `UNKNOWN / NOT_INVESTMENT`.
 
-The private moderation list is `config/moderation_terms.txt`.
+The tracked moderation policy list is `config/moderation_terms.txt`.
 Restart the gateway after changing it.
 
 ## Test
@@ -69,17 +84,27 @@ Restart the gateway after changing it.
 docker run --rm -v "$PWD":/workspace -w /workspace \
   maven:3.9.9-eclipse-temurin-21 mvn test
 
-MODERATION_BASE_URL=http://localhost:8080 ./tests/run-accuracy-tests.sh
+VALIDATE_ONLY=1 ./tests/run-accuracy-tests.sh
+
+# Only after explicit approval to spend model API quota:
+CONFIRM_LIVE_API=1 MODERATION_BASE_URL=http://localhost:8080 \
+  ./tests/run-accuracy-tests.sh
 ```
 
-Accuracy tests use live OpenAI calls and need the Compose stack.
+Live accuracy tests use OpenAI calls and need the Compose stack. They fail
+closed before the first request unless `CONFIRM_LIVE_API=1` is present.
 
-## TODO
+This workspace's architect-focused corpus, evaluators, and reports live under
+the git-ignored `local-demo/` directory and are intentionally not distributed
+through GitHub. Its live gateway evaluator refuses to send requests unless
+`--confirm-live-api` is supplied after explicit API-spend approval.
 
-- finalize moderation rules and create a multilingual test set.
-- support rotated images and multiple image hashes.
-- cache, async moderation
-- add logs, tracing and metrics.
-- measure OCR accuracy with real image fixtures before adding direct OCR rules.
-- add authentication, rate limits and audit logs.
-- test every model or prompt update.
+## Production boundary
+
+The local implementation is an architecture and release-gate package, not an
+authorization to expose Compose publicly. Before deployment, provide tenant
+identity, service-to-service authentication, rate limits, encrypted retention,
+regional processing policy, observability/SLOs, immutable runtime/package
+pinning, and held-out production-scale retrieval and model calibration. The
+local retrieval gate passes; production release remains NO-GO. See
+`docs/image-moderation-architecture.md` for the current evidence.

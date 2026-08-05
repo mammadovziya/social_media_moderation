@@ -10,16 +10,344 @@ import org.junit.jupiter.api.Test;
 
 class DecisionPolicyTest {
     @Test
-    void knownHashBlocks() {
+    void perceptualCandidateNeverBlocksWithoutCurrentEvidence() {
         DecisionPolicy.Result result = DecisionPolicy.decide(
-                Map.of("pdq", Map.of("matched", true)),
-                Map.of(),
+                Map.of(
+                        "status", "ok",
+                        "ocr", Map.of(
+                                "status", "ok",
+                                "text", "benign replacement",
+                                "confidenceAccepted", true,
+                                "truncated", false),
+                        "pdq", Map.of(
+                                "candidateFound", true,
+                                "candidates", java.util.List.of(Map.of(
+                                        "referenceId", "reference-1",
+                                        "decisionBasis", "TEXT_DEPENDENT",
+                                        "violationCategory", "hate")))),
+                Map.of(
+                        "moderation", Map.of(
+                                "status", "ok",
+                                "flagged", false,
+                                "categoryScores", Map.of()),
+                        "classification", Map.of(
+                                "status", "ok",
+                                "action", "allow",
+                                "category", "none",
+                                "investment", "related"),
+                        "adjudication", Map.of(
+                                "status", "ok",
+                                "adjudicationMode", "candidate_recheck",
+                                "action", "allow",
+                                "category", "none",
+                                "candidateDisposition", "rejected",
+                                "evidenceBasis", "current_text",
+                                "reasonCode", "current_content_safe",
+                                "candidateIds", java.util.List.of("reference-1"))),
                 ContentType.POST,
                 Violation.NONE,
                 0.70);
         assertThat(result)
                 .isEqualTo(new DecisionPolicy.Result(
+                        Decision.ALLOW, Violation.NONE));
+    }
+
+    @Test
+    void authoritativeExactByteIdentityBlocks() {
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                Map.of("pdq", Map.of("authoritativeExactMatch", Map.of(
+                        "referenceId", "exact-1",
+                        "decisionBasis", "EXACT_ASSET",
+                        "status", "ACTIVE",
+                        "policyVersion", "image-policy-v1",
+                        "exactSha256", true))),
+                Map.of(),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result)
+                .isEqualTo(new DecisionPolicy.Result(
                         Decision.BLOCK, Violation.KNOWN_IMAGE));
+    }
+
+    @Test
+    void exactReferenceFromAnIncompatiblePolicyDoesNotDirectlyBlock() {
+        Map<String, Object> media = Map.of(
+                "status", "ok",
+                "ocr", Map.of("status", "disabled"),
+                "pdq", Map.of("authoritativeExactMatch", Map.of(
+                        "referenceId", "old-exact",
+                        "decisionBasis", "EXACT_ASSET",
+                        "status", "ACTIVE",
+                        "policyVersion", "old-policy",
+                        "exactSha256", true)));
+
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                media,
+                candidateAi("allow", "none", "rejected", "current_visual"),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(DecisionPolicy.hasAuthoritativeExactMatch(media)).isFalse();
+        assertThat(DecisionPolicy.requiresAdjudication(media)).isTrue();
+        assertThat(result)
+                .isEqualTo(new DecisionPolicy.Result(
+                        Decision.UNKNOWN, Violation.ANALYZER_ERROR));
+    }
+
+    @Test
+    void candidateWithUnavailableAdjudicatorReturnsUnknown() {
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                Map.of(
+                        "status", "ok",
+                        "ocr", Map.of(
+                                "status", "ok",
+                                "confidenceAccepted", true,
+                                "truncated", false),
+                        "pdq", Map.of("candidateFound", true)),
+                Map.of(
+                        "moderation", Map.of(
+                                "status", "ok", "flagged", false, "categoryScores", Map.of()),
+                        "classification", Map.of(
+                                "status", "ok", "action", "allow", "category", "none",
+                                "investment", "related"),
+                        "adjudication", Map.of("status", "error")),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result)
+                .isEqualTo(new DecisionPolicy.Result(
+                        Decision.UNKNOWN, Violation.EVIDENCE_UNAVAILABLE));
+    }
+
+    @Test
+    void nonInvestmentPostBlocksBeforeCandidateAdjudicationFailure() {
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                textCandidateMedia(),
+                Map.of(
+                        "moderation", Map.of(
+                                "status", "ok",
+                                "flagged", false,
+                                "categoryScores", Map.of()),
+                        "classification", Map.of(
+                                "status", "ok",
+                                "action", "allow",
+                                "category", "none",
+                                "investment", "not_related"),
+                        "adjudication", Map.of("status", "error")),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                Decision.BLOCK, Violation.NOT_INVESTMENT));
+    }
+
+    @Test
+    void textDependentCandidateWithUnavailableOcrReturnsUnknownBeforeTerraAllow() {
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                Map.of(
+                        "status", "ok",
+                        "ocr", Map.of("status", "disabled"),
+                        "pdq", Map.of(
+                                "candidateFound", true,
+                                "candidates", java.util.List.of(Map.of(
+                                        "referenceId", "reference-1",
+                                        "decisionBasis", "TEXT_DEPENDENT")))),
+                candidateAi("allow", "none", "rejected", "current_text"),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result)
+                .isEqualTo(new DecisionPolicy.Result(
+                        Decision.UNKNOWN, Violation.EVIDENCE_UNAVAILABLE));
+    }
+
+    @Test
+    void changedCurrentTextCanBlockEvenWhenBackgroundIsOnlySimilar() {
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                Map.of(
+                        "status", "ok",
+                        "ocr", Map.of(
+                                "status", "ok",
+                                "confidenceAccepted", true,
+                                "truncated", false),
+                        "pdq", Map.of(
+                                "candidateFound", true,
+                                "candidates", java.util.List.of(Map.of(
+                                        "referenceId", "reference-1",
+                                        "decisionBasis", "TEXT_DEPENDENT")))),
+                candidateAi("block", "hate", "confirmed", "current_text"),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result)
+                .isEqualTo(new DecisionPolicy.Result(Decision.BLOCK, Violation.HATE));
+    }
+
+    @Test
+    void terraCanResolvePrimaryUncertaintyForACandidate() {
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(
+                candidateAi("allow", "none", "rejected", "current_text"));
+        ai.put("classification", Map.of(
+                "status", "ok",
+                "action", "unknown",
+                "category", "other",
+                "investment", "related"));
+
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                Map.of(
+                        "status", "ok",
+                        "ocr", Map.of(
+                                "status", "ok",
+                                "confidenceAccepted", true,
+                                "truncated", false),
+                        "pdq", Map.of(
+                                "candidateFound", true,
+                                "candidates", java.util.List.of(Map.of(
+                                        "referenceId", "reference-1",
+                                        "decisionBasis", "TEXT_DEPENDENT")))),
+                ai,
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result)
+                .isEqualTo(new DecisionPolicy.Result(Decision.ALLOW, Violation.NONE));
+    }
+
+    @Test
+    void terraDecisionWithoutARetrievedCandidateIdReturnsUnknown() {
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(
+                candidateAi("allow", "none", "rejected", "current_text"));
+        Map<String, Object> adjudication = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(ai, "adjudication"));
+        adjudication.put("candidateIds", java.util.List.of());
+        ai.put("adjudication", adjudication);
+
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                textCandidateMedia(),
+                ai,
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                Decision.UNKNOWN, Violation.ANALYZER_ERROR));
+    }
+
+    @Test
+    void terraDecisionThatOmitsARetrievedCandidateReturnsUnknown() {
+        Map<String, Object> media = new java.util.LinkedHashMap<>(textCandidateMedia());
+        media.put("pdq", Map.of(
+                "candidateFound", true,
+                "candidates", java.util.List.of(
+                        Map.of(
+                                "referenceId", "reference-1",
+                                "decisionBasis", "TEXT_DEPENDENT"),
+                        Map.of(
+                                "referenceId", "reference-2",
+                                "decisionBasis", "TEXT_DEPENDENT"))));
+
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                media,
+                candidateAi("allow", "none", "rejected", "current_text"),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                Decision.UNKNOWN, Violation.ANALYZER_ERROR));
+    }
+
+    @Test
+    void terraAllowCannotOverrideACurrentModerationBlock() {
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(
+                candidateAi("allow", "none", "rejected", "current_text"));
+        ai.put("moderation", Map.of(
+                "status", "ok",
+                "flagged", true,
+                "categories", Map.of("hate", true),
+                "categoryScores", Map.of("hate", 0.99)));
+
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                textCandidateMedia(),
+                ai,
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result)
+                .isEqualTo(new DecisionPolicy.Result(Decision.BLOCK, Violation.HATE));
+    }
+
+    @Test
+    void terraCanRejectANondeterministicImageClassifierBlockWithoutCandidates() {
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                Map.of(
+                        "status", "ok",
+                        "ocr", Map.of(
+                                "status", "ok",
+                                "confidenceAccepted", true,
+                                "truncated", false),
+                        "pdq", Map.of("candidateFound", false, "candidates", java.util.List.of())),
+                classifierBlockAi(Map.of(
+                        "status", "ok",
+                        "adjudicationMode", "classifier_block_recheck",
+                        "action", "allow",
+                        "category", "none",
+                        "candidateDisposition", "rejected",
+                        "evidenceBasis", "current_visual",
+                        "reasonCode", "current_content_safe",
+                        "candidateIds", java.util.List.of())),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result)
+                .isEqualTo(new DecisionPolicy.Result(Decision.ALLOW, Violation.NONE));
+    }
+
+    @Test
+    void unavailableTerraMakesAProposedImageBlockUnknown() {
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                Map.of(
+                        "status", "ok",
+                        "ocr", Map.of("status", "error"),
+                        "pdq", Map.of("candidateFound", false, "candidates", java.util.List.of())),
+                classifierBlockAi(Map.of("status", "error")),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                Decision.UNKNOWN, Violation.EVIDENCE_UNAVAILABLE));
+    }
+
+    @Test
+    void allRequiredOcrFailureModesReturnUnknown() {
+        for (Map<String, Object> ocr : java.util.List.<Map<String, Object>>of(
+                Map.of("status", "busy"),
+                Map.of("status", "error"),
+                Map.of("status", "ok", "confidenceAccepted", false, "truncated", false),
+                Map.of("status", "ok", "confidenceAccepted", true, "truncated", true))) {
+            Map<String, Object> media = new java.util.LinkedHashMap<>(textCandidateMedia());
+            media.put("ocr", ocr);
+
+            assertThat(DecisionPolicy.decide(
+                            media,
+                            candidateAi("allow", "none", "rejected", "current_text"),
+                            ContentType.POST,
+                            Violation.NONE,
+                            0.70))
+                    .isEqualTo(new DecisionPolicy.Result(
+                            Decision.UNKNOWN, Violation.EVIDENCE_UNAVAILABLE));
+        }
     }
 
     @Test
@@ -151,7 +479,7 @@ class DecisionPolicyTest {
     }
 
     @Test
-    void nonInvestmentPostBlocksEvenWhenCustomClassifierIsUncertain() {
+    void terminalNonInvestmentRuleDoesNotRequireSafetyAdjudication() {
         DecisionPolicy.Result result = DecisionPolicy.decide(
                 null,
                 postAi("unknown", "threat", "not_related"),
@@ -165,7 +493,7 @@ class DecisionPolicyTest {
     }
 
     @Test
-    void nonInvestmentPostBlocksEvenWhenMediaAnalyzerIsUnavailable() {
+    void unavailableRequiredMediaEvidenceIsNotHiddenByTheNonInvestmentRule() {
         DecisionPolicy.Result result = DecisionPolicy.decide(
                 Map.of("status", "error"),
                 postAi("allow", "none", "not_related"),
@@ -175,7 +503,7 @@ class DecisionPolicyTest {
 
         assertThat(result)
                 .isEqualTo(new DecisionPolicy.Result(
-                        Decision.BLOCK, Violation.NOT_INVESTMENT));
+                        Decision.UNKNOWN, Violation.ANALYZER_ERROR));
     }
 
     @Test
@@ -246,6 +574,54 @@ class DecisionPolicyTest {
                         "status", "ok",
                         "action", action,
                         "category", category));
+    }
+
+    private static Map<String, Object> candidateAi(
+            String action, String category, String disposition, String evidenceBasis) {
+        return Map.of(
+                "moderation", Map.of(
+                        "status", "ok", "flagged", false, "categoryScores", Map.of()),
+                "classification", Map.of(
+                        "status", "ok", "action", "allow", "category", "none",
+                        "investment", "related"),
+                "adjudication", Map.of(
+                        "status", "ok",
+                        "adjudicationMode", "candidate_recheck",
+                        "action", action,
+                        "category", category,
+                        "candidateDisposition", disposition,
+                        "evidenceBasis", evidenceBasis,
+                        "reasonCode", "block".equals(action)
+                                ? "current_policy_violation"
+                                : "current_content_safe",
+                        "candidateIds", java.util.List.of("reference-1")));
+    }
+
+    private static Map<String, Object> classifierBlockAi(
+            Map<String, Object> adjudication) {
+        return Map.of(
+                "moderation", Map.of(
+                        "status", "ok", "flagged", false, "categoryScores", Map.of()),
+                "classification", Map.of(
+                        "status", "ok",
+                        "action", "block",
+                        "category", "spam_scam",
+                        "investment", "related"),
+                "adjudication", adjudication);
+    }
+
+    private static Map<String, Object> textCandidateMedia() {
+        return Map.of(
+                "status", "ok",
+                "ocr", Map.of(
+                        "status", "ok",
+                        "confidenceAccepted", true,
+                        "truncated", false),
+                "pdq", Map.of(
+                        "candidateFound", true,
+                        "candidates", java.util.List.of(Map.of(
+                                "referenceId", "reference-1",
+                                "decisionBasis", "TEXT_DEPENDENT"))));
     }
 
     private static Map<String, Object> postAi(String investment) {

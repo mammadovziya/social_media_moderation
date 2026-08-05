@@ -5,6 +5,7 @@ import com.example.moderation.media.ImageDecoder.InvalidImageException;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import java.io.IOException;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -24,18 +25,21 @@ public class MediaController {
     private final PdqHashService pdq;
     private final PdqHashRepository repository;
     private final OcrService ocr;
+    private final VisualReferenceIndex visualRetrieval;
 
     public MediaController(
             MediaProperties properties,
             ImageDecoder decoder,
             PdqHashService pdq,
             PdqHashRepository repository,
-            OcrService ocr) {
+            OcrService ocr,
+            VisualReferenceIndex visualRetrieval) {
         this.properties = properties;
         this.decoder = decoder;
         this.pdq = pdq;
         this.repository = repository;
         this.ocr = ocr;
+        this.visualRetrieval = visualRetrieval;
     }
 
     @GetMapping("/healthz")
@@ -49,11 +53,17 @@ public class MediaController {
             throw new ResponseStatusException(
                     HttpStatus.SERVICE_UNAVAILABLE, "OCR is not ready");
         }
+        if (!visualRetrieval.ready()) {
+            throw new ResponseStatusException(
+                    HttpStatus.SERVICE_UNAVAILABLE,
+                    "visual retrieval is not ready");
+        }
         return Map.of(
                 "status", "ready",
                 "hashAlgorithm", "pdq-256",
                 "observedHashCount", repository.observedHashCount(),
-                "ocr", Map.of("status", ocr.readinessStatus()));
+                "ocr", Map.of("status", ocr.readinessStatus()),
+                "visualRetrieval", Map.of("status", "ready"));
     }
 
     @PostMapping(
@@ -75,18 +85,48 @@ public class MediaController {
         try {
             DecodedImage decoded = decoder.decode(bytes);
             OcrResult ocrResult = ocr.analyze(decoded.image());
+            PdqHashService.Analysis evidence =
+                    pdq.analyze(
+                            decoded.image(), bytes, contentId, ocrResult, decoded.format());
             return Map.of(
                     "status", "ok",
-                    "pdq", pdq.analyze(decoded.image(), contentId),
-                    "ocr", ocrResult.asMap(),
+                    "identity", evidence.identity(),
+                    "pdq", evidence.pdq(),
+                    "ocr", ocrEvidence(ocrResult),
                     "image",
                             Map.of(
                                     "width", decoded.image().getWidth(),
                                     "height", decoded.image().getHeight(),
-                                    "format", decoded.format()));
+                                    "format", decoded.format(),
+                                    "decoderProfileVersion",
+                                    decoded.decoderProfileVersion(),
+                                    "maxImageBytes",
+                                    properties.maxImageBytes(),
+                                    "maxImageRequestBytes",
+                                    properties.maxImageRequestBytes(),
+                                    "maxImagePixels",
+                                    properties.maxImagePixels()));
         } catch (InvalidImageException exception) {
             throw new ResponseStatusException(
                     HttpStatus.UNPROCESSABLE_ENTITY, exception.getMessage(), exception);
+        } catch (VisualRetrievalUnavailableException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.SERVICE_UNAVAILABLE,
+                    "visual retrieval is unavailable",
+                    exception);
         }
+    }
+
+    private Map<String, Object> ocrEvidence(OcrResult result) {
+        Map<String, Object> evidence = new LinkedHashMap<>(result.asMap());
+        evidence.put("profileVersion", "ocr-policy-v1");
+        evidence.put("enabled", properties.ocrEnabled());
+        evidence.put("languages", properties.ocrLanguages());
+        evidence.put("minConfidenceThreshold", properties.ocrMinConfidence());
+        evidence.put("maxTextChars", properties.ocrMaxTextChars());
+        evidence.put("maxSpans", properties.ocrMaxSpans());
+        evidence.put("timeoutSeconds", properties.ocrTimeoutSeconds());
+        evidence.put("maxConcurrent", properties.ocrMaxConcurrent());
+        return Map.copyOf(evidence);
     }
 }

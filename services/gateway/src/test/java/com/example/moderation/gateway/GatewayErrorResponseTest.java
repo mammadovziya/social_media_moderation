@@ -73,6 +73,27 @@ class GatewayErrorResponseTest {
     }
 
     @Test
+    void unsafeIdentifiersAreRejectedAndNeverReflected() throws Exception {
+        String unsafeRequestId = "request forged";
+        var result = mockMvc.perform(multipart("/v1/moderate")
+                        .param("contentId", "post\nforged")
+                        .param("contentType", "POST")
+                        .param("text", "ETF investment")
+                        .header("X-Request-ID", unsafeRequestId))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("INVALID_INPUT"))
+                .andReturn();
+
+        ApiError error = objectMapper.readValue(
+                result.getResponse().getContentAsByteArray(), ApiError.class);
+        String responseRequestId = result.getResponse().getHeader("X-Request-ID");
+        assertThat(responseRequestId)
+                .isNotEqualTo(unsafeRequestId)
+                .matches(RequestIdentifiers.SAFE_PATTERN)
+                .isEqualTo(error.requestId());
+    }
+
+    @Test
     void imageErrorsUseCorrectStatusAndMessage() throws Exception {
         MockMultipartFile largeImage = new MockMultipartFile(
                 "image", "large.png", "image/png", new byte[] {1, 2, 3, 4});

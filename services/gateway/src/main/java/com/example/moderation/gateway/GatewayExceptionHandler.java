@@ -6,7 +6,6 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.ConstraintViolationException;
 import java.util.Objects;
-import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.MessageSourceResolvable;
@@ -40,11 +39,11 @@ public class GatewayExceptionHandler {
 
         if (status.is5xxServerError()) {
             log.error(
-                    "gateway request failed requestId={} status={} error={}",
+                    "gateway request failed requestId={} status={} error={} failureType={}",
                     requestId,
                     status.value(),
                     code,
-                    exception);
+                    exception.getClass().getSimpleName());
         } else {
             log.warn(
                     "gateway request rejected requestId={} status={} error={}",
@@ -163,12 +162,10 @@ public class GatewayExceptionHandler {
     private static String requestId(
             HttpServletRequest request, HttpServletResponse response) {
         String requestId = response.getHeader(REQUEST_ID_HEADER);
-        if (requestId == null || requestId.isBlank()) {
+        if (requestId == null || !requestId.matches(RequestIdentifiers.SAFE_PATTERN)) {
             requestId = request.getHeader(REQUEST_ID_HEADER);
         }
-        if (requestId == null || requestId.isBlank()) {
-            requestId = UUID.randomUUID().toString();
-        }
+        requestId = RequestIdentifiers.resolve(requestId);
         response.setHeader(REQUEST_ID_HEADER, requestId);
         return requestId;
     }

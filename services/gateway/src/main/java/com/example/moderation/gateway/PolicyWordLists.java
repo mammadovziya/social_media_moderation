@@ -4,13 +4,17 @@ import com.example.moderation.gateway.api.Violation;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.HexFormat;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,13 +34,15 @@ public final class PolicyWordLists {
     private static final String WORD_SEPARATOR = "[\\p{Z}\\p{P}_]+";
 
     private final List<BannedTerm> bannedTerms;
-    private final List<Pattern> politicalTerms;
+    private final List<PoliticalTerm> politicalTerms;
+    private final String policyDigest;
 
     public PolicyWordLists(ResourceLoader resourceLoader, ModerationProperties properties) {
         this.bannedTerms =
                 loadBannedTerms(resourceLoader.getResource(properties.moderationTermsPath()));
         this.politicalTerms =
                 loadPoliticalTerms(resourceLoader.getResource(properties.politicalWordsPath()));
+        this.policyDigest = policyDigest(bannedTerms, politicalTerms);
         log.info(
                 "loaded deterministic policy dictionaries bannedTerms={} politicalTerms={}",
                 bannedTerms.size(),
@@ -72,7 +78,12 @@ public final class PolicyWordLists {
             return false;
         }
         String normalized = normalize(text);
-        return politicalTerms.stream().anyMatch(pattern -> pattern.matcher(normalized).find());
+        return politicalTerms.stream()
+                .anyMatch(term -> term.pattern().matcher(normalized).find());
+    }
+
+    String policyDigest() {
+        return policyDigest;
     }
 
     private static List<BannedTerm> loadBannedTerms(Resource resource) {
@@ -105,7 +116,7 @@ public final class PolicyWordLists {
             if (!seen.add(uniqueKey)) {
                 throw invalidLine(resource, index, "duplicate term for violation");
             }
-            result.add(new BannedTerm(violation, termPattern(term)));
+            result.add(new BannedTerm(violation, term, termPattern(term)));
         }
         if (result.isEmpty()) {
             throw new IllegalStateException("banned words dictionary is empty: " + resource);
@@ -113,9 +124,9 @@ public final class PolicyWordLists {
         return List.copyOf(result);
     }
 
-    private static List<Pattern> loadPoliticalTerms(Resource resource) {
+    private static List<PoliticalTerm> loadPoliticalTerms(Resource resource) {
         List<String> lines = readRequiredLines(resource, "political words");
-        List<Pattern> result = new ArrayList<>();
+        List<PoliticalTerm> result = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
         for (int index = 0; index < lines.size(); index++) {
             String line = policyLine(lines.get(index));
@@ -126,12 +137,38 @@ public final class PolicyWordLists {
             if (!seen.add(term)) {
                 continue;
             }
-            result.add(termPattern(term));
+            result.add(new PoliticalTerm(term, termPattern(term)));
         }
         if (result.isEmpty()) {
             throw new IllegalStateException("political words dictionary is empty: " + resource);
         }
         return List.copyOf(result);
+    }
+
+    private static String policyDigest(
+            List<BannedTerm> bannedTerms, List<PoliticalTerm> politicalTerms) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            updateDigest(digest, "policy-word-lists/v1");
+            for (BannedTerm term : bannedTerms) {
+                updateDigest(digest, "banned");
+                updateDigest(digest, term.violation().name());
+                updateDigest(digest, term.term());
+            }
+            for (PoliticalTerm term : politicalTerms) {
+                updateDigest(digest, "political");
+                updateDigest(digest, term.term());
+            }
+            return HexFormat.of().formatHex(digest.digest());
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is not available", exception);
+        }
+    }
+
+    private static void updateDigest(MessageDigest digest, String value) {
+        byte[] encoded = value.getBytes(StandardCharsets.UTF_8);
+        digest.update(ByteBuffer.allocate(Integer.BYTES).putInt(encoded.length).array());
+        digest.update(encoded);
     }
 
     private static List<String> readRequiredLines(Resource resource, String label) {
@@ -249,5 +286,7 @@ public final class PolicyWordLists {
                         + reason);
     }
 
-    private record BannedTerm(Violation violation, Pattern pattern) {}
+    private record BannedTerm(Violation violation, String term, Pattern pattern) {}
+
+    private record PoliticalTerm(String term, Pattern pattern) {}
 }

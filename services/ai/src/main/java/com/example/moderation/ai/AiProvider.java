@@ -22,4 +22,13 @@ public interface AiProvider {
             byte[] bytes,
             String imageContentType,
             String text);
+
+    Map<String, Object> adjudicateImage(
+            byte[] bytes,
+            String imageContentType,
+            String text,
+            String ocrText,
+            String referenceEvidence,
+            Map<String, Object> classifierSignal,
+            boolean candidateTrigger);
 }

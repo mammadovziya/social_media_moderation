@@ -1,0 +1,60 @@
+package com.example.moderation.gateway;
+
+import java.util.List;
+
+record ImageDecisionAuditPayload(
+        String requestId,
+        String contentId,
+        String finalDecision,
+        String violation,
+        String imageMatch,
+        String policyVersion,
+        String policyWordListsDigest,
+        String exactReferenceId,
+        List<String> candidateIds,
+        boolean classifierProposedBlock,
+        String provenanceSchemaVersion,
+        String moderationStatus,
+        String actualModerationModel,
+        String classificationStatus,
+        String actualClassificationModel,
+        String configuredModerationModel,
+        String configuredModerationProfileSha256,
+        String configuredClassificationModel,
+        String configuredClassificationPromptBundleSha256,
+        String configuredClassificationProfileSha256,
+        String configuredAdjudicationModel,
+        String configuredAdjudicationReasoningEffort,
+        String configuredAdjudicationPromptVersion,
+        String configuredAdjudicationPromptSha256,
+        String configuredAdjudicationProfileSha256,
+        String aiConfigurationStatus,
+        String observedAiConfigurationDigest,
+        String observedAiConfigurationSnapshot,
+        String ocrStatus,
+        String ocrDigest,
+        boolean ocrConfidenceAccepted,
+        boolean ocrTruncated,
+        String ocrEngineVersion,
+        String decoderProfileVersion,
+        String pdqAlgorithmVersion,
+        String visualReferenceRevision,
+        String visualReferenceSnapshotDigest,
+        String visualAlgorithmVersion,
+        String visualDescriptorVersion,
+        String candidateSelectionVersion,
+        String decisionConfigurationVersion,
+        String decisionConfigurationDigest,
+        String decisionConfigurationSnapshot,
+        String adjudicationStatus,
+        String adjudicationMode,
+        String adjudicationAction,
+        String adjudicationDisposition,
+        String adjudicationModel,
+        String promptVersion,
+        int latencyMs) {
+
+    ImageDecisionAuditPayload {
+        candidateIds = List.copyOf(candidateIds);
+    }
+}
