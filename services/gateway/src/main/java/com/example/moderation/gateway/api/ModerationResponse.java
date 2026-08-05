@@ -10,4 +10,5 @@ public record ModerationResponse(
         Violation violation,
         Investment investment,
         Politics politics,
-        ImageMatch imageMatch) {}
+        ImageMatch imageMatch,
+        String policyVersion) {}

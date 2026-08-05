@@ -13,6 +13,7 @@ import org.springframework.stereotype.Component;
 
 @Component
 public class ImageDecoder {
+    static final String DECODER_PROFILE_VERSION = decoderProfileVersion();
     private static final Set<String> ALLOWED_FORMATS = Set.of("jpeg", "png", "gif");
     private final MediaProperties properties;
 
@@ -46,14 +47,13 @@ public class ImageDecoder {
                     throw new InvalidImageException("image exceeds pixel limit");
                 }
                 if ("gif".equals(format) && reader.getNumImages(true) > 1) {
-                    throw new InvalidImageException(
-                            "animated images are not supported in this demo");
+                    throw new InvalidImageException("animated images are not supported");
                 }
                 BufferedImage image = reader.read(0);
                 if (image == null) {
                     throw new InvalidImageException("invalid image");
                 }
-                return new DecodedImage(image, format);
+                return new DecodedImage(image, format, DECODER_PROFILE_VERSION);
             } finally {
                 reader.dispose();
             }
@@ -62,7 +62,20 @@ public class ImageDecoder {
         }
     }
 
-    public record DecodedImage(BufferedImage image, String format) {}
+    public record DecodedImage(
+            BufferedImage image, String format, String decoderProfileVersion) {
+        public DecodedImage(BufferedImage image, String format) {
+            this(image, format, DECODER_PROFILE_VERSION);
+        }
+    }
+
+    private static String decoderProfileVersion() {
+        String runtime = System.getProperty("java.runtime.version", "unknown");
+        if (!runtime.matches("[A-Za-z0-9][A-Za-z0-9._+~-]{0,63}")) {
+            runtime = "unknown";
+        }
+        return "java-imageio-first-frame-jpeg-png-static-gif-v1@java-" + runtime;
+    }
 
     public static class InvalidImageException extends RuntimeException {
         public InvalidImageException(String message) {

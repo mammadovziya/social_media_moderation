@@ -5,6 +5,9 @@ server:
 spring:
   application:
     name: moderation-media-analyzer
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
   threads:
     virtual:
       enabled: true
@@ -18,8 +21,8 @@ spring:
     enabled: true
   servlet:
     multipart:
-      max-file-size: ${MAX_IMAGE_BYTES:10485760}
-      max-request-size: ${MAX_IMAGE_BYTES:10485760}
+      max-file-size: ${MAX_IMAGE_BYTES:8388608}
+      max-request-size: ${MAX_IMAGE_REQUEST_BYTES:9437184}
 
 management:
   endpoints:
@@ -34,10 +37,26 @@ management:
 media:
   pdq-distance-threshold: ${PDQ_DISTANCE_THRESHOLD:31}
   pdq-quality-threshold: ${PDQ_QUALITY_THRESHOLD:49}
-  max-image-bytes: ${MAX_IMAGE_BYTES:10485760}
-  max-image-pixels: ${MAX_IMAGE_PIXELS:40000000}
+  pdq-candidate-limit: ${PDQ_CANDIDATE_LIMIT:5}
+  max-image-bytes: ${MAX_IMAGE_BYTES:8388608}
+  max-image-request-bytes: ${MAX_IMAGE_REQUEST_BYTES:9437184}
+  max-image-pixels: ${MAX_IMAGE_PIXELS:16777216}
   ocr-enabled: ${OCR_ENABLED:false}
   ocr-languages: ${OCR_LANGUAGES:aze+eng+rus+tur}
   ocr-timeout-seconds: ${OCR_TIMEOUT_SECONDS:10}
   ocr-max-text-chars: ${OCR_MAX_TEXT_CHARS:20000}
+  ocr-max-spans: ${OCR_MAX_SPANS:256}
+  ocr-min-confidence: ${OCR_MIN_CONFIDENCE:45.0}
   ocr-max-concurrent: ${OCR_MAX_CONCURRENT:2}
+
+visual-retrieval:
+  url: ${VISUAL_RETRIEVAL_URL:http://visual-retrieval:8000}
+  auth-token: ${VISUAL_RETRIEVAL_INTERNAL_TOKEN:}
+  allow-unauthenticated: ${VISUAL_RETRIEVAL_ALLOW_UNAUTHENTICATED:false}
+  descriptor-version: ${VISUAL_DESCRIPTOR_VERSION:opencv-orb-4.12-v1}
+  candidate-selection-version: ${VISUAL_CANDIDATE_SELECTION_VERSION:orb-homography-specificity-v1}
+  candidate-limit: ${VISUAL_CANDIDATE_LIMIT:5}
+  connect-timeout-millis: ${VISUAL_CONNECT_TIMEOUT_MILLIS:500}
+  read-timeout-millis: ${VISUAL_READ_TIMEOUT_MILLIS:30000}
+  max-references: ${VISUAL_MAX_REFERENCES:256}
+  max-snapshot-bytes: ${VISUAL_MAX_SNAPSHOT_BYTES:67108864}

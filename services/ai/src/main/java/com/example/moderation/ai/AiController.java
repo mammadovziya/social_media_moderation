@@ -53,6 +53,8 @@ public class AiController {
         Map<String, Object> response = new java.util.LinkedHashMap<>();
         response.put("status", "ready");
         response.putAll(provider.details());
+        response.put("maxImageBytes", properties.maxImageBytes());
+        response.put("maxImageRequestBytes", properties.maxImageRequestBytes());
         return response;
     }
 
@@ -74,6 +76,10 @@ public class AiController {
             @RequestParam @NotBlank @Size(max = 128) String contentId,
             @RequestParam ContentType contentType,
             @RequestParam(defaultValue = "") @Size(max = 20_000) String text,
+            @RequestParam(defaultValue = "") @Size(max = 20_000) String ocrText,
+            @RequestParam(defaultValue = "") @Size(max = 20_000) String referenceEvidence,
+            @RequestParam(defaultValue = "false") boolean requiresAdjudication,
+            @RequestParam(defaultValue = "true") boolean adjudicationAllowed,
             @RequestParam MultipartFile image)
             throws IOException {
         requireProvider();
@@ -103,7 +109,11 @@ public class AiController {
                 contentType,
                 image.getBytes(),
                 imageContentType,
-                text);
+                text,
+                ocrText,
+                referenceEvidence,
+                requiresAdjudication,
+                adjudicationAllowed);
     }
 
     private void requireProvider() {

@@ -26,10 +26,13 @@ Optional environment variables:
   MIN_EXACT_ACCURACY=0
   EXPECTED_CASE_COUNT=100
   VALIDATE_ONLY=1
+  CONFIRM_LIVE_API=1
   NO_COLOR=1
 
-The script sends one live multipart request per case, prints the text,
-expected enums, response, and mismatches, and reports aggregate accuracy.
+Without VALIDATE_ONLY=1, the script refuses to send requests unless
+CONFIRM_LIVE_API=1 is explicitly supplied after API-spend approval. A live run
+sends one multipart request per case, prints the text, expected enums, response,
+and mismatches, and reports aggregate accuracy.
 USAGE
     exit 0
 fi
@@ -74,7 +77,7 @@ if ! jq -e -s --argjson expected_count "$EXPECTED_CASE_COUNT" '
                 "NONE", "HARASSMENT", "HATE", "THREAT", "SELF_HARM",
                 "SEXUAL", "SEXUAL_MINORS", "GRAPHIC_VIOLENCE", "VIOLENCE",
                 "ILLICIT", "SPAM_SCAM", "VULGAR", "IMPERSONATION", "NOT_INVESTMENT",
-                "KNOWN_IMAGE", "ANALYZER_ERROR", "OTHER"
+                "KNOWN_IMAGE", "ANALYZER_ERROR", "EVIDENCE_UNAVAILABLE", "OTHER"
               ] | index($value) != null)
         and (
             if .contentType == "POST" then
@@ -117,6 +120,12 @@ if [[ "${VALIDATE_ONLY:-0}" == "1" ]]; then
         | "  \(.[0].language): \(length)"
     ' "$DATASET"
     exit 0
+fi
+
+if [[ "${CONFIRM_LIVE_API:-0}" != "1" ]]; then
+    printf '%s\n' \
+        'Refusing live accuracy requests: obtain API-spend approval, then set CONFIRM_LIVE_API=1.' >&2
+    exit 2
 fi
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then

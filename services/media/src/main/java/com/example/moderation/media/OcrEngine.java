@@ -8,10 +8,11 @@ import java.util.concurrent.TimeoutException;
 interface OcrEngine {
     boolean ready(String languages, Duration timeout);
 
-    String extract(
+    OcrDocument extract(
             BufferedImage image,
             String languages,
             Duration timeout,
-            int maxCharacters)
+            int maxCharacters,
+            int maxSpans)
             throws IOException, InterruptedException, TimeoutException;
 }

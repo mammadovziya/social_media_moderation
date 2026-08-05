@@ -1,6 +1,7 @@
 package com.example.moderation.media;
 
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.OptionalInt;
 
@@ -10,31 +11,41 @@ final class PdqHammingIndex {
     private static final int MAX_INDEXED_THRESHOLD = 31;
 
     private final PdqHashValue[] values;
+    private final String[] hashes;
     private final int[][] offsets;
     private final int[][] entries;
 
     private PdqHammingIndex(
             PdqHashValue[] values,
+            String[] hashes,
             int[][] offsets,
             int[][] entries) {
         this.values = values;
+        this.hashes = hashes;
         this.offsets = offsets;
         this.entries = entries;
     }
 
     static PdqHammingIndex empty() {
-        return new PdqHammingIndex(new PdqHashValue[0], new int[0][], new int[0][]);
+        return new PdqHammingIndex(
+                new PdqHashValue[0], new String[0], new int[0][], new int[0][]);
     }
 
     static PdqHammingIndex fromHexStrings(List<String> hashes) {
-        PdqHashValue[] values = hashes.stream()
-                .map(PdqHashValue::parse)
+        List<HashEntry> unique = hashes.stream()
+                .map(hash -> new HashEntry(hash.toLowerCase(java.util.Locale.ROOT), PdqHashValue.parse(hash)))
                 .distinct()
-                .sorted()
+                .sorted(Comparator.comparing(HashEntry::value))
+                .toList();
+        PdqHashValue[] values = unique.stream()
+                .map(HashEntry::value)
                 .toArray(PdqHashValue[]::new);
         if (values.length == 0) {
             return empty();
         }
+        String[] normalizedHashes = unique.stream()
+                .map(HashEntry::hash)
+                .toArray(String[]::new);
 
         int[][] offsets = new int[BAND_COUNT][];
         int[][] entries = new int[BAND_COUNT][];
@@ -56,7 +67,7 @@ final class PdqHammingIndex {
             offsets[band] = bandOffsets;
             entries[band] = bandEntries;
         }
-        return new PdqHammingIndex(values, offsets, entries);
+        return new PdqHammingIndex(values, normalizedHashes, offsets, entries);
     }
 
     int size() {
@@ -64,56 +75,74 @@ final class PdqHammingIndex {
     }
 
     OptionalInt nearestWithin(PdqHashValue target, int threshold) {
+        List<Neighbor> nearest = within(target, threshold, 1);
+        return nearest.isEmpty()
+                ? OptionalInt.empty()
+                : OptionalInt.of(nearest.getFirst().distance());
+    }
+
+    List<Neighbor> within(PdqHashValue target, int threshold, int limit) {
         if (threshold < 0 || threshold > 256) {
             throw new IllegalArgumentException("PDQ threshold must be between 0 and 256");
         }
+        if (limit < 1) {
+            throw new IllegalArgumentException("PDQ candidate limit must be positive");
+        }
         if (values.length == 0) {
-            return OptionalInt.empty();
+            return List.of();
         }
         if (threshold > MAX_INDEXED_THRESHOLD) {
-            return scanAll(target, threshold);
+            return scanAll(target, threshold, limit);
         }
 
-        int best = threshold + 1;
+        boolean[] seen = new boolean[values.length];
         boolean includeOneBitChanges = threshold >= BAND_COUNT;
         for (int band = 0; band < BAND_COUNT; band++) {
             int bandValue = target.band(band);
-            best = scanBucket(target, band, bandValue, best);
-            if (best == 0) {
-                return OptionalInt.of(0);
-            }
+            markBucket(band, bandValue, seen);
             if (includeOneBitChanges) {
                 for (int bit = 0; bit < 16; bit++) {
-                    best = scanBucket(target, band, bandValue ^ (1 << bit), best);
-                    if (best == 0) {
-                        return OptionalInt.of(0);
-                    }
+                    markBucket(band, bandValue ^ (1 << bit), seen);
                 }
             }
         }
-        return best <= threshold ? OptionalInt.of(best) : OptionalInt.empty();
+        return collect(target, threshold, limit, seen);
     }
 
-    private OptionalInt scanAll(PdqHashValue target, int threshold) {
-        int best = threshold + 1;
-        for (PdqHashValue value : values) {
-            best = Math.min(best, target.hammingDistance(value));
-            if (best == 0) {
-                return OptionalInt.of(0);
+    private List<Neighbor> scanAll(PdqHashValue target, int threshold, int limit) {
+        boolean[] included = new boolean[values.length];
+        Arrays.fill(included, true);
+        return collect(target, threshold, limit, included);
+    }
+
+    private List<Neighbor> collect(
+            PdqHashValue target, int threshold, int limit, boolean[] included) {
+        java.util.ArrayList<Neighbor> matches = new java.util.ArrayList<>();
+        for (int index = 0; index < values.length; index++) {
+            if (!included[index]) {
+                continue;
+            }
+            int distance = target.hammingDistance(values[index]);
+            if (distance <= threshold) {
+                matches.add(new Neighbor(hashes[index], distance));
             }
         }
-        return best <= threshold ? OptionalInt.of(best) : OptionalInt.empty();
+        matches.sort(Comparator.comparingInt(Neighbor::distance).thenComparing(Neighbor::hash));
+        if (matches.size() <= limit) {
+            return List.copyOf(matches);
+        }
+        return List.copyOf(matches.subList(0, limit));
     }
 
-    private int scanBucket(PdqHashValue target, int band, int bandValue, int best) {
+    private void markBucket(int band, int bandValue, boolean[] seen) {
         int start = offsets[band][bandValue];
         int end = offsets[band][bandValue + 1];
         for (int position = start; position < end; position++) {
-            int distance = target.hammingDistance(values[entries[band][position]]);
-            if (distance < best) {
-                best = distance;
-            }
+            seen[entries[band][position]] = true;
         }
-        return best;
     }
+
+    record Neighbor(String hash, int distance) {}
+
+    private record HashEntry(String hash, PdqHashValue value) {}
 }

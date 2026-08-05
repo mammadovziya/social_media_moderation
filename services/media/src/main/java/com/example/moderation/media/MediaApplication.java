@@ -5,10 +5,9 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
 @SpringBootApplication
-@EnableConfigurationProperties(MediaProperties.class)
+@EnableConfigurationProperties({MediaProperties.class, VisualRetrievalProperties.class})
 public class MediaApplication {
     public static void main(String[] args) {
         SpringApplication.run(MediaApplication.class, args);
     }
 }
-

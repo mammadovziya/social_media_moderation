@@ -5,3 +5,7 @@ target/
 .idea/
 .vscode/
 *.swp
+
+# Architect demo corpus, evaluators, and reports are intentionally local-only.
+local-demo/
+.venv-orb/

@@ -18,6 +18,7 @@ public enum Violation {
     IMPERSONATION,
     NOT_INVESTMENT,
     KNOWN_IMAGE,
+    EVIDENCE_UNAVAILABLE,
     ANALYZER_ERROR,
     OTHER;
 
