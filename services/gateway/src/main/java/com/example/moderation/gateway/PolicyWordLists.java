@@ -32,6 +32,15 @@ public final class PolicyWordLists {
     private static final String TOKEN_START = "(?<![\\p{L}\\p{N}])";
     private static final String TOKEN_END = "(?![\\p{L}\\p{N}])";
     private static final String WORD_SEPARATOR = "[\\p{Z}\\p{P}_]+";
+    private static final List<String> NON_POLITICAL_INVESTMENT_PHRASES = List.of(
+            "government bond",
+            "government bonds",
+            "government debt",
+            "government securities");
+    private static final List<Pattern> NON_POLITICAL_INVESTMENT_PATTERNS =
+            NON_POLITICAL_INVESTMENT_PHRASES.stream()
+                    .map(PolicyWordLists::termPattern)
+                    .toList();
 
     private final List<BannedTerm> bannedTerms;
     private final List<PoliticalTerm> politicalTerms;
@@ -77,7 +86,21 @@ public final class PolicyWordLists {
         if (text == null || text.isBlank()) {
             return false;
         }
+        return containsPoliticalTermInNormalizedText(normalize(text));
+    }
+
+    boolean containsPoliticalTermOutsideInvestmentInstrument(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
         String normalized = normalize(text);
+        for (Pattern pattern : NON_POLITICAL_INVESTMENT_PATTERNS) {
+            normalized = pattern.matcher(normalized).replaceAll(" ");
+        }
+        return containsPoliticalTermInNormalizedText(normalized);
+    }
+
+    private boolean containsPoliticalTermInNormalizedText(String normalized) {
         return politicalTerms.stream()
                 .anyMatch(term -> term.pattern().matcher(normalized).find());
     }
@@ -149,7 +172,7 @@ public final class PolicyWordLists {
             List<BannedTerm> bannedTerms, List<PoliticalTerm> politicalTerms) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            updateDigest(digest, "policy-word-lists/v1");
+            updateDigest(digest, "policy-word-lists/v2");
             for (BannedTerm term : bannedTerms) {
                 updateDigest(digest, "banned");
                 updateDigest(digest, term.violation().name());
@@ -158,6 +181,10 @@ public final class PolicyWordLists {
             for (PoliticalTerm term : politicalTerms) {
                 updateDigest(digest, "political");
                 updateDigest(digest, term.term());
+            }
+            for (String phrase : NON_POLITICAL_INVESTMENT_PHRASES) {
+                updateDigest(digest, "non-political-investment-phrase");
+                updateDigest(digest, phrase);
             }
             return HexFormat.of().formatHex(digest.digest());
         } catch (NoSuchAlgorithmException exception) {

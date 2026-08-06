@@ -31,10 +31,10 @@ class AiAnalysisServiceTest {
                     .containsEntry("customModel", "gpt-5.6-terra")
                     .containsEntry(
                             "classificationPromptBundleSha256",
-                            "7b0ea4271fe59577592561ce2e2b177df7427d5419c6eaca1f53a10452d097cd")
+                            "5e37962e75241d4a185036c8ffd53ca0434d5a4870a0f7427664193f1c918277")
                     .containsEntry(
                             "classificationProfileSha256",
-                            "67699dacd5fd8919367dcaacf7687404f820d638dbfc9efbf74a0b4c04c68fc8")
+                            "1443b6f20571589552613830416506dfc870bcb581b1f4998da181f48832f2fc")
                     .containsEntry("adjudicationModel", "gpt-5.6-terra")
                     .containsEntry("adjudicationReasoningEffort", "medium")
                     .containsEntry("adjudicationPromptVersion", "image-adjudication-v2")
@@ -284,10 +284,10 @@ class AiAnalysisServiceTest {
             details.put("customModel", "gpt-5.6-terra");
             details.put(
                     "classificationPromptBundleSha256",
-                    "7b0ea4271fe59577592561ce2e2b177df7427d5419c6eaca1f53a10452d097cd");
+                    "5e37962e75241d4a185036c8ffd53ca0434d5a4870a0f7427664193f1c918277");
             details.put(
                     "classificationProfileSha256",
-                    "67699dacd5fd8919367dcaacf7687404f820d638dbfc9efbf74a0b4c04c68fc8");
+                    "1443b6f20571589552613830416506dfc870bcb581b1f4998da181f48832f2fc");
             details.put("adjudicationModel", "gpt-5.6-terra");
             details.put("adjudicationReasoningEffort", "medium");
             details.put(

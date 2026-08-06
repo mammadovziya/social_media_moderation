@@ -70,7 +70,7 @@ public class OpenAiRestClient implements AiProvider {
             "image-adjudication-v2";
     private static final String MODERATION_PROFILE_VERSION = "moderation-profile-v1";
     private static final String CLASSIFICATION_PROFILE_VERSION =
-            "classification-profile-v2";
+            "classification-profile-v3";
     private static final String IMAGE_ADJUDICATION_PROFILE_VERSION =
             "image-adjudication-profile-v2";
     private static final int CLASSIFICATION_MAX_OUTPUT_TOKENS = 120;
@@ -107,7 +107,7 @@ public class OpenAiRestClient implements AiProvider {
     private static final Set<String> REQUIRED_MODERATION_CATEGORIES =
             Set.copyOf(REQUIRED_MODERATION_CATEGORY_NAMES);
     private static final String CLASSIFICATION_PROMPT_BUNDLE_SHA256 = sha256(
-            "classification-prompts-v1|post="
+            "classification-prompts-v2|post="
                     + sha256(POST_ANALYSIS_PROMPT)
                     + "|comment="
                     + sha256(COMMENT_ANALYSIS_PROMPT)

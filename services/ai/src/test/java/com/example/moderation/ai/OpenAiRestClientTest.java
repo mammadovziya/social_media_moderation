@@ -46,10 +46,10 @@ class OpenAiRestClientTest {
                         "0e9e994cef268f7a1437292c34b9b53a932ba64fc1c5e49f8eb1a9336a73f0fa")
                 .containsEntry(
                         "classificationPromptBundleSha256",
-                        "7b0ea4271fe59577592561ce2e2b177df7427d5419c6eaca1f53a10452d097cd")
+                        "5e37962e75241d4a185036c8ffd53ca0434d5a4870a0f7427664193f1c918277")
                 .containsEntry(
                         "classificationProfileSha256",
-                        "67699dacd5fd8919367dcaacf7687404f820d638dbfc9efbf74a0b4c04c68fc8")
+                        "1443b6f20571589552613830416506dfc870bcb581b1f4998da181f48832f2fc")
                 .containsEntry("adjudicationModel", "gpt-5.6-terra")
                 .containsEntry("adjudicationReasoningEffort", "medium")
                 .containsEntry(
@@ -125,7 +125,10 @@ class OpenAiRestClientTest {
                 .contains(
                         "You perform two independent analyses",
                         "critical_or_negative",
-                        "intentionally conservative comment rule");
+                        "intentionally conservative COMMENT rule",
+                        "action, category, and politics",
+                        "Use action unknown with category threat")
+                .doesNotContain("safety_action", "safety_category");
     }
 
     @Test
@@ -133,13 +136,26 @@ class OpenAiRestClientTest {
         assertThat(OpenAiRestClient.promptFor(ContentType.USERNAME))
                 .contains(
                         "Azerbaijani, English, Russian, and Turkish",
-                        "action and category enums",
-                        "impersonation")
+                        "action and category",
+                        "Impersonation requires an actual role or identity claim",
+                        "morphological cognate")
                 .doesNotContain(
                         "\"decision\"",
                         "\"confidence\"",
                         "\"reason_code\"",
                         "\"short_reason\"");
+    }
+
+    @Test
+    void postPromptUsesTheStrictSchemaAndSpecificSafetyTaxonomy() {
+        assertThat(OpenAiRestClient.promptFor(ContentType.POST))
+                .contains(
+                        "action, category, investment, and politics",
+                        "Self-directed use of words such as",
+                        "protected characteristic is the reason",
+                        "A direct future-tense threat is threat",
+                        "takes precedence over violence")
+                .doesNotContain("safety_action", "safety_category");
     }
 
     @Test

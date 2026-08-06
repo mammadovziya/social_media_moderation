@@ -42,8 +42,8 @@ moderation:
   expected-moderation-model: ${OPENAI_MODERATION_MODEL:omni-moderation-latest}
   expected-moderation-profile-sha256: ${OPENAI_MODERATION_PROFILE_SHA256:0e9e994cef268f7a1437292c34b9b53a932ba64fc1c5e49f8eb1a9336a73f0fa}
   expected-classification-model: ${OPENAI_CUSTOM_MODEL:gpt-4o-mini}
-  expected-classification-prompt-bundle-sha256: ${OPENAI_CLASSIFICATION_PROMPT_BUNDLE_SHA256:7b0ea4271fe59577592561ce2e2b177df7427d5419c6eaca1f53a10452d097cd}
-  expected-classification-profile-sha256: ${OPENAI_CLASSIFICATION_PROFILE_SHA256:67699dacd5fd8919367dcaacf7687404f820d638dbfc9efbf74a0b4c04c68fc8}
+  expected-classification-prompt-bundle-sha256: ${OPENAI_CLASSIFICATION_PROMPT_BUNDLE_SHA256:5e37962e75241d4a185036c8ffd53ca0434d5a4870a0f7427664193f1c918277}
+  expected-classification-profile-sha256: ${OPENAI_CLASSIFICATION_PROFILE_SHA256:1443b6f20571589552613830416506dfc870bcb581b1f4998da181f48832f2fc}
   expected-adjudication-model: ${OPENAI_ADJUDICATION_MODEL:gpt-5.6-terra}
   expected-adjudication-reasoning-effort: ${OPENAI_ADJUDICATION_REASONING_EFFORT:medium}
   expected-adjudication-prompt-version: image-adjudication-v2
