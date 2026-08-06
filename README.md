@@ -20,6 +20,14 @@ must use `VIOLATION|term` format. Then start:
 docker compose up --build -d
 docker compose ps
 ```
+
+The env file is intentionally minimal. Compose owns the reviewed local defaults
+for models, policy-profile hashes, thresholds, image limits, OCR and timeouts;
+override them through deployment configuration only when intentionally changing
+policy or capacity. Production must also set
+`VISUAL_RETRIEVAL_ALLOW_UNAUTHENTICATED=false` and provide the same strong
+`VISUAL_RETRIEVAL_INTERNAL_TOKEN` to the media and visual-retrieval services.
+
 Swagger UI: <http://localhost:8080/swagger-ui.html>
 
 ## API
@@ -59,4 +67,3 @@ CONFIRM_LIVE_API=1 MODERATION_BASE_URL=http://localhost:8080 \
 - add object and face recognition (hard)
 - benchmark accuracy, including false positives and false negatives (easy–medium)
 - curate and maintain a list of banned words (medium)
-

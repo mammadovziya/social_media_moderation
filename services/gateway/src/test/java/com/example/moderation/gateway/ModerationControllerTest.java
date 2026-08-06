@@ -282,6 +282,7 @@ class ModerationControllerTest {
                                 + "implementation.identity=gateway-image-policy-runtime-v1\n")
                 .contains(
                         "policy.version=image-policy-v1",
+                        "policy.reducerVersion=decision-reducer-v2",
                         "pdq.distanceThreshold=",
                         "ocr.profileVersion=",
                         "visual.candidateSelectionVersion=",
@@ -300,7 +301,7 @@ class ModerationControllerTest {
     }
 
     @Test
-    void usesOcrTextForPoliticalFallback() throws Exception {
+    void usesOcrTextForPoliticalFallbackInMixedInvestmentContent() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         MockMultipartFile image = new MockMultipartFile(
                 "image", "post.png", "image/png", new byte[] {1, 2, 3});
@@ -333,6 +334,49 @@ class ModerationControllerTest {
                         new MockHttpServletResponse());
 
         assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.politics()).isEqualTo(Politics.UNCERTAIN);
+    }
+
+    @Test
+    void governmentBondsRemainInvestmentRatherThanPoliticalContent() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        String text = "I am comparing government bonds and index funds.";
+        when(clients.analyzeText("post-bonds", ContentType.POST, text))
+                .thenReturn(successfulAi("related", "not_related"));
+
+        ModerationResponse result = controller(clients)
+                .moderate(
+                        "post-bonds",
+                        "post",
+                        text,
+                        null,
+                        null,
+                        new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.violation()).isEqualTo(Violation.NONE);
+        assertThat(result.investment()).isEqualTo(Investment.RELATED);
+        assertThat(result.politics()).isEqualTo(Politics.NOT_RELATED);
+    }
+
+    @Test
+    void investmentDoesNotHideASeparatePoliticalTopic() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        String text = "I hold ETFs, and the government should resign.";
+        when(clients.analyzeText("post-mixed", ContentType.POST, text))
+                .thenReturn(successfulAi("related", "not_related"));
+
+        ModerationResponse result = controller(clients)
+                .moderate(
+                        "post-mixed",
+                        "post",
+                        text,
+                        null,
+                        null,
+                        new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.investment()).isEqualTo(Investment.RELATED);
         assertThat(result.politics()).isEqualTo(Politics.UNCERTAIN);
     }
 
@@ -744,6 +788,47 @@ class ModerationControllerTest {
     }
 
     @Test
+    void privateListBlocksPostEvenWhenAiAllows() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        String text = "Investment update containing reject-alpha.";
+        when(clients.analyzeText("post-local", ContentType.POST, text))
+                .thenReturn(successfulAi("related", "not_related"));
+
+        ModerationResponse result = controller(clients)
+                .moderate(
+                        "post-local",
+                        "post",
+                        text,
+                        null,
+                        null,
+                        new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.VULGAR);
+        assertThat(result.investment()).isEqualTo(Investment.RELATED);
+    }
+
+    @Test
+    void usernameReservedTermDoesNotBlockAPost() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        String text = "Admin account investment update.";
+        when(clients.analyzeText("post-admin", ContentType.POST, text))
+                .thenReturn(successfulAi("related", "not_related"));
+
+        ModerationResponse result = controller(clients)
+                .moderate(
+                        "post-admin",
+                        "post",
+                        text,
+                        null,
+                        null,
+                        new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.violation()).isEqualTo(Violation.NONE);
+    }
+
+    @Test
     void privateListBlocksUsernameBeforeAi() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
 
@@ -809,8 +894,8 @@ class ModerationControllerTest {
                 "omni-moderation-latest",
                 "0e9e994cef268f7a1437292c34b9b53a932ba64fc1c5e49f8eb1a9336a73f0fa",
                 "gpt-5.6-terra",
-                "7b0ea4271fe59577592561ce2e2b177df7427d5419c6eaca1f53a10452d097cd",
-                "67699dacd5fd8919367dcaacf7687404f820d638dbfc9efbf74a0b4c04c68fc8",
+                "5e37962e75241d4a185036c8ffd53ca0434d5a4870a0f7427664193f1c918277",
+                "1443b6f20571589552613830416506dfc870bcb581b1f4998da181f48832f2fc",
                 "gpt-5.6-terra",
                 "medium",
                 "image-adjudication-v2",
@@ -878,10 +963,10 @@ class ModerationControllerTest {
                 Map.entry("customModel", "gpt-5.6-terra"),
                 Map.entry(
                         "classificationPromptBundleSha256",
-                        "7b0ea4271fe59577592561ce2e2b177df7427d5419c6eaca1f53a10452d097cd"),
+                        "5e37962e75241d4a185036c8ffd53ca0434d5a4870a0f7427664193f1c918277"),
                 Map.entry(
                         "classificationProfileSha256",
-                        "67699dacd5fd8919367dcaacf7687404f820d638dbfc9efbf74a0b4c04c68fc8"),
+                        "1443b6f20571589552613830416506dfc870bcb581b1f4998da181f48832f2fc"),
                 Map.entry("adjudicationModel", "gpt-5.6-terra"),
                 Map.entry("adjudicationReasoningEffort", "medium"),
                 Map.entry("adjudicationPromptVersion", "image-adjudication-v2"),

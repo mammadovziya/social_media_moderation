@@ -117,6 +117,15 @@ These are decision-preserving optimizations, not weaker screening. Any code path
 
 Base analyzer evidence is contract-checked before it can become `status=ok`. Moderation requires one typed result, the complete governed 13-category minimum with matching finite scores, consistent `flagged` state, and a bound provider model. Custom classification requires the exact content-type field set, closed enum values, no duplicate or trailing JSON, and consistent action/category semantics. Partial or malformed evidence becomes `UNKNOWN`.
 
+Flagged moderation categories are reduced with a fixed taxonomy priority, not
+provider map iteration order. A custom classifier block may refine only an
+approved generic provider category into a more specific policy category; it
+cannot downgrade minors, hate, threatening, self-harm, or graphic-violence
+evidence. Equal unflagged scores use the same deterministic priority and a
+stable final tie-break. This governed fusion behavior is
+`decision-reducer-v2`, recorded in every current decision-configuration
+snapshot alongside the classification prompt and request-profile digests.
+
 ## Terra contract
 
 The call uses `store: false`, original-detail image input, bounded current text, and a bounded list of candidate metadata. Reasoning effort is configurable and defaults to `medium`.

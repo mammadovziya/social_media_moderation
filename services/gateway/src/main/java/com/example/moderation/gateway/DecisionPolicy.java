@@ -8,6 +8,21 @@ import java.util.Map;
 
 public final class DecisionPolicy {
     public static final String POLICY_VERSION = "image-policy-v1";
+    public static final String REDUCER_VERSION = "decision-reducer-v2";
+    private static final List<String> FLAGGED_CATEGORY_PRIORITY = List.of(
+            "sexual/minors",
+            "self-harm/intent",
+            "self-harm/instructions",
+            "hate/threatening",
+            "violence/graphic",
+            "harassment/threatening",
+            "self-harm",
+            "hate",
+            "sexual",
+            "illicit/violent",
+            "harassment",
+            "violence",
+            "illicit");
 
     private DecisionPolicy() {}
 
@@ -28,11 +43,11 @@ public final class DecisionPolicy {
                 && Boolean.TRUE.equals(moderation.get("flagged"))) {
             return new Result(
                     Decision.BLOCK,
-                    firstFlaggedCategory(nestedMap(moderation, "categories")));
+                    resolveFlaggedCategory(
+                            nestedMap(moderation, "categories"), classification));
         }
 
-        if ((contentType == ContentType.COMMENT || contentType == ContentType.USERNAME)
-                && localViolation != null
+        if (localViolation != null
                 && localViolation != Violation.NONE) {
             return new Result(Decision.BLOCK, localViolation);
         }
@@ -67,9 +82,19 @@ public final class DecisionPolicy {
             return new Result(Decision.BLOCK, Violation.NOT_INVESTMENT);
         }
 
-        Violation primaryUncertainty = "unknown".equals(customAction)
-                ? (customViolation == Violation.NONE ? Violation.OTHER : customViolation)
-                : (classifierProposedBlock ? Violation.NONE : customViolation);
+        Violation primaryUncertainty;
+        if ("unknown".equals(customAction)) {
+            primaryUncertainty = customViolation;
+            if (primaryUncertainty == Violation.NONE
+                    && !(contentType == ContentType.POST
+                            && "uncertain".equals(investment))) {
+                primaryUncertainty = Violation.OTHER;
+            }
+        } else {
+            primaryUncertainty = classifierProposedBlock
+                    ? Violation.NONE
+                    : customViolation;
+        }
 
         ScoreCategory score = highestScore(nestedMap(moderation, "categoryScores"));
         if (score.score() < 0) {
@@ -280,13 +305,32 @@ public final class DecisionPolicy {
                 && POLICY_VERSION.equals(candidate.get("policyVersion"));
     }
 
-    private static Violation firstFlaggedCategory(Map<String, Object> categories) {
-        return categories.entrySet().stream()
-                .filter(entry -> Boolean.TRUE.equals(entry.getValue()))
-                .map(Map.Entry::getKey)
+    private static Violation resolveFlaggedCategory(
+            Map<String, Object> categories, Map<String, Object> classification) {
+        Violation providerCategory = FLAGGED_CATEGORY_PRIORITY.stream()
+                .filter(category -> Boolean.TRUE.equals(categories.get(category)))
                 .map(Violation::fromProvider)
                 .findFirst()
                 .orElse(Violation.OTHER);
+        Violation classifierCategory = Violation.fromProvider(classification.get("category"));
+        if ("ok".equals(classification.get("status"))
+                && "block".equals(classification.get("action"))
+                && isStrictClassifierRefinement(providerCategory, classifierCategory)) {
+            return classifierCategory;
+        }
+        return providerCategory;
+    }
+
+    private static boolean isStrictClassifierRefinement(
+            Violation providerCategory, Violation classifierCategory) {
+        return switch (providerCategory) {
+            case VIOLENCE -> classifierCategory == Violation.HATE
+                    || classifierCategory == Violation.THREAT
+                    || classifierCategory == Violation.SELF_HARM
+                    || classifierCategory == Violation.GRAPHIC_VIOLENCE;
+            case HARASSMENT -> classifierCategory == Violation.HATE;
+            default -> false;
+        };
     }
 
     private static ScoreCategory highestScore(Map<String, Object> scores) {
@@ -294,8 +338,18 @@ public final class DecisionPolicy {
                 .filter(entry -> entry.getValue() instanceof Number)
                 .map(entry -> new ScoreCategory(
                         entry.getKey(), ((Number) entry.getValue()).doubleValue()))
-                .max(java.util.Comparator.comparingDouble(ScoreCategory::score))
+                .sorted(java.util.Comparator
+                        .comparingDouble(ScoreCategory::score)
+                        .reversed()
+                        .thenComparingInt(score -> categoryPriority(score.category()))
+                        .thenComparing(ScoreCategory::category))
+                .findFirst()
                 .orElseGet(() -> new ScoreCategory("", -1));
+    }
+
+    private static int categoryPriority(String providerCategory) {
+        int index = FLAGGED_CATEGORY_PRIORITY.indexOf(providerCategory);
+        return index < 0 ? FLAGGED_CATEGORY_PRIORITY.size() : index;
     }
 
     @SuppressWarnings("unchecked")

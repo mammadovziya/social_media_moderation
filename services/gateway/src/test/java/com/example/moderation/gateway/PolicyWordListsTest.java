@@ -41,6 +41,19 @@ class PolicyWordListsTest {
     }
 
     @Test
+    void excludesFinancialInstrumentUsesWithoutHidingMixedPoliticalTopics() {
+        assertThat(wordLists.containsPoliticalTermOutsideInvestmentInstrument(
+                        "I compare government bonds with index funds."))
+                .isFalse();
+        assertThat(wordLists.containsPoliticalTermOutsideInvestmentInstrument(
+                        "I own government bonds, and the minister should resign."))
+                .isTrue();
+        assertThat(wordLists.containsPoliticalTermOutsideInvestmentInstrument(
+                        "Government policy affects bond returns."))
+                .isTrue();
+    }
+
+    @Test
     void exposesStableSemanticPolicyDigest() {
         PolicyWordLists reloaded =
                 new PolicyWordLists(new DefaultResourceLoader(), properties());
@@ -61,8 +74,8 @@ class PolicyWordListsTest {
                 "omni-moderation-latest",
                 "0e9e994cef268f7a1437292c34b9b53a932ba64fc1c5e49f8eb1a9336a73f0fa",
                 "gpt-5.6-terra",
-                "7b0ea4271fe59577592561ce2e2b177df7427d5419c6eaca1f53a10452d097cd",
-                "67699dacd5fd8919367dcaacf7687404f820d638dbfc9efbf74a0b4c04c68fc8",
+                "5e37962e75241d4a185036c8ffd53ca0434d5a4870a0f7427664193f1c918277",
+                "1443b6f20571589552613830416506dfc870bcb581b1f4998da181f48832f2fc",
                 "gpt-5.6-terra",
                 "medium",
                 "image-adjudication-v2",

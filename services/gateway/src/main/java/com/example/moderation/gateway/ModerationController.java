@@ -313,7 +313,7 @@ public class ModerationController {
                         : null,
                 type == ContentType.USERNAME
                         ? null
-                        : politicsSignal(classification, analysisText),
+                        : politicsSignal(classification, analysisText, type),
                 match,
                 image == null ? null : responseOcrText(media),
                 DecisionPolicy.POLICY_VERSION);
@@ -727,6 +727,7 @@ public class ModerationController {
                 "schema=" + DECISION_CONFIGURATION_VERSION,
                 "implementation.identity=" + DECISION_IMPLEMENTATION_IDENTITY,
                 "policy.version=" + DecisionPolicy.POLICY_VERSION,
+                "policy.reducerVersion=" + DecisionPolicy.REDUCER_VERSION,
                 "policy.wordListsDigest=" + wordLists.policyDigest(),
                 "gateway.unknownThreshold=" + canonicalDecimal(properties.unknownThreshold()),
                 "gateway.upstreamTimeoutSeconds=" + properties.upstreamTimeoutSeconds(),
@@ -1047,21 +1048,26 @@ public class ModerationController {
 
     private Violation localViolation(ContentType type, String text) {
         return switch (type) {
-            case COMMENT -> {
+            case COMMENT, POST -> {
                 Violation dictionaryViolation = wordLists.bannedViolation(text);
                 yield dictionaryViolation == Violation.IMPERSONATION
                         ? Violation.NONE
                         : dictionaryViolation;
             }
             case USERNAME -> DeterministicUsernamePolicy.violation(text, wordLists);
-            case POST -> Violation.NONE;
         };
     }
 
-    private Politics politicsSignal(Map<String, Object> classification, String text) {
+    private Politics politicsSignal(
+            Map<String, Object> classification, String text, ContentType contentType) {
         Politics politics = enumSignal(
                 classification, "politics", Politics.class, Politics.UNCERTAIN);
-        if (politics == Politics.NOT_RELATED && wordLists.containsPoliticalTerm(text)) {
+        boolean investmentRelatedPost = contentType == ContentType.POST
+                && "related".equals(classification.get("investment"));
+        boolean containsPoliticalTerm = investmentRelatedPost
+                ? wordLists.containsPoliticalTermOutsideInvestmentInstrument(text)
+                : wordLists.containsPoliticalTerm(text);
+        if (politics == Politics.NOT_RELATED && containsPoliticalTerm) {
             return Politics.UNCERTAIN;
         }
         return politics;

@@ -371,6 +371,178 @@ class DecisionPolicyTest {
     }
 
     @Test
+    void flaggedCategoryResolutionIsIndependentOfProviderMapOrder() {
+        java.util.LinkedHashMap<String, Object> genericFirst = new java.util.LinkedHashMap<>();
+        genericFirst.put("violence", true);
+        genericFirst.put("harassment/threatening", true);
+        java.util.LinkedHashMap<String, Object> specificFirst = new java.util.LinkedHashMap<>();
+        specificFirst.put("harassment/threatening", true);
+        specificFirst.put("violence", true);
+
+        for (Map<String, Object> categories : java.util.List.of(genericFirst, specificFirst)) {
+            DecisionPolicy.Result result = DecisionPolicy.decide(
+                    null,
+                    Map.of(
+                            "moderation",
+                            Map.of(
+                                    "status", "ok",
+                                    "flagged", true,
+                                    "categories", categories),
+                            "classification",
+                            Map.of("status", "ok", "action", "allow", "category", "none")),
+                    ContentType.COMMENT,
+                    Violation.NONE,
+                    0.70);
+
+            assertThat(result).isEqualTo(
+                    new DecisionPolicy.Result(Decision.BLOCK, Violation.THREAT));
+        }
+    }
+
+    @Test
+    void compatibleClassifierCanRefineAGenericFlaggedCategory() {
+        Map<Violation, String> refinements = Map.of(
+                Violation.HATE, "hate",
+                Violation.THREAT, "threat",
+                Violation.SELF_HARM, "self_harm",
+                Violation.GRAPHIC_VIOLENCE, "graphic_violence");
+
+        for (Map.Entry<Violation, String> refinement : refinements.entrySet()) {
+            DecisionPolicy.Result result = DecisionPolicy.decide(
+                    null,
+                    Map.of(
+                            "moderation",
+                            Map.of(
+                                    "status", "ok",
+                                    "flagged", true,
+                                    "categories", Map.of("violence", true)),
+                            "classification",
+                            Map.of(
+                                    "status", "ok",
+                                    "action", "block",
+                                    "category", refinement.getValue())),
+                    ContentType.COMMENT,
+                    Violation.NONE,
+                    0.70);
+
+            assertThat(result).isEqualTo(
+                    new DecisionPolicy.Result(Decision.BLOCK, refinement.getKey()));
+        }
+    }
+
+    @Test
+    void incompatibleClassifierCannotRelabelAFlaggedProviderCategory() {
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                null,
+                Map.of(
+                        "moderation",
+                        Map.of(
+                                "status", "ok",
+                                "flagged", true,
+                                "categories", Map.of("sexual", true)),
+                        "classification",
+                        Map.of(
+                                "status", "ok",
+                                "action", "block",
+                                "category", "spam_scam")),
+                ContentType.COMMENT,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result).isEqualTo(
+                new DecisionPolicy.Result(Decision.BLOCK, Violation.SEXUAL));
+    }
+
+    @Test
+    void classifierCannotDowngradeASpecificProviderCategory() {
+        assertFlaggedCategory(
+                Map.of("sexual/minors", true, "sexual", true),
+                "sexual",
+                Violation.SEXUAL_MINORS);
+        assertFlaggedCategory(
+                Map.of("hate", true, "harassment", true),
+                "harassment",
+                Violation.HATE);
+        assertFlaggedCategory(
+                Map.of("violence/graphic", true, "violence", true),
+                "violence",
+                Violation.GRAPHIC_VIOLENCE);
+        assertFlaggedCategory(
+                Map.of("harassment/threatening", true, "violence", true),
+                "violence",
+                Violation.THREAT);
+        assertFlaggedCategory(
+                Map.of("self-harm/intent", true, "violence", true),
+                "violence",
+                Violation.SELF_HARM);
+    }
+
+    @Test
+    void unsupportedCrossTaxonomyRelabelingKeepsTheProviderCategory() {
+        assertFlaggedCategory(
+                Map.of("sexual", true),
+                "sexual_minors",
+                Violation.SEXUAL);
+        assertFlaggedCategory(
+                Map.of("violence/graphic", true),
+                "threat",
+                Violation.GRAPHIC_VIOLENCE);
+    }
+
+    @Test
+    void equalModerationScoresUseStableTaxonomyPriority() {
+        java.util.LinkedHashMap<String, Object> genericFirst = new java.util.LinkedHashMap<>();
+        genericFirst.put("violence", 0.90);
+        genericFirst.put("harassment/threatening", 0.90);
+        java.util.LinkedHashMap<String, Object> specificFirst = new java.util.LinkedHashMap<>();
+        specificFirst.put("harassment/threatening", 0.90);
+        specificFirst.put("violence", 0.90);
+
+        for (Map<String, Object> scores : java.util.List.of(genericFirst, specificFirst)) {
+            DecisionPolicy.Result result = DecisionPolicy.decide(
+                    null,
+                    Map.of(
+                            "moderation",
+                            Map.of(
+                                    "status", "ok",
+                                    "flagged", false,
+                                    "categoryScores", scores),
+                            "classification",
+                            Map.of("status", "ok", "action", "allow", "category", "none")),
+                    ContentType.COMMENT,
+                    Violation.NONE,
+                    0.70);
+
+            assertThat(result).isEqualTo(
+                    new DecisionPolicy.Result(Decision.UNKNOWN, Violation.THREAT));
+        }
+    }
+
+    @Test
+    void investmentUncertaintyIsNotReportedAsGenericSafetyUncertainty() {
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                null,
+                Map.of(
+                        "moderation",
+                        Map.of(
+                                "status", "ok",
+                                "flagged", false,
+                                "categoryScores", Map.of()),
+                        "classification",
+                        Map.of(
+                                "status", "ok",
+                                "action", "unknown",
+                                "category", "none",
+                                "investment", "uncertain")),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result).isEqualTo(
+                new DecisionPolicy.Result(Decision.UNKNOWN, Violation.NOT_INVESTMENT));
+    }
+
+    @Test
     void customBlockBlocks() {
         DecisionPolicy.Result result = DecisionPolicy.decide(
                 null,
@@ -560,6 +732,31 @@ class DecisionPolicyTest {
         assertThat(result)
                 .isEqualTo(new DecisionPolicy.Result(
                         Decision.BLOCK, Violation.IMPERSONATION));
+    }
+
+    private static void assertFlaggedCategory(
+            Map<String, Object> categories,
+            String classifierCategory,
+            Violation expected) {
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                null,
+                Map.of(
+                        "moderation",
+                        Map.of(
+                                "status", "ok",
+                                "flagged", true,
+                                "categories", categories),
+                        "classification",
+                        Map.of(
+                                "status", "ok",
+                                "action", "block",
+                                "category", classifierCategory)),
+                ContentType.COMMENT,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result).isEqualTo(
+                new DecisionPolicy.Result(Decision.BLOCK, expected));
     }
 
     private static Map<String, Object> ai(String action, String category) {
