@@ -213,8 +213,12 @@ public class ProtectedNameIndex {
         List<ProtectedNameRepository.SeedEntry> entries = readSeed();
         int inserted = repository.insertMissing(
                 entries, REGISTRY_VERSION, HandleSkeleton.PROFILE_VERSION);
+        int deactivated = repository.deactivateMissing(entries, REGISTRY_VERSION);
         log.info(
-                "protected name seed applied entries={} inserted={}", entries.size(), inserted);
+                "protected name seed applied entries={} inserted={} deactivated={}",
+                entries.size(),
+                inserted,
+                deactivated);
     }
 
     private static List<ProtectedNameRepository.SeedEntry> readSeed() {

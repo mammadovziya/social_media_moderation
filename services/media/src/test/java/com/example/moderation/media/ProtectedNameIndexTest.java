@@ -15,6 +15,7 @@ class ProtectedNameIndexTest {
     private static ProtectedNameIndex indexOf(ProtectedName... entries) {
         ProtectedNameRepository repository = mock(ProtectedNameRepository.class);
         when(repository.insertMissing(anyList(), any(), any())).thenReturn(0);
+        when(repository.deactivateMissing(anyList(), any())).thenReturn(0);
         when(repository.findActive()).thenReturn(List.of(entries));
         return new ProtectedNameIndex(repository);
     }
