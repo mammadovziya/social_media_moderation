@@ -30,12 +30,16 @@ The first controlled live run on 2026-08-03 is intentionally retained as a faile
 10. Reference activation is a separate, controlled operation. Runtime model decisions never auto-promote an upload into the reference set.
 11. Policy, model, prompt, OCR, decoder, fingerprint/descriptor implementation, and thresholds are versioned decision inputs.
 12. Domain, safety action/category, financial claim, financial risk, financial privacy, impersonation, and political context are independent signals. Retrieval similarity cannot fill or override any of them, and the safety action must not be inferred from the overall decision.
-13. A deterministic financial-privacy scanner evaluates authored text and current-image OCR. Possible or clear sensitive data suppresses OCR from the public response; clear exposure blocks and possible exposure returns `UNKNOWN`.
+13. A deterministic financial-privacy scanner evaluates authored text and current-image OCR. Clear exposure blocks and possible exposure returns `UNKNOWN`; OCR is never part of the public response.
+14. `config/blocked_terms.txt` is a hot-reloaded terminal blocklist. Each non-comment line is one literal term or phrase, matched only at whole-token or whole-phrase boundaries. A valid atomic save applies to the next request without restarting the gateway.
 
 ## Request flow
 
 ```mermaid
 flowchart TD
+    X["Validated submitted text"] --> BL{"Whole term/phrase in hot blocklist?"}
+    BL -->|yes| BM["BLOCK / configured term"]
+    BL -->|no| A
     A["Original upload bytes"] --> B["Validate and decode"]
     A --> C["SHA-256 exact lookup"]
     B --> D["Full-frame PDQ"]
@@ -90,9 +94,10 @@ Legacy `blocked_pdq_hashes` records have no trustworthy decision basis. They are
 | Condition | Result |
 |---|---|
 | Invalid, oversized, unsupported, animated, or unsafe image | Validation error (4xx), not a moderation decision |
+| Current submitted or quoted text matches a whole term or phrase in `config/blocked_terms.txt` | `BLOCK / OTHER` without model calls; image posts still complete media validation and image audit |
+| Accepted, non-truncated current-image OCR matches a blocklist term or phrase | `BLOCK / OTHER` after media analysis, without image-model calls |
 | Active `EXACT_ASSET` has identical original-byte SHA | `BLOCK / KNOWN_IMAGE` |
 | Current moderation service flags current content | `BLOCK / current category` |
-| A configured POST/comment/username term blocks | `BLOCK / local category` |
 | Deterministic current text/OCR exposes clear financial data | `BLOCK / FINANCIAL_PRIVACY` |
 | Mandatory current analyzer is unavailable | `UNKNOWN / ANALYZER_ERROR` |
 | A trusted classification is clearly `domain=off_topic`, with no proposed classifier policy block | `BLOCK / OFF_TOPIC` without Terra |
@@ -115,11 +120,18 @@ off-topic or financial-policy block records `safetyAction=ALLOW` and
 `UNKNOWN` with safety `ALLOW`. Exact-asset and deterministic non-safety
 short circuits omit the safety action when no safety evaluation occurred.
 
+The public moderation response intentionally exposes only `decision` and
+`violation`. The independent axes, image/OCR evidence, model usage, and policy
+provenance described here are retained for internal reduction, telemetry, and
+audit; they are not public response fields.
+
 ### Cost-safe short circuits
 
 The runtime avoids model calls when the result is already determined or cannot be made valid:
 
 - an authoritative original-byte exact match is audited and blocked without invoking image moderation, classification, or Terra;
+- a submitted-text or quoted-text blocklist match on a text-only request returns an immediate block without invoking media or model services;
+- a caption or accepted, non-truncated OCR blocklist match on an image request completes media validation and image audit, but invokes no image models;
 - a failed mandatory media analysis returns unavailable evidence without invoking image models;
 - a hard current-content moderation block does not invoke Terra;
 - a failed mandatory moderation or classification signal does not invoke Terra, because the final result is already `UNKNOWN`;
@@ -219,8 +231,8 @@ financial-claim, financial-risk, financial-privacy, impersonation,
 political-context, and final-reason signals alongside the terminal decision.
 Every new v3 row carries a bounded
 canonical `image-decision-config-v2` snapshot whose recomputed SHA-256 must
-equal its stored digest. That snapshot binds the policy and word list; exact,
-PDQ, masked-PDQ, OCR, decoder, and ORB implementations and thresholds;
+equal its stored digest. That snapshot binds the policy and loaded blocklist
+snapshot; exact, PDQ, masked-PDQ, OCR, decoder, and ORB implementations and thresholds;
 immutable visual-catalogue identity; gateway and analyzer timeouts;
 request/image limits; reducer version; and configured AI
 provider/model/request contracts. The moderation, classification, and

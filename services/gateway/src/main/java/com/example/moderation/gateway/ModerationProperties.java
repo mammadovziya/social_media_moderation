@@ -23,8 +23,8 @@ public record ModerationProperties(
         String expectedAdjudicationPromptSha256,
         String expectedAdjudicationProfileSha256,
         long expectedOpenAiTimeoutSeconds,
-        String moderationTermsPath,
-        String politicalWordsPath) {
+        String blockedTermsFile,
+        String internalResponseToken) {
 
     private static final long MAX_CONFIGURED_IMAGE_BYTES = 8L * 1024 * 1024;
     private static final long MAX_CONFIGURED_REQUEST_BYTES = 9L * 1024 * 1024;
@@ -85,11 +85,17 @@ public record ModerationProperties(
             throw new IllegalArgumentException(
                     "OPENAI_TIMEOUT_SECONDS must be between 1 and 300");
         }
-        if (moderationTermsPath == null || moderationTermsPath.isBlank()) {
-            throw new IllegalArgumentException("MODERATION_TERMS_PATH must not be blank");
+        if (blockedTermsFile == null || blockedTermsFile.isBlank()) {
+            throw new IllegalArgumentException("BLOCKED_TERMS_FILE must not be blank");
         }
-        if (politicalWordsPath == null || politicalWordsPath.isBlank()) {
-            throw new IllegalArgumentException("POLITICAL_WORDS_PATH must not be blank");
+        internalResponseToken = internalResponseToken == null
+                ? ""
+                : internalResponseToken;
+        if (!internalResponseToken.isEmpty()
+                && !internalResponseToken.matches("[A-Za-z0-9_-]{43,256}")) {
+            throw new IllegalArgumentException(
+                    "MODERATION_INTERNAL_RESPONSE_TOKEN must be empty or contain "
+                            + "43 to 256 base64url characters");
         }
     }
 

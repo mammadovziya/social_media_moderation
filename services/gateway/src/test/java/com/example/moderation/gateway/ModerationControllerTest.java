@@ -31,18 +31,25 @@ import com.example.moderation.gateway.api.Politics;
 import com.example.moderation.gateway.api.Safety;
 import com.example.moderation.gateway.api.Violation;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
-import org.springframework.core.io.DefaultResourceLoader;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.web.server.ResponseStatusException;
 
 class ModerationControllerTest {
+    @TempDir
+    private Path temporaryDirectory;
+
     @Test
     void returnsOnlyConciseEnumFieldsForPostText() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
@@ -77,28 +84,235 @@ class ModerationControllerTest {
         assertThat(result.aiUsage().freeModerationCalls()).isOne();
         assertThat(result.aiUsage().usageComplete()).isTrue();
         assertThat(result.aiUsage().costComplete()).isTrue();
-        com.fasterxml.jackson.databind.JsonNode json =
-                new ObjectMapper().valueToTree(result);
+        ObjectMapper mapper = new ObjectMapper();
+        com.fasterxml.jackson.databind.JsonNode json = mapper.readTree(
+                mapper.writerWithView(ModerationResponse.Public.class)
+                        .writeValueAsBytes(result));
         java.util.List<String> keys = new java.util.ArrayList<>();
         json.fieldNames().forEachRemaining(keys::add);
-        assertThat(keys).containsExactlyInAnyOrder(
-                "contentId",
-                "contentType",
-                "decision",
-                "violation",
-                "investment",
-                "politics",
-                "reason",
-                "domain",
-                "safetyAction",
-                "safety",
-                "financialClaim",
-                "financialRisk",
-                "financialPrivacy",
-                "impersonation",
-                "politicalContext",
-                "aiUsage",
-                "policyVersion");
+        assertThat(keys).containsExactlyInAnyOrder("decision", "violation");
+        assertThat(json.path("decision").textValue()).isEqualTo("ALLOW");
+        assertThat(json.path("violation").textValue()).isEqualTo("NONE");
+    }
+
+    @Test
+    void aSavedBlockedTermAppliesOnTheNextRequestWithoutCallingAi() throws Exception {
+        Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
+        Files.writeString(blocklist, "# initially empty\n", StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        String text = "fresh blocked phrase";
+        when(clients.analyzeText("post-before", ContentType.POST, text))
+                .thenReturn(successfulAi("related", "not_related"));
+        ModerationController controller = controller(clients, blocklist);
+
+        ModerationResponse before = controller.moderate(
+                "post-before",
+                "post",
+                text,
+                null,
+                null,
+                new MockHttpServletResponse());
+        Files.writeString(blocklist, "blocked phrase\n", StandardCharsets.UTF_8);
+        ModerationResponse after = controller.moderate(
+                "post-after",
+                "post",
+                text,
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(before.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(after.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(after.violation()).isEqualTo(Violation.OTHER);
+        assertThat(after.aiUsage().meteredCalls()).isZero();
+        verify(clients).analyzeText("post-before", ContentType.POST, text);
+    }
+
+    @Test
+    void aBlockedQuotedTextTerminalBlocksWithoutCallingAi() throws Exception {
+        Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
+        Files.writeString(blocklist, "blocked quotation\n", StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+
+        ModerationResponse result = controller(clients, blocklist).moderate(
+                "comment-blocked-quote",
+                "comment",
+                "I disagree with the quote.",
+                "Investment discussion",
+                "ordinary_user",
+                "This contains a blocked quotation.",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.OTHER);
+        assertThat(result.aiUsage().meteredCalls()).isZero();
+        verifyNoInteractions(clients);
+    }
+
+    @Test
+    void aBlockedImageCaptionStillRunsMediaAndPersistsItsAudit() throws Exception {
+        Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
+        Files.writeString(blocklist, "blocked caption\n", StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        MockMultipartFile image = new MockMultipartFile(
+                "image", "post.png", "image/png", new byte[] {1, 2, 3});
+        when(clients.analyzeMedia(
+                        any(byte[].class),
+                        eq("post.png"),
+                        eq("image/png"),
+                        eq("post-blocked")))
+                .thenReturn(completeMedia(
+                        Map.of("qualityAccepted", true),
+                        Map.of("status", "no_text", "engine", "tesseract-test-v1")));
+        ModerationController controller = controller(clients, blocklist);
+
+        ModerationResponse result = controller.moderate(
+                "post-blocked",
+                "post",
+                "This is a blocked caption.",
+                image,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.OTHER);
+        verify(clients).analyzeMedia(
+                any(byte[].class), eq("post.png"), eq("image/png"), eq("post-blocked"));
+        verify(clients).persistImageDecisionAudit(any());
+        verify(clients, never()).analyzeImageAi(
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                anyBoolean(),
+                anyBoolean(),
+                any(),
+                anyBoolean(),
+                anyBoolean());
+    }
+
+    @Test
+    void acceptedNonTruncatedBlockedOcrBlocksAndPersistsAuditWithoutImageAi()
+            throws Exception {
+        Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
+        Files.writeString(blocklist, "restricted banner\n", StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        MockMultipartFile image = new MockMultipartFile(
+                "image", "ocr.png", "image/png", new byte[] {1, 2, 3});
+        Map<String, Object> media = completeMedia(
+                Map.of("qualityAccepted", true),
+                Map.of(
+                        "status", "ok",
+                        "text", "A RESTRICTED BANNER appears.",
+                        "confidenceAccepted", true,
+                        "truncated", false));
+        when(clients.analyzeMedia(
+                        any(byte[].class),
+                        eq("ocr.png"),
+                        eq("image/png"),
+                        eq("post-blocked-ocr")))
+                .thenReturn(media);
+
+        ModerationResponse result = controller(clients, blocklist).moderate(
+                "post-blocked-ocr",
+                "post",
+                "Investment update",
+                image,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.OTHER);
+        ArgumentCaptor<ImageDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ImageDecisionAuditPayload.class);
+        verify(clients).persistImageDecisionAudit(audit.capture());
+        assertThat(audit.getValue().finalDecision()).isEqualTo("BLOCK");
+        assertThat(audit.getValue().violation()).isEqualTo("OTHER");
+        verify(clients, never()).analyzeImageAi(
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                anyBoolean(),
+                anyBoolean(),
+                any(),
+                anyBoolean(),
+                anyBoolean());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "false, false, post-ocr-low-confidence",
+        "true, true, post-ocr-truncated"
+    })
+    void lowConfidenceOrTruncatedOcrDoesNotTriggerTheBlocklist(
+            boolean confidenceAccepted, boolean truncated, String contentId)
+            throws Exception {
+        Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
+        Files.writeString(blocklist, "restricted banner\n", StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        MockMultipartFile image = new MockMultipartFile(
+                "image", "ocr.png", "image/png", new byte[] {1, 2, 3});
+        Map<String, Object> media = completeMedia(
+                Map.of("qualityAccepted", true),
+                Map.of(
+                        "status", "ok",
+                        "text", "A restricted banner appears.",
+                        "confidenceAccepted", confidenceAccepted,
+                        "truncated", truncated));
+        when(clients.analyzeMedia(
+                        any(byte[].class), eq("ocr.png"), eq("image/png"), eq(contentId)))
+                .thenReturn(media);
+        when(clients.analyzeImageAi(
+                        any(byte[].class),
+                        eq("ocr.png"),
+                        eq("image/png"),
+                        eq(contentId),
+                        eq(ContentType.POST),
+                        eq("Investment update"),
+                        eq("A restricted banner appears."),
+                        eq("ok"),
+                        eq(confidenceAccepted),
+                        eq(truncated),
+                        eq(media),
+                        eq(false),
+                        eq(true)))
+                .thenReturn(successfulAi("related", "not_related"));
+
+        ModerationResponse result = controller(clients, blocklist).moderate(
+                contentId,
+                "post",
+                "Investment update",
+                image,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.violation()).isEqualTo(Violation.NONE);
+        verify(clients).analyzeImageAi(
+                any(byte[].class),
+                eq("ocr.png"),
+                eq("image/png"),
+                eq(contentId),
+                eq(ContentType.POST),
+                eq("Investment update"),
+                eq("A restricted banner appears."),
+                eq("ok"),
+                eq(confidenceAccepted),
+                eq(truncated),
+                eq(media),
+                eq(false),
+                eq(true));
     }
 
     @Test
@@ -156,7 +370,7 @@ class ModerationControllerTest {
     }
 
     @Test
-    void deterministicPrivacyAndUsernameImpersonationRemainIndependent()
+    void structuralPrivacyBlocksWithoutInferringUsernameImpersonationFromWords()
             throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
 
@@ -172,9 +386,13 @@ class ModerationControllerTest {
         assertThat(result.violation()).isEqualTo(Violation.FINANCIAL_PRIVACY);
         assertThat(result.reason()).isEqualTo(FinalReason.FINANCIAL_PRIVACY);
         assertThat(result.financialPrivacy()).isEqualTo(FinancialPrivacy.CLEAR);
-        assertThat(result.impersonation()).isEqualTo(Impersonation.CLEAR);
+        assertThat(result.impersonation()).isEqualTo(Impersonation.NONE);
         assertThat(result.safetyAction()).isNull();
-        verifyNoInteractions(clients);
+        // A local terminal block still costs nothing: no handle round trip and no model call.
+        // It is audited, because a rejected handle must remain appealable.
+        verify(clients, never()).evaluateHandle(any(), any(), any(), any(), any());
+        verify(clients, never()).analyzeText(any(), any(), any());
+        verify(clients).persistUsernameDecisionAudit(any());
     }
 
     @Test
@@ -672,6 +890,8 @@ class ModerationControllerTest {
                         "policy.reducerVersion=" + DecisionPolicy.REDUCER_VERSION,
                         "policy.referenceAssetVersion="
                                 + DecisionPolicy.REFERENCE_ASSET_POLICY_VERSION,
+                        "policy.wordListsDigest="
+                                + audit.getValue().policyWordListsDigest(),
                         "privacyScanner.profileVersion="
                                 + FinancialPrivacyScanner.PROFILE_VERSION,
                         "privacyScanner.profileSha256="
@@ -1203,6 +1423,8 @@ class ModerationControllerTest {
     @Test
     void usernameReturnsOnlySafetyFields() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("normal_name"), any(), any(), any(), any()))
+                .thenReturn(cleanHandleEvidence());
         when(clients.analyzeText("user-1", ContentType.USERNAME, "normal_name"))
                 .thenReturn(successfulUsernameAi());
 
@@ -1222,8 +1444,12 @@ class ModerationControllerTest {
     }
 
     @Test
-    void reservedUsernameBlocksEvenWhenAiAllows() throws Exception {
+    void usernameWordsAreEvaluatedByAiWithoutALocalBlock() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("notrealadmin"), any(), any(), any(), any()))
+                .thenReturn(cleanHandleEvidence());
+        when(clients.analyzeText("user-2", ContentType.USERNAME, "notrealadmin"))
+                .thenReturn(successfulUsernameAi());
 
         ModerationResponse result = controller(clients)
                 .moderate(
@@ -1234,12 +1460,198 @@ class ModerationControllerTest {
                         null,
                         new MockHttpServletResponse());
 
-        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
-        assertThat(result.violation()).isEqualTo(Violation.IMPERSONATION);
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.violation()).isEqualTo(Violation.NONE);
         assertThat(result.investment()).isNull();
         assertThat(result.politics()).isNull();
         assertThat(result.imageMatch()).isNull();
+        verify(clients).analyzeText("user-2", ContentType.USERNAME, "notrealadmin");
+    }
+
+    @Test
+    void aStructurallyImpossibleHandleIsRejectedBeforeAnyCall() {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+
+        assertThatThrownBy(() -> controller(clients).moderate(
+                        "user-unicode",
+                        "username",
+                        "kаpitalbank",
+                        null,
+                        null,
+                        new MockHttpServletResponse()))
+                .isInstanceOf(ResponseStatusException.class)
+                .satisfies(exception -> assertThat(
+                                ((ResponseStatusException) exception).getStatusCode().value())
+                        .isEqualTo(400));
         verifyNoInteractions(clients);
+    }
+
+    @Test
+    void aProtectedNameMatchBlocksWithoutCallingTheModel() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("kapital_bank"), any(), any(), any(), any()))
+                .thenReturn(handleEvidenceWith(
+                        "protectedMatch",
+                        Map.of(
+                                "protectedNameId", 7,
+                                "nameType", "BANK",
+                                "matchKind", "EXACT",
+                                "severity", "CLEAR")));
+
+        ModerationResponse result = controller(clients)
+                .moderate(
+                        "user-brand",
+                        "username",
+                        "kapital_bank",
+                        null,
+                        null,
+                        new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.IMPERSONATION);
+        assertThat(result.reason()).isEqualTo(FinalReason.IMPERSONATION);
+        assertThat(result.impersonation()).isEqualTo(Impersonation.CLEAR);
+        assertThat(result.aiUsage().meteredCalls()).isZero();
+        verify(clients, never()).analyzeText(any(), any(), any());
+        verify(clients).persistUsernameDecisionAudit(any());
+    }
+
+    @Test
+    void aSkeletonCollisionWithAnExistingMemberBlocksWithoutCallingTheModel() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("va1ue_inve5tor"), any(), any(), any(), any()))
+                .thenReturn(handleEvidenceWith("collisionSubjectId", "subject-42"));
+
+        ModerationResponse result = controller(clients)
+                .moderate(
+                        "user-collision",
+                        "username",
+                        "va1ue_inve5tor",
+                        null,
+                        null,
+                        new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.IMPERSONATION);
+        verify(clients, never()).analyzeText(any(), any(), any());
+    }
+
+    /**
+     * An unresolved registry similarity cannot allow, and it must not override a stronger
+     * current-content conclusion either. It only applies when nothing else remains.
+     */
+    @Test
+    void anUnresolvedRegistrySimilarityBecomesUnknownOnlyWhenNothingElseDecides() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("birbank_fan"), any(), any(), any(), any()))
+                .thenReturn(handleEvidenceWith(
+                        "protectedMatch",
+                        Map.of(
+                                "protectedNameId", 9,
+                                "nameType", "BANK",
+                                "matchKind", "BRAND",
+                                "severity", "POSSIBLE")));
+        when(clients.analyzeText("user-possible", ContentType.USERNAME, "birbank_fan"))
+                .thenReturn(successfulUsernameAi());
+
+        ModerationResponse result = controller(clients)
+                .moderate(
+                        "user-possible",
+                        "username",
+                        "birbank_fan",
+                        null,
+                        null,
+                        new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
+        assertThat(result.violation()).isEqualTo(Violation.IMPERSONATION);
+        assertThat(result.impersonation()).isEqualTo(Impersonation.POSSIBLE);
+    }
+
+    @Test
+    void aCachedVerdictDecidesWithoutCallingTheModelOrReportingSpend() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("cached_name"), any(), any(), any(), any()))
+                .thenReturn(handleEvidenceWith("cachedVerdict", successfulUsernameAi()));
+
+        ModerationResponse result = controller(clients)
+                .moderate(
+                        "user-cached",
+                        "username",
+                        "cached_name",
+                        null,
+                        null,
+                        new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.aiUsage().meteredCalls()).isZero();
+        verify(clients, never()).analyzeText(any(), any(), any());
+        verify(clients, never()).recordHandleVerdict(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aFreshVerdictIsCachedForTheNextRequest() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("fresh_name"), any(), any(), any(), any()))
+                .thenReturn(cleanHandleEvidence());
+        when(clients.analyzeText("user-fresh", ContentType.USERNAME, "fresh_name"))
+                .thenReturn(successfulUsernameAi());
+
+        controller(clients)
+                .moderate(
+                        "user-fresh",
+                        "username",
+                        "fresh_name",
+                        null,
+                        null,
+                        new MockHttpServletResponse());
+
+        verify(clients).recordHandleVerdict(eq("fresh_name"), any(), any(), any(), any());
+    }
+
+    @Test
+    void unavailableHandleEvidenceIsUnknownAndNeverAllow() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("some_name"), any(), any(), any(), any()))
+                .thenThrow(new RuntimeException("media unavailable"));
+
+        ModerationResponse result = controller(clients)
+                .moderate(
+                        "user-unavailable",
+                        "username",
+                        "some_name",
+                        null,
+                        null,
+                        new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
+        assertThat(result.violation()).isEqualTo(Violation.ANALYZER_ERROR);
+        verify(clients, never()).analyzeText(any(), any(), any());
+    }
+
+    @Test
+    void anUnauditedHandleDecisionIsNeverReturned() {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("audit_name"), any(), any(), any(), any()))
+                .thenReturn(cleanHandleEvidence());
+        when(clients.analyzeText("user-audit", ContentType.USERNAME, "audit_name"))
+                .thenReturn(successfulUsernameAi());
+        doThrow(new RuntimeException("audit database unavailable"))
+                .when(clients)
+                .persistUsernameDecisionAudit(any(UsernameDecisionAuditPayload.class));
+
+        assertThatThrownBy(() -> controller(clients).moderate(
+                        "user-audit",
+                        "username",
+                        "audit_name",
+                        null,
+                        null,
+                        new MockHttpServletResponse()))
+                .isInstanceOf(ResponseStatusException.class)
+                .satisfies(exception -> assertThat(
+                                ((ResponseStatusException) exception).getStatusCode().value())
+                        .isEqualTo(503))
+                .hasMessageContaining("decision audit unavailable");
     }
 
     @Test
@@ -1283,7 +1695,7 @@ class ModerationControllerTest {
     }
 
     @Test
-    void configuredTermBlocksCommentEvenWhenAiAllows() throws Exception {
+    void commentWordsDoNotOverrideAnAiAllow() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         String text = "This contains policy-marker-alpha.";
         when(clients.analyzeText("comment-local", ContentType.COMMENT, text))
@@ -1298,12 +1710,12 @@ class ModerationControllerTest {
                         null,
                         new MockHttpServletResponse());
 
-        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
-        assertThat(result.violation()).isEqualTo(Violation.VULGAR);
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.violation()).isEqualTo(Violation.NONE);
     }
 
     @Test
-    void configuredTermBlocksPostEvenWhenAiAllows() throws Exception {
+    void postWordsDoNotOverrideAnAiAllow() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         String text = "Investment update containing policy-marker-alpha.";
         when(clients.analyzeText("post-local", ContentType.POST, text))
@@ -1318,8 +1730,8 @@ class ModerationControllerTest {
                         null,
                         new MockHttpServletResponse());
 
-        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
-        assertThat(result.violation()).isEqualTo(Violation.VULGAR);
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.violation()).isEqualTo(Violation.NONE);
         assertThat(result.investment()).isEqualTo(Investment.RELATED);
     }
 
@@ -1344,8 +1756,14 @@ class ModerationControllerTest {
     }
 
     @Test
-    void configuredTermBlocksUsernameBeforeAi() throws Exception {
+    void usernameWordsDoNotBlockBeforeAi() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(
+                        eq("policy_marker_beta_user"), any(), any(), any(), any()))
+                .thenReturn(cleanHandleEvidence());
+        when(clients.analyzeText(
+                        "user-local", ContentType.USERNAME, "policy_marker_beta_user"))
+                .thenReturn(successfulUsernameAi());
 
         ModerationResponse result = controller(clients)
                 .moderate(
@@ -1356,9 +1774,11 @@ class ModerationControllerTest {
                         null,
                         new MockHttpServletResponse());
 
-        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
-        assertThat(result.violation()).isEqualTo(Violation.SEXUAL);
-        verifyNoInteractions(clients);
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.violation()).isEqualTo(Violation.NONE);
+        verify(clients)
+                .analyzeText(
+                        "user-local", ContentType.USERNAME, "policy_marker_beta_user");
     }
 
     @Test
@@ -1399,6 +1819,10 @@ class ModerationControllerTest {
     }
 
     private static ModerationProperties properties() {
+        return properties("src/test/resources/blocked_terms.txt");
+    }
+
+    private static ModerationProperties properties(String blockedTermsFile) {
         return new ModerationProperties(
                 "http://ai",
                 "http://media",
@@ -1417,8 +1841,8 @@ class ModerationControllerTest {
                 "20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8",
                 "07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef",
                 30,
-                "classpath:policy/test_policy_terms.txt",
-                "classpath:policy/political_words.txt");
+                blockedTermsFile,
+                "");
     }
 
     private static ModerationController controller(AnalyzerClients clients) {
@@ -1426,8 +1850,37 @@ class ModerationControllerTest {
         return new ModerationController(
                 clients,
                 properties,
-                new PolicyWordLists(new DefaultResourceLoader(), properties),
-                new FinancialPrivacyScanner());
+                new FinancialPrivacyScanner(),
+                new ReloadingBlockedTerms(properties));
+    }
+
+    private static ModerationController controller(AnalyzerClients clients, Path blocklist) {
+        ModerationProperties properties = properties(blocklist.toString());
+        return new ModerationController(
+                clients,
+                properties,
+                new FinancialPrivacyScanner(),
+                new ReloadingBlockedTerms(properties));
+    }
+
+    /** Deterministic handle evidence with no registry match, no collision, and no cached verdict. */
+    private static Map<String, Object> cleanHandleEvidence() {
+        return Map.of(
+                "status", "ok",
+                "skeleton", "skeleton",
+                "registryVersion", "protected-name-registry-v1",
+                "registryDigest",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "registryActiveCount", 0,
+                "rateLimited", false);
+    }
+
+    /** Clean handle evidence plus one additional field. */
+    private static Map<String, Object> handleEvidenceWith(String key, Object value) {
+        Map<String, Object> evidence =
+                new java.util.LinkedHashMap<>(cleanHandleEvidence());
+        evidence.put(key, value);
+        return Map.copyOf(evidence);
     }
 
     private static Map<String, Object> successfulAi(

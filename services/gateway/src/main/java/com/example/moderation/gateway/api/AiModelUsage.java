@@ -29,7 +29,7 @@ public record AiModelUsage(
                             "CONFIGURATION_MISMATCH"
                         })
                 AiCallFailureCode failureCode,
-        @Schema(example = "gpt-4o-mini-2024-07-18") String model,
+        @Schema(example = "gpt-5.4-mini-2026-03-17") String model,
         @Schema(example = "default") String serviceTier,
         boolean serviceTierAssumed,
         @Schema(minimum = "0") long inputTokens,

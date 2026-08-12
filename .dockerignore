@@ -5,6 +5,6 @@
 **/.DS_Store
 **/*.swp
 .env
-config/moderation_terms.txt
+config/blocked_terms.txt
 local-demo/
 .venv-orb/

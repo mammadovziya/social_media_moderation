@@ -93,18 +93,18 @@ public class ModerationController {
 
     private final AnalyzerClients clients;
     private final ModerationProperties properties;
-    private final PolicyWordLists wordLists;
     private final FinancialPrivacyScanner financialPrivacyScanner;
+    private final ReloadingBlockedTerms blockedTerms;
 
     public ModerationController(
             AnalyzerClients clients,
             ModerationProperties properties,
-            PolicyWordLists wordLists,
-            FinancialPrivacyScanner financialPrivacyScanner) {
+            FinancialPrivacyScanner financialPrivacyScanner,
+            ReloadingBlockedTerms blockedTerms) {
         this.clients = clients;
         this.properties = properties;
-        this.wordLists = wordLists;
         this.financialPrivacyScanner = financialPrivacyScanner;
+        this.blockedTerms = blockedTerms;
     }
 
     @Hidden
@@ -116,12 +116,19 @@ public class ModerationController {
     @Hidden
     @GetMapping("/readyz")
     public Map<String, Object> ready() {
+        blockedTerms.snapshot();
+        boolean localPolicy = blockedTerms.reloadHealthy();
         boolean media = clients.mediaReady();
         boolean ai = clients.aiReady();
-        if (!media || !ai) {
+        if (!localPolicy || !media || !ai) {
             throw new ResponseStatusException(
                     HttpStatus.SERVICE_UNAVAILABLE,
-                    "workers not ready: media=" + media + ", ai=" + ai);
+                    "workers not ready: localPolicy="
+                            + localPolicy
+                            + ", media="
+                            + media
+                            + ", ai="
+                            + ai);
         }
         return Map.of("status", "ready");
     }
@@ -223,6 +230,13 @@ public class ModerationController {
                     @Size(max = 10_000)
                     String quotedText,
             @Parameter(hidden = true)
+                    @RequestParam(defaultValue = "")
+                    @Size(max = 128)
+                    @Pattern(
+                            regexp = "|" + RequestIdentifiers.SAFE_PATTERN,
+                            message = "must use 1 to 128 URL-safe ID characters")
+                    String subjectId,
+            @Parameter(hidden = true)
                     @RequestParam(required = false)
                     MultipartFile image,
             @Parameter(
@@ -245,16 +259,37 @@ public class ModerationController {
         servletResponse.setHeader("X-Request-ID", requestId);
         ContentType type = parseContentType(contentType);
         validateInputs(type, text, parentPostText, authorUsername, quotedText, image);
-        Violation localViolation = localViolation(type, text);
+        if (type == ContentType.USERNAME) {
+            return moderateHandle(contentId, text, subjectId, requestId, startedAt);
+        }
+        ReloadingBlockedTerms.Snapshot blockedTermsSnapshot = blockedTerms.snapshot();
+        Violation localViolation =
+                blockedTermsSnapshot.matches(text) || blockedTermsSnapshot.matches(quotedText)
+                        ? Violation.OTHER
+                        : Violation.NONE;
         FinancialPrivacy localFinancialPrivacy = financialPrivacy(
                 financialPrivacyScanner.scan(visibleCurrentText(text, quotedText)));
-        if ((type == ContentType.USERNAME
-                        && (localViolation != Violation.NONE
-                                || localFinancialPrivacy == FinancialPrivacy.CLEAR))
-                || (image == null
-                        && localFinancialPrivacy == FinancialPrivacy.CLEAR)) {
-            return localTerminalBlock(
+        if ((image == null && localViolation != Violation.NONE)
+                || (type == ContentType.USERNAME
+                        && localFinancialPrivacy == FinancialPrivacy.CLEAR)
+                || (image == null && localFinancialPrivacy == FinancialPrivacy.CLEAR)) {
+            ModerationResponse response = localTerminalBlock(
                     contentId, type, localViolation, localFinancialPrivacy);
+            int latencyMs = (int) Math.min(
+                    600_000,
+                    java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                            System.nanoTime() - startedAt));
+            log.info(
+                    "moderation decision requestId={} contentId={} decision={} violation={} "
+                            + "localTerminal=true blockedTermsDigest={} policyVersion={} latencyMs={}",
+                    requestId,
+                    contentId,
+                    response.decision(),
+                    response.violation(),
+                    blockedTermsSnapshot.semanticSha256(),
+                    DecisionPolicy.POLICY_VERSION,
+                    latencyMs);
+            return response;
         }
 
         Map<String, Object> media = null;
@@ -280,7 +315,11 @@ public class ModerationController {
             localFinancialPrivacy = strongestPrivacy(
                     localFinancialPrivacy,
                     ocrFinancialPrivacy);
-            ai = localFinancialPrivacy == FinancialPrivacy.CLEAR
+            if (blockedTermsSnapshot.matches(blocklistOcrText(media))) {
+                localViolation = Violation.OTHER;
+            }
+            ai = localViolation != Violation.NONE
+                            || localFinancialPrivacy == FinancialPrivacy.CLEAR
                     ? localPolicyAiNotRequired()
                     : !validMediaEnvelope(media)
                     ? unavailableAi()
@@ -338,6 +377,7 @@ public class ModerationController {
                     adjudication,
                     signals,
                     localFinancialPrivacy,
+                    blockedTermsSnapshot.semanticSha256(),
                     latencyMs);
         }
         log.info(
@@ -388,6 +428,31 @@ public class ModerationController {
                 DecisionPolicy.POLICY_VERSION);
     }
 
+    /** Backward-compatible overload for callers that do not bind a subject ID. */
+    public ModerationResponse moderate(
+            String contentId,
+            String contentType,
+            String text,
+            String parentPostText,
+            String authorUsername,
+            String quotedText,
+            MultipartFile image,
+            String suppliedRequestId,
+            HttpServletResponse servletResponse)
+            throws IOException {
+        return moderate(
+                contentId,
+                contentType,
+                text,
+                parentPostText,
+                authorUsername,
+                quotedText,
+                "",
+                image,
+                suppliedRequestId,
+                servletResponse);
+    }
+
     /** Backward-compatible direct-call overload used by existing Java clients and tests. */
     public ModerationResponse moderate(
             String contentId,
@@ -404,9 +469,432 @@ public class ModerationController {
                 "",
                 "",
                 "",
+                "",
                 image,
                 suppliedRequestId,
                 servletResponse);
+    }
+
+    /**
+     * Handle pipeline.
+     *
+     * <p>A handle is a machine identity, so the cheap deterministic layers decide first and in a
+     * fixed order: structural contract, protected-name registry, skeleton collision, local
+     * blocklist, financial privacy. Each one that fires is terminal before any paid model call.
+     * The model only sees handles that survive, and it answers the question lists cannot: what the
+     * string means.
+     */
+    private ModerationResponse moderateHandle(
+            String contentId,
+            String handle,
+            String subjectId,
+            String requestId,
+            long startedAt) {
+        HandlePolicy.Result structure = HandlePolicy.evaluate(handle);
+        if (!structure.valid()) {
+            // A structurally impossible handle is a rejected input rather than a judgement about a
+            // member, so it never becomes a moderation decision or an appealable record.
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, structure.reason().message());
+        }
+        String normalized = structure.normalized();
+        Map<String, Object> localEvidence = Map.of("skeleton", structure.skeleton());
+
+        // Free local checks first. Neither needs stored state, so neither should cost a round trip.
+        ReloadingBlockedTerms.Snapshot blockedTermsSnapshot = blockedTerms.snapshot();
+        if (blockedTermsSnapshot.matches(normalized)) {
+            return finishHandle(
+                    contentId,
+                    requestId,
+                    normalized,
+                    subjectId,
+                    localEvidence,
+                    new DecisionPolicy.Result(Decision.BLOCK, Violation.OTHER),
+                    UsernameDecisionAuditPayload.DecidingLayer.BLOCKED_TERM,
+                    null,
+                    FinancialPrivacy.NONE,
+                    null,
+                    UsernameDecisionAuditPayload.VerdictSource.NOT_INVOKED,
+                    startedAt);
+        }
+        FinancialPrivacy localFinancialPrivacy = financialPrivacy(
+                financialPrivacyScanner.scan(normalized));
+        if (localFinancialPrivacy == FinancialPrivacy.CLEAR) {
+            return finishHandle(
+                    contentId,
+                    requestId,
+                    normalized,
+                    subjectId,
+                    localEvidence,
+                    new DecisionPolicy.Result(
+                            Decision.BLOCK,
+                            Violation.FINANCIAL_PRIVACY,
+                            FinalReason.FINANCIAL_PRIVACY),
+                    UsernameDecisionAuditPayload.DecidingLayer.FINANCIAL_PRIVACY,
+                    null,
+                    localFinancialPrivacy,
+                    null,
+                    UsernameDecisionAuditPayload.VerdictSource.NOT_INVOKED,
+                    startedAt);
+        }
+
+        Map<String, Object> evidence = handleEvidence(normalized, subjectId, requestId);
+        if (!"ok".equals(evidence.get("status"))) {
+            return finishHandle(
+                    contentId,
+                    requestId,
+                    normalized,
+                    subjectId,
+                    evidence,
+                    new DecisionPolicy.Result(
+                            Decision.UNKNOWN,
+                            Violation.ANALYZER_ERROR,
+                            FinalReason.ANALYZER_ERROR),
+                    UsernameDecisionAuditPayload.DecidingLayer.ANALYZER_UNAVAILABLE,
+                    null,
+                    FinancialPrivacy.NONE,
+                    unavailableAi(),
+                    UsernameDecisionAuditPayload.VerdictSource.NOT_INVOKED,
+                    startedAt);
+        }
+
+        Map<String, Object> protectedMatch =
+                DecisionPolicy.nestedMap(evidence, "protectedMatch");
+        boolean protectedClear =
+                "CLEAR".equals(protectedMatch.get("severity")) && !protectedMatch.isEmpty();
+        boolean protectedPossible =
+                "POSSIBLE".equals(protectedMatch.get("severity"));
+        String collisionSubjectId = stringOrNull(evidence.get("collisionSubjectId"));
+
+        if (protectedClear) {
+            return finishHandle(
+                    contentId,
+                    requestId,
+                    normalized,
+                    subjectId,
+                    evidence,
+                    new DecisionPolicy.Result(
+                            Decision.BLOCK,
+                            Violation.IMPERSONATION,
+                            FinalReason.IMPERSONATION),
+                    UsernameDecisionAuditPayload.DecidingLayer.PROTECTED_NAME,
+                    null,
+                    localFinancialPrivacy,
+                    null,
+                    UsernameDecisionAuditPayload.VerdictSource.NOT_INVOKED,
+                    startedAt);
+        }
+        if (collisionSubjectId != null) {
+            return finishHandle(
+                    contentId,
+                    requestId,
+                    normalized,
+                    subjectId,
+                    evidence,
+                    new DecisionPolicy.Result(
+                            Decision.BLOCK,
+                            Violation.IMPERSONATION,
+                            FinalReason.IMPERSONATION),
+                    UsernameDecisionAuditPayload.DecidingLayer.COLLISION,
+                    null,
+                    localFinancialPrivacy,
+                    null,
+                    UsernameDecisionAuditPayload.VerdictSource.NOT_INVOKED,
+                    startedAt);
+        }
+        Map<String, Object> cachedVerdict = DecisionPolicy.nestedMap(evidence, "cachedVerdict");
+        boolean fromCache = !cachedVerdict.isEmpty();
+        Map<String, Object> ai = fromCache
+                ? cachedVerdict
+                : analyzeText(
+                        contentId, ContentType.USERNAME, normalized, "", "", "", requestId);
+        if (!fromCache) {
+            cacheHandleVerdict(normalized, ai, requestId);
+        }
+
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                null,
+                ai,
+                ContentType.USERNAME,
+                Violation.NONE,
+                localFinancialPrivacy,
+                properties.unknownThreshold());
+        PolicySignals signals = effectivePolicySignals(
+                DecisionPolicy.nestedMap(ai, "classification"),
+                Map.of(),
+                ContentType.USERNAME,
+                localFinancialPrivacy);
+
+        // An unresolved registry similarity cannot allow. It also cannot override a stronger
+        // current-content conclusion, so it only applies when nothing else remains.
+        UsernameDecisionAuditPayload.DecidingLayer layer =
+                result.violation() == Violation.ANALYZER_ERROR
+                        ? UsernameDecisionAuditPayload.DecidingLayer.ANALYZER_UNAVAILABLE
+                        : UsernameDecisionAuditPayload.DecidingLayer.CLASSIFIER;
+        if (protectedPossible && result.decision() == Decision.ALLOW) {
+            result = new DecisionPolicy.Result(
+                    Decision.UNKNOWN, Violation.IMPERSONATION, FinalReason.IMPERSONATION);
+            layer = UsernameDecisionAuditPayload.DecidingLayer.PROTECTED_NAME;
+            signals = null;
+        }
+
+        return finishHandle(
+                contentId,
+                requestId,
+                normalized,
+                subjectId,
+                evidence,
+                result,
+                layer,
+                signals,
+                localFinancialPrivacy,
+                ai,
+                fromCache
+                        ? UsernameDecisionAuditPayload.VerdictSource.CACHE
+                        : UsernameDecisionAuditPayload.VerdictSource.LIVE,
+                startedAt);
+    }
+
+    private Map<String, Object> handleEvidence(
+            String handle, String subjectId, String requestId) {
+        try {
+            Map<String, Object> evidence = clients.evaluateHandle(
+                    handle,
+                    subjectId,
+                    properties.expectedClassificationModel(),
+                    properties.expectedClassificationPromptBundleSha256(),
+                    properties.expectedClassificationProfileSha256());
+            return evidence == null ? Map.of("status", "error") : evidence;
+        } catch (RuntimeException exception) {
+            log.error(
+                    "handle evaluator unavailable requestId={} failureType={}",
+                    requestId,
+                    exception.getClass().getSimpleName());
+            return Map.of("status", "error");
+        }
+    }
+
+    /**
+     * Caches a complete verdict so a retry of the same handle is idempotent and free. A failure
+     * here is not a decision failure: the cache is an optimization, never evidence.
+     */
+    private void cacheHandleVerdict(
+            String handle, Map<String, Object> ai, String requestId) {
+        Map<String, Object> classification = DecisionPolicy.nestedMap(ai, "classification");
+        Map<String, Object> moderation = DecisionPolicy.nestedMap(ai, "moderation");
+        if (!"ok".equals(classification.get("status")) || !"ok".equals(moderation.get("status"))) {
+            return;
+        }
+        try {
+            clients.recordHandleVerdict(
+                    handle,
+                    properties.expectedClassificationModel(),
+                    properties.expectedClassificationPromptBundleSha256(),
+                    properties.expectedClassificationProfileSha256(),
+                    withoutUsage(ai));
+        } catch (RuntimeException exception) {
+            log.warn(
+                    "handle verdict cache unavailable requestId={} failureType={}",
+                    requestId,
+                    exception.getClass().getSimpleName());
+        }
+    }
+
+    /** Strips token accounting so a cached verdict can never be replayed as fresh spend. */
+    private static Map<String, Object> withoutUsage(Map<String, Object> ai) {
+        Map<String, Object> copy = new java.util.LinkedHashMap<>(ai);
+        for (String purpose : List.of("moderation", "classification", "adjudication")) {
+            Map<String, Object> signal = DecisionPolicy.nestedMap(ai, purpose);
+            if (!signal.isEmpty()) {
+                Map<String, Object> reduced = new java.util.LinkedHashMap<>(signal);
+                reduced.remove("usage");
+                copy.put(purpose, reduced);
+            }
+        }
+        return copy;
+    }
+
+    /** Audits, logs, and renders one handle decision. Every terminal path passes through here. */
+    private ModerationResponse finishHandle(
+            String contentId,
+            String requestId,
+            String handle,
+            String subjectId,
+            Map<String, Object> evidence,
+            DecisionPolicy.Result result,
+            UsernameDecisionAuditPayload.DecidingLayer layer,
+            PolicySignals signals,
+            FinancialPrivacy localFinancialPrivacy,
+            Map<String, Object> ai,
+            UsernameDecisionAuditPayload.VerdictSource verdictSource,
+            long startedAt) {
+        int latencyMs = (int) Math.min(
+                600_000,
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                        System.nanoTime() - startedAt));
+        AiUsage usage = ai == null || verdictSource
+                        == UsernameDecisionAuditPayload.VerdictSource.CACHE
+                ? AiUsage.noCalls()
+                : aiUsage(ai);
+
+        persistUsernameDecisionAudit(
+                requestId,
+                contentId,
+                subjectId,
+                handle,
+                evidence,
+                result,
+                layer,
+                signals,
+                localFinancialPrivacy,
+                ai,
+                verdictSource,
+                latencyMs);
+
+        log.info(
+                "handle decision requestId={} contentId={} decision={} violation={} "
+                        + "decidingLayer={} verdictSource={} registryDigest={} "
+                        + "inputTokens={} outputTokens={} totalTokens={} estimatedCostUsd={} "
+                        + "policyVersion={} latencyMs={}",
+                requestId,
+                contentId,
+                result.decision(),
+                result.violation(),
+                layer,
+                verdictSource,
+                evidence.getOrDefault("registryDigest", UNAVAILABLE),
+                usage.inputTokens(),
+                usage.outputTokens(),
+                usage.totalTokens(),
+                usage.estimatedCostUsd(),
+                DecisionPolicy.POLICY_VERSION,
+                latencyMs);
+
+        return new ModerationResponse(
+                contentId,
+                ContentType.USERNAME,
+                result.decision(),
+                result.violation(),
+                null,
+                null,
+                result.reason(),
+                null,
+                effectiveSafetyAction(result, signals),
+                signals == null ? safetyFor(result) : effectiveSafety(result, signals),
+                null,
+                signals == null ? localFinancialRisk(result) : signals.financialRisk(),
+                signals == null ? localFinancialPrivacy : signals.financialPrivacy(),
+                signals == null
+                        ? impersonationForHandle(result)
+                        : signals.impersonation(),
+                null,
+                null,
+                null,
+                null,
+                usage,
+                DecisionPolicy.POLICY_VERSION);
+    }
+
+    private void persistUsernameDecisionAudit(
+            String requestId,
+            String contentId,
+            String subjectId,
+            String handle,
+            Map<String, Object> evidence,
+            DecisionPolicy.Result result,
+            UsernameDecisionAuditPayload.DecidingLayer layer,
+            PolicySignals signals,
+            FinancialPrivacy localFinancialPrivacy,
+            Map<String, Object> ai,
+            UsernameDecisionAuditPayload.VerdictSource verdictSource,
+            int latencyMs) {
+        Map<String, Object> protectedMatch =
+                DecisionPolicy.nestedMap(evidence, "protectedMatch");
+        Map<String, Object> classification = ai == null
+                ? Map.of()
+                : DecisionPolicy.nestedMap(ai, "classification");
+        boolean protectedLayer =
+                layer == UsernameDecisionAuditPayload.DecidingLayer.PROTECTED_NAME;
+        UsernameDecisionAuditPayload payload = new UsernameDecisionAuditPayload(
+                requestId,
+                contentId,
+                subjectId == null || subjectId.isBlank() ? null : subjectId,
+                handle,
+                stringOrNull(evidence.get("skeleton")),
+                result.decision().name(),
+                result.violation().name(),
+                result.reason().name(),
+                layer.name(),
+                null,
+                protectedLayer ? longOrNull(protectedMatch.get("protectedNameId")) : null,
+                protectedLayer ? stringOrNull(protectedMatch.get("nameType")) : null,
+                protectedLayer ? stringOrNull(protectedMatch.get("matchKind")) : null,
+                layer == UsernameDecisionAuditPayload.DecidingLayer.COLLISION
+                        ? stringOrNull(evidence.get("collisionSubjectId"))
+                        : null,
+                integerOrNull(evidence.get("handleChangesInWindow")),
+                nameOrNull(effectiveSafetyAction(result, signals)),
+                nameOrNull(signals == null ? safetyFor(result) : effectiveSafety(result, signals)),
+                nameOrNull(signals == null
+                        ? localFinancialRisk(result)
+                        : signals.financialRisk()),
+                nameOrNull(signals == null
+                        ? localFinancialPrivacy
+                        : signals.financialPrivacy()),
+                nameOrNull(signals == null
+                        ? impersonationForHandle(result)
+                        : signals.impersonation()),
+                DecisionPolicy.POLICY_VERSION,
+                HandlePolicy.PROFILE_VERSION,
+                HandlePolicy.PROFILE_SHA256,
+                HandleSkeleton.PROFILE_VERSION,
+                HandleSkeleton.PROFILE_SHA256,
+                stringOrNull(evidence.get("registryDigest")),
+                integerOrNull(evidence.get("registryActiveCount")),
+                analysisStatus(classification),
+                actualModel(classification, analysisStatus(classification)),
+                properties.expectedClassificationModel(),
+                properties.expectedClassificationPromptBundleSha256(),
+                properties.expectedClassificationProfileSha256(),
+                verdictSource.name(),
+                latencyMs);
+        try {
+            clients.persistUsernameDecisionAudit(payload);
+        } catch (RuntimeException exception) {
+            log.error(
+                    "decision audit unavailable requestId={} failureType={}",
+                    requestId,
+                    exception.getClass().getSimpleName());
+            throw new ResponseStatusException(
+                    HttpStatus.SERVICE_UNAVAILABLE, "decision audit unavailable");
+        }
+    }
+
+    /** Impersonation reported when no classifier signal exists behind the decision. */
+    private static Impersonation impersonationForHandle(DecisionPolicy.Result result) {
+        return result.reason() == FinalReason.IMPERSONATION
+                ? (result.decision() == Decision.BLOCK
+                        ? Impersonation.CLEAR
+                        : Impersonation.POSSIBLE)
+                : impersonationFor(result);
+    }
+
+    private static String nameOrNull(Enum<?> value) {
+        return value == null ? null : value.name();
+    }
+
+    private static String stringOrNull(Object value) {
+        return value == null || String.valueOf(value).isBlank()
+                ? null
+                : String.valueOf(value);
+    }
+
+    private static Long longOrNull(Object value) {
+        return value instanceof Number number ? number.longValue() : null;
+    }
+
+    private static Integer integerOrNull(Object value) {
+        return value instanceof Number number ? number.intValue() : null;
     }
 
     private ModerationResponse localTerminalBlock(
@@ -566,6 +1054,15 @@ public class ModerationController {
         return limitWithoutSplittingSurrogate(text, MAX_ANALYSIS_TEXT_CHARS);
     }
 
+    private static String blocklistOcrText(Map<String, Object> media) {
+        Map<String, Object> ocr = DecisionPolicy.nestedMap(media, "ocr");
+        if (!Boolean.TRUE.equals(ocr.get("confidenceAccepted"))
+                || Boolean.TRUE.equals(ocr.get("truncated"))) {
+            return "";
+        }
+        return currentOcrText(media);
+    }
+
     static boolean validMediaEnvelope(Map<String, Object> media) {
         if (media == null || !"ok".equals(media.get("status"))) {
             return false;
@@ -619,6 +1116,7 @@ public class ModerationController {
             Map<String, Object> adjudication,
             PolicySignals signals,
             FinancialPrivacy localFinancialPrivacy,
+            String blockedTermsDigest,
             int latencyMs) {
         Map<String, Object> pdq = DecisionPolicy.nestedMap(media, "pdq");
         Map<String, Object> ocr = DecisionPolicy.nestedMap(media, "ocr");
@@ -640,7 +1138,8 @@ public class ModerationController {
                 image,
                 decoderProfileVersion,
                 visual,
-                aiConfiguration);
+                aiConfiguration,
+                blockedTermsDigest);
         String adjudicationStatus = analysisStatus(adjudication);
         String fallback = switch (adjudicationStatus) {
             case "not_required" -> "not_required";
@@ -665,7 +1164,7 @@ public class ModerationController {
                 enumName(signals == null ? null : signals.politicalContext()),
                 match.name(),
                 DecisionPolicy.POLICY_VERSION,
-                wordLists.policyDigest(),
+                blockedTermsDigest,
                 DecisionPolicy.authoritativeExactReferenceId(media),
                 DecisionPolicy.candidateIds(media),
                 "ok".equals(classification.get("status"))
@@ -918,7 +1417,8 @@ public class ModerationController {
             Map<String, Object> image,
             String decoderProfileVersion,
             VisualProvenance visual,
-            AiConfiguration aiConfiguration) {
+            AiConfiguration aiConfiguration,
+            String blockedTermsDigest) {
         String pdqAlgorithm = safeProvenanceValue(pdq.get("algorithm"), null);
         String pdqImplementation = safeProvenanceValue(pdq.get("implementation"), null);
         String pdqImplementationCommit = safeProvenanceValue(
@@ -999,7 +1499,7 @@ public class ModerationController {
                 "policy.reducerVersion=" + DecisionPolicy.REDUCER_VERSION,
                 "policy.referenceAssetVersion="
                         + DecisionPolicy.REFERENCE_ASSET_POLICY_VERSION,
-                "policy.wordListsDigest=" + wordLists.policyDigest(),
+                "policy.wordListsDigest=" + blockedTermsDigest,
                 "privacyScanner.profileVersion="
                         + FinancialPrivacyScanner.PROFILE_VERSION,
                 "privacyScanner.profileSha256="
@@ -1323,18 +1823,6 @@ public class ModerationController {
             end--;
         }
         return value.substring(0, end);
-    }
-
-    private Violation localViolation(ContentType type, String text) {
-        return switch (type) {
-            case COMMENT, POST -> {
-                Violation configuredViolation = wordLists.configuredViolation(text);
-                yield configuredViolation == Violation.IMPERSONATION
-                        ? Violation.NONE
-                        : configuredViolation;
-            }
-            case USERNAME -> DeterministicUsernamePolicy.violation(text, wordLists);
-        };
     }
 
     private Map<String, Object> analyzeText(

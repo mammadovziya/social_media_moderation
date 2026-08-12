@@ -21,7 +21,9 @@ public record MediaProperties(
         int ocrMaxTextChars,
         int ocrMaxSpans,
         double ocrMinConfidence,
-        int ocrMaxConcurrent) {
+        int ocrMaxConcurrent,
+        int handleChangeLimit,
+        int handleChangeWindowDays) {
 
     private static final Set<String> SUPPORTED_OCR_LANGUAGES =
             Set.of("aze", "eng", "rus", "tur");
@@ -78,6 +80,14 @@ public record MediaProperties(
         if (ocrMaxConcurrent < 1 || ocrMaxConcurrent > 8) {
             throw new IllegalArgumentException(
                     "OCR_MAX_CONCURRENT must be between 1 and 8");
+        }
+        if (handleChangeLimit < 1 || handleChangeLimit > 100) {
+            throw new IllegalArgumentException(
+                    "HANDLE_CHANGE_LIMIT must be between 1 and 100");
+        }
+        if (handleChangeWindowDays < 1 || handleChangeWindowDays > 365) {
+            throw new IllegalArgumentException(
+                    "HANDLE_CHANGE_WINDOW_DAYS must be between 1 and 365");
         }
     }
 

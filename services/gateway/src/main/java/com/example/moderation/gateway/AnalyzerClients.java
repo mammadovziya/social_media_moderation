@@ -115,6 +115,60 @@ public class AnalyzerClients {
                 .body(Map.class);
     }
 
+    /**
+     * Returns the deterministic handle evidence held by the media service: protected-name match,
+     * skeleton collision, change-rate state, and any cached model verdict.
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> evaluateHandle(
+            String handle,
+            String subjectId,
+            String classificationModel,
+            String promptBundleSha256,
+            String classificationProfileSha256) {
+        return mediaClient.post()
+                .uri("/internal/v1/handles/evaluate")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of(
+                        "handle", handle,
+                        "subjectId", subjectId == null ? "" : subjectId,
+                        "classificationModel", classificationModel,
+                        "promptBundleSha256", promptBundleSha256,
+                        "classificationProfileSha256", classificationProfileSha256))
+                .retrieve()
+                .body(Map.class);
+    }
+
+    /** Caches a fresh model verdict so the same handle resolves identically on a retry. */
+    public void recordHandleVerdict(
+            String handle,
+            String classificationModel,
+            String promptBundleSha256,
+            String classificationProfileSha256,
+            Map<String, Object> verdict) {
+        mediaClient.post()
+                .uri("/internal/v1/handles/verdict")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of(
+                        "handle", handle,
+                        "classificationModel", classificationModel,
+                        "promptBundleSha256", promptBundleSha256,
+                        "classificationProfileSha256", classificationProfileSha256,
+                        "verdict", verdict))
+                .retrieve()
+                .toBodilessEntity();
+    }
+
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> persistUsernameDecisionAudit(UsernameDecisionAuditPayload event) {
+        return mediaClient.post()
+                .uri("/internal/v1/audit/username-decision")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(event)
+                .retrieve()
+                .body(Map.class);
+    }
+
     public void persistImageDecisionAudit(ImageDecisionAuditPayload event) {
         mediaClient.post()
                 .uri("/internal/v1/audit/image-decision")

@@ -1,0 +1,2 @@
+# Dedicated blocklist used by gateway integration and controller tests.
+mockmvc response sentinel

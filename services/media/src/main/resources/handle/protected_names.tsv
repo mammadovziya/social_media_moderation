@@ -1,0 +1,123 @@
+# Protected-name registry seed. Tab-separated: value<TAB>type<TAB>severity
+#
+# type:     OWN_BRAND | OWN_PRODUCT | BANK | BROKER | REGULATOR | STAFF_ROLE | RESERVED
+# severity: CLEAR | POSSIBLE
+#
+# The seed is versioned data, not code. Skeletons are computed by HandleSkeleton at load time so
+# the registry can never drift from the folding the gateway applies to an incoming handle.
+#
+# DEPLOYMENT INPUT: replace the OWN_BRAND and OWN_PRODUCT placeholders with the operating bank's
+# own brand, products, and campaign names before production. A registry without them protects
+# every competitor and leaves the operator's own identity open.
+
+# --- Operator identity (placeholders, replace before production) ---
+ExampleBank	OWN_BRAND	CLEAR
+ExampleBank Invest	OWN_PRODUCT	CLEAR
+ExampleInvest	OWN_PRODUCT	CLEAR
+
+# --- Regulator and public authority ---
+Central Bank of Azerbaijan	REGULATOR	CLEAR
+Azerbaijan Central Bank	REGULATOR	CLEAR
+Merkezi Bank	REGULATOR	CLEAR
+Mərkəzi Bank	REGULATOR	CLEAR
+Центральный банк	REGULATOR	CLEAR
+Financial Market Supervision	REGULATOR	CLEAR
+Maliyye Bazarlarina Nezaret	REGULATOR	CLEAR
+
+# --- Banks operating in Azerbaijan ---
+Kapital Bank	BANK	CLEAR
+PASHA Bank	BANK	CLEAR
+ABB Bank	BANK	CLEAR
+Azerbaijan International Bank	BANK	CLEAR
+Birbank	BANK	CLEAR
+Unibank	BANK	CLEAR
+Xalq Bank	BANK	CLEAR
+Bank Respublika	BANK	CLEAR
+AccessBank	BANK	CLEAR
+Rabitabank	BANK	CLEAR
+Yelo Bank	BANK	CLEAR
+Bank of Baku	BANK	CLEAR
+TuranBank	BANK	CLEAR
+AFB Bank	BANK	CLEAR
+Expressbank	BANK	CLEAR
+Premium Bank	BANK	CLEAR
+Muganbank	BANK	CLEAR
+Bank Avrasiya	BANK	CLEAR
+Azer Turk Bank	BANK	CLEAR
+Naxcivanbank	BANK	CLEAR
+Ziraat Bank Azerbaijan	BANK	CLEAR
+VTB Azerbaijan	BANK	CLEAR
+
+# --- Brokers, exchanges, and investment firms ---
+Baku Stock Exchange	BROKER	CLEAR
+PASHA Capital	BROKER	CLEAR
+Unicapital	BROKER	CLEAR
+AzFinance	BROKER	CLEAR
+Invest AZ	BROKER	CLEAR
+Kapital Invest	BROKER	CLEAR
+
+# --- Staff and platform roles: English ---
+admin	STAFF_ROLE	CLEAR
+administrator	STAFF_ROLE	CLEAR
+moderator	STAFF_ROLE	CLEAR
+support	STAFF_ROLE	CLEAR
+helpdesk	STAFF_ROLE	CLEAR
+customer service	STAFF_ROLE	CLEAR
+customer support	STAFF_ROLE	CLEAR
+security team	STAFF_ROLE	CLEAR
+official	STAFF_ROLE	CLEAR
+staff	STAFF_ROLE	CLEAR
+sysadmin	STAFF_ROLE	CLEAR
+superuser	STAFF_ROLE	CLEAR
+root	STAFF_ROLE	CLEAR
+compliance officer	STAFF_ROLE	CLEAR
+account manager	STAFF_ROLE	CLEAR
+investment advisor	STAFF_ROLE	CLEAR
+portfolio manager	STAFF_ROLE	CLEAR
+
+# --- Staff and platform roles: Azerbaijani ---
+inzibatci	STAFF_ROLE	CLEAR
+inzibatçı	STAFF_ROLE	CLEAR
+destek	STAFF_ROLE	CLEAR
+dəstək	STAFF_ROLE	CLEAR
+musteri xidmeti	STAFF_ROLE	CLEAR
+müştəri xidməti	STAFF_ROLE	CLEAR
+tehlukesizlik	STAFF_ROLE	CLEAR
+təhlükəsizlik	STAFF_ROLE	CLEAR
+resmi	STAFF_ROLE	CLEAR
+rəsmi	STAFF_ROLE	CLEAR
+emekdas	STAFF_ROLE	CLEAR
+əməkdaş	STAFF_ROLE	CLEAR
+
+# --- Staff and platform roles: Turkish ---
+yonetici	STAFF_ROLE	CLEAR
+yönetici	STAFF_ROLE	CLEAR
+guvenlik	STAFF_ROLE	CLEAR
+güvenlik	STAFF_ROLE	CLEAR
+musteri hizmetleri	STAFF_ROLE	CLEAR
+müşteri hizmetleri	STAFF_ROLE	CLEAR
+
+# --- Staff and platform roles: Russian ---
+администратор	STAFF_ROLE	CLEAR
+модератор	STAFF_ROLE	CLEAR
+поддержка	STAFF_ROLE	CLEAR
+безопасность	STAFF_ROLE	CLEAR
+официальный	STAFF_ROLE	CLEAR
+служба поддержки	STAFF_ROLE	CLEAR
+сотрудник	STAFF_ROLE	CLEAR
+
+# --- Reserved platform words ---
+verified	RESERVED	CLEAR
+verification	RESERVED	CLEAR
+notification	RESERVED	CLEAR
+notifications	RESERVED	CLEAR
+settings	RESERVED	CLEAR
+privacy	RESERVED	CLEAR
+terms	RESERVED	CLEAR
+login	RESERVED	CLEAR
+signin	RESERVED	CLEAR
+signup	RESERVED	CLEAR
+register	RESERVED	CLEAR
+password	RESERVED	CLEAR
+system	RESERVED	CLEAR
+undefined	RESERVED	CLEAR

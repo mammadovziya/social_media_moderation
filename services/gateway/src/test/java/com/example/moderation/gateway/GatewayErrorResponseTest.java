@@ -2,6 +2,7 @@ package com.example.moderation.gateway;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.aMapWithSize;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
@@ -26,8 +27,9 @@ import org.springframework.web.client.HttpClientErrorException;
 
 @SpringBootTest(
         properties = {
-            "moderation.moderation-terms-path=classpath:policy/test_policy_terms.txt",
-            "moderation.max-image-bytes=3"
+            "moderation.max-image-bytes=3",
+            "moderation.blocked-terms-file=src/test/resources/blocked_terms.txt",
+            "moderation.internal-response-token=test-internal-token-0123456789-ABCDEFGHIJKL"
         })
 @AutoConfigureMockMvc
 class GatewayErrorResponseTest {
@@ -39,6 +41,51 @@ class GatewayErrorResponseTest {
 
     @MockBean
     private AnalyzerClients clients;
+
+    @Test
+    void successfulPublicResponseContainsOnlyDecisionAndViolation() throws Exception {
+        mockMvc.perform(multipart("/v1/moderate")
+                        .param("contentId", "post-minimal")
+                        .param("contentType", "POST")
+                        .param("text", "mockmvc response sentinel"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", "no-store, private"))
+                .andExpect(header().string("Vary", ModerationResponseAdvice.INTERNAL_TOKEN_HEADER))
+                .andExpect(jsonPath("$", aMapWithSize(2)))
+                .andExpect(jsonPath("$.decision").value("BLOCK"))
+                .andExpect(jsonPath("$.violation").value("OTHER"));
+    }
+
+    @Test
+    void authenticatedInternalResponseRetainsAuditEvidenceForLocalTools() throws Exception {
+        mockMvc.perform(multipart("/v1/moderate")
+                        .param("contentId", "post-internal")
+                        .param("contentType", "POST")
+                        .param("text", "mockmvc response sentinel")
+                        .header(
+                                ModerationResponseAdvice.INTERNAL_TOKEN_HEADER,
+                                "test-internal-token-0123456789-ABCDEFGHIJKL"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.contentId").value("post-internal"))
+                .andExpect(jsonPath("$.decision").value("BLOCK"))
+                .andExpect(jsonPath("$.aiUsage.meteredCalls").value(0))
+                .andExpect(jsonPath("$.policyVersion").isString());
+    }
+
+    @Test
+    void incorrectInternalTokenCannotExposeInternalFields() throws Exception {
+        mockMvc.perform(multipart("/v1/moderate")
+                        .param("contentId", "post-wrong-token")
+                        .param("contentType", "POST")
+                        .param("text", "mockmvc response sentinel")
+                        .header(
+                                ModerationResponseAdvice.INTERNAL_TOKEN_HEADER,
+                                "wrong-token"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", aMapWithSize(2)))
+                .andExpect(jsonPath("$.decision").value("BLOCK"))
+                .andExpect(jsonPath("$.violation").value("OTHER"));
+    }
 
     @Test
     void invalidContentTypeReturnsClearMessageAndSameRequestId() throws Exception {

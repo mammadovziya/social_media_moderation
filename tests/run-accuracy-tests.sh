@@ -478,33 +478,18 @@ while IFS= read -r test_case || [[ -n "$test_case" ]]; do
             "${http_code:-000}" "$curl_error"
     fi
 
-    for contract_field in contentId contentType; do
-        contract_total=$((contract_total + 1))
-        if [[ "$contract_field" == "contentId" ]]; then
-            contract_expected="$case_id"
-        else
-            contract_expected="$content_type"
-        fi
-        if [[ "$response_is_json" == true ]]; then
-            contract_actual="$(
-                jq -r --arg field "$contract_field" \
-                    'if has($field) then .[$field] else "__MISSING__" end' \
-                    "$body_file"
-            )"
-        else
-            contract_actual="__MISSING__"
-        fi
-        if [[ "$contract_actual" == "$contract_expected" ]]; then
-            contract_correct=$((contract_correct + 1))
-        else
-            case_pass=false
-            printf '%sMismatch:%s %s expected=%s actual=%s\n' \
-                "$COLOR_YELLOW" "$COLOR_RESET" "$contract_field" \
-                "$contract_expected" "$contract_actual"
-        fi
-    done
+    contract_total=$((contract_total + 1))
+    if [[ "$response_is_json" == true ]] \
+        && jq -e 'keys | sort == ["decision", "violation"]' \
+            "$body_file" >/dev/null 2>&1; then
+        contract_correct=$((contract_correct + 1))
+    else
+        case_pass=false
+        printf '%sMismatch:%s response must contain exactly decision and violation\n' \
+            "$COLOR_YELLOW" "$COLOR_RESET"
+    fi
 
-    for field_name in decision violation reason domain safetyAction safety financialClaim financialRisk financialPrivacy impersonation politicalContext investment politics; do
+    for field_name in decision violation; do
         expected_value="$(
             jq -r --arg field "$field_name" \
                 'if (.expected | has($field)) then
@@ -620,17 +605,6 @@ print_metric "Turkish exact accuracy" "$tr_correct" "$tr_total"
 printf '\nBy label\n'
 print_metric "decision" "$decision_correct" "$decision_total"
 print_metric "violation" "$violation_correct" "$violation_total"
-print_metric "reason" "$reason_correct" "$reason_total"
-print_metric "domain" "$domain_correct" "$domain_total"
-print_metric "safetyAction" "$safety_action_correct" "$safety_action_total"
-print_metric "safety" "$safety_correct" "$safety_total"
-print_metric "financialClaim" "$financial_claim_correct" "$financial_claim_total"
-print_metric "financialRisk" "$financial_risk_correct" "$financial_risk_total"
-print_metric "financialPrivacy" "$financial_privacy_correct" "$financial_privacy_total"
-print_metric "impersonation" "$impersonation_correct" "$impersonation_total"
-print_metric "politicalContext" "$political_context_correct" "$political_context_total"
-print_metric "investment" "$investment_correct" "$investment_total"
-print_metric "politics" "$politics_correct" "$politics_total"
 
 exact_accuracy="$(percentage "$exact_correct" "$case_count")"
 api_failures=$((case_count - api_success))

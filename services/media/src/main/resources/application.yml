@@ -48,6 +48,8 @@ media:
   ocr-max-spans: ${OCR_MAX_SPANS:256}
   ocr-min-confidence: ${OCR_MIN_CONFIDENCE:45.0}
   ocr-max-concurrent: ${OCR_MAX_CONCURRENT:2}
+  handle-change-limit: ${HANDLE_CHANGE_LIMIT:2}
+  handle-change-window-days: ${HANDLE_CHANGE_WINDOW_DAYS:14}
 
 visual-retrieval:
   url: ${VISUAL_RETRIEVAL_URL:http://visual-retrieval:8000}

@@ -1,42 +1,32 @@
 package com.example.moderation.gateway.api;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonView;
 import io.swagger.v3.oas.annotations.media.Schema;
 
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record ModerationResponse(
-        String contentId,
-        ContentType contentType,
-        Decision decision,
-        Violation violation,
-        @Schema(
-                        description = "Legacy investment relevance; prefer domain",
-                        deprecated = true)
-        Investment investment,
-        @Schema(
-                        description = "Legacy political-position signal; prefer politicalContext",
-                        deprecated = true)
-        Politics politics,
-        FinalReason reason,
-        Domain domain,
-        @Schema(description = "Independent safety-axis decision")
-        Decision safetyAction,
-        Safety safety,
-        FinancialClaim financialClaim,
-        FinancialRisk financialRisk,
-        FinancialPrivacy financialPrivacy,
-        Impersonation impersonation,
-        PoliticalContext politicalContext,
-        ImageMatch imageMatch,
-        @Schema(
-                        description = "Similarity score derived from the best image candidate match",
-                        minimum = "0",
-                        maximum = "100")
-                Integer imageMatchScore,
-        @Schema(
-                        description =
-                                "Bounded diagnostic OCR text extracted from the current image; omitted when OCR produced no text",
-                        maxLength = 20_000)
-                String ocrText,
-        AiUsage aiUsage,
-        String policyVersion) {}
+        @JsonView(Internal.class) @Schema(hidden = true) String contentId,
+        @JsonView(Internal.class) @Schema(hidden = true) ContentType contentType,
+        @JsonView(Public.class) Decision decision,
+        @JsonView(Public.class) Violation violation,
+        @JsonView(Internal.class) @Schema(hidden = true) Investment investment,
+        @JsonView(Internal.class) @Schema(hidden = true) Politics politics,
+        @JsonView(Internal.class) @Schema(hidden = true) FinalReason reason,
+        @JsonView(Internal.class) @Schema(hidden = true) Domain domain,
+        @JsonView(Internal.class) @Schema(hidden = true) Decision safetyAction,
+        @JsonView(Internal.class) @Schema(hidden = true) Safety safety,
+        @JsonView(Internal.class) @Schema(hidden = true) FinancialClaim financialClaim,
+        @JsonView(Internal.class) @Schema(hidden = true) FinancialRisk financialRisk,
+        @JsonView(Internal.class) @Schema(hidden = true) FinancialPrivacy financialPrivacy,
+        @JsonView(Internal.class) @Schema(hidden = true) Impersonation impersonation,
+        @JsonView(Internal.class) @Schema(hidden = true) PoliticalContext politicalContext,
+        @JsonView(Internal.class) @Schema(hidden = true) ImageMatch imageMatch,
+        @JsonView(Internal.class) @Schema(hidden = true) Integer imageMatchScore,
+        @JsonView(Internal.class) @Schema(hidden = true) String ocrText,
+        @JsonView(Internal.class) @Schema(hidden = true) AiUsage aiUsage,
+        @JsonView(Internal.class) @Schema(hidden = true) String policyVersion) {
+    public interface Public {}
+
+    public interface Internal extends Public {}
+}

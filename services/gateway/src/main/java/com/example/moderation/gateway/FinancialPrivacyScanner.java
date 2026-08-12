@@ -26,94 +26,15 @@ public final class FinancialPrivacyScanner {
     private static final Pattern FORMAT_CHARACTER = Pattern.compile("\\p{Cf}");
     private static final Pattern PAN_CANDIDATE = Pattern.compile(
             "(?<![\\p{L}\\p{N}])(?:\\p{Nd}[\\p{Zs}-]?){12,18}\\p{Nd}(?![\\p{L}\\p{N}])");
-    private static final Pattern CARD_LABEL = Pattern.compile(
-            "(?iu)(?:card\\s*(?:number|no|#)|pan|kart\\s*(?:nömrəsi|numarası)|"
-                    + "номер\\s+карт(?:ы|очки))\\s*(?:[:=#-]|is|dır|dir)?\\s*$");
     private static final Pattern IBAN_CANDIDATE = Pattern.compile(
             "(?i)(?<![A-Z0-9])[A-Z]{2}\\d{2}(?:[ -]?[A-Z0-9]){11,30}(?![A-Z0-9])");
-
-    private static final String VALUE_ASSIGNMENT =
-            "\\s*(?::|=|(?:(?:is|dır|dir|budur|это|равен|равна)\\b))\\s*";
-    private static final Pattern CARD_SECURITY_CODE = Pattern.compile(
-            "(?iu)(?:cvv2?|cvc2?|card\\s+(?:security|verification)\\s+(?:code|value)|"
-                    + "kart(?:ın)?\\s+təhlükəsizlik\\s+kodu|kart\\s+güvenlik\\s+kodu|"
-                    + "код\\s+безопасности)"
-                    + VALUE_ASSIGNMENT
-                    + "(\\p{Nd}{3,4})(?!\\p{Nd})");
-    private static final Pattern LOGIN_CREDENTIAL = Pattern.compile(
-            "(?iu)(?:password|passcode|password\\s+for\\s+login|login|user\\s*name|"
-                    + "şifrə|giriş\\s+şifrəsi|parola|şifre|kullanıcı\\s+adı|"
-                    + "пароль|логин|имя\\s+пользователя|pin(?:\\s*code)?|пин(?:-?код)?|"
-                    + "otp|one[- ]time\\s+password|birdəfəlik\\s+şifrə|"
-                    + "tek\\s+kullanımlık\\s+şifre|одноразовый\\s+пароль)"
-                    + VALUE_ASSIGNMENT
-                    + "([^\\s,;]{3,128})");
-    private static final Pattern RECOVERY_OR_PRIVATE_KEY = Pattern.compile(
-            "(?iu)(?:seed\\s+phrase|recovery\\s+phrase|mnemonic(?:\\s+phrase)?|"
-                    + "private\\s+key|gizli\\s+açar|kurtarma\\s+ifadesi|özel\\s+anahtar|"
-                    + "сид(?:овая)?\\s+фраза|фраза\\s+восстановления|закрытый\\s+ключ)"
-                    + VALUE_ASSIGNMENT
-                    + "((?:(?:\\p{L}{2,24})[ \\t]+){5,23}\\p{L}{2,24}|"
-                    + "(?:0x)?[A-Fa-f0-9]{32,128}|[A-Za-z0-9_-]{24,256})");
-    private static final Pattern ACCESS_TOKEN = Pattern.compile(
-            "(?iu)(?:api[- ]?key|access[- ]?token|auth(?:entication)?[- ]?token|"
-                    + "session[- ]?token|bearer|giriş\\s+tokeni|erişim\\s+belirteci|"
-                    + "токен\\s+доступа|ключ\\s+api)"
-                    + VALUE_ASSIGNMENT
-                    + "([^\\s,;]{12,512})");
-    private static final Pattern TOKENIZED_LINK = Pattern.compile(
-            "(?iu)https?://[^\\s]{1,1024}[?&](?:access_token|auth_token|token|code)="
-                    + "[A-Za-z0-9._~+/=-]{8,512}");
-
-    private static final String ACCOUNT_LABEL =
-            "(?:bank\\s+account(?:\\s*(?:number|no|id))?|"
-                    + "brokerage\\s+account(?:\\s*(?:number|no|id))?|"
-                    + "trading\\s+account(?:\\s*(?:number|no|id))?|"
-                    + "account\\s*(?:number|no|id)|"
-                    + "bank\\s+hesab(?:ı|i)(?:n\\p{L}*)?\\s+nömrəsi|hesab\\s+nömrəsi|"
-                    + "banka\\s+hesab(?:ı|i)\\s+numarası|hesap\\s+numarası|"
-                    + "номер\\s+(?:банковского\\s+|брокерского\\s+)?сч[её]та|"
-                    + "банковский\\s+сч[её]т|брокерский\\s+сч[её]т)";
-    private static final Pattern ACCOUNT_IDENTIFIER = Pattern.compile(
-            "(?iu)" + ACCOUNT_LABEL + VALUE_ASSIGNMENT + "([\\p{L}\\p{Nd}](?:[\\p{L}\\p{Nd}._ -]{4,62})[\\p{L}\\p{Nd}])");
-    private static final Pattern ACCOUNT_BALANCE = Pattern.compile(
-            "(?iu)(?:(?:account|bank(?:\\s+account)?|brokerage(?:\\s+account)?|"
-                    + "portfolio|trading(?:\\s+account)?|wallet)\\s+balance|"
-                    + "hesab\\s+balansı|hesap\\s+bakiyesi|баланс\\s+(?:банковского\\s+|"
-                    + "брокерского\\s+)?сч[её]та)"
-                    + VALUE_ASSIGNMENT
-                    + "((?:[$€₼₽£]|AZN|USD|EUR|GBP|RUB|TRY|USDT|BTC|ETH)\\s*"
-                    + "\\p{Nd}[\\p{Nd}., ]{0,28}|\\p{Nd}[\\p{Nd}., ]{0,28}\\s*"
-                    + "(?:AZN|USD|EUR|GBP|RUB|TRY|USDT|BTC|ETH))");
-    private static final Pattern TRANSACTION_IDENTIFIER = Pattern.compile(
-            "(?iu)(?:bank\\s+transaction|bank\\s+transfer|wire\\s+transfer|payment|"
-                    + "ödəniş|bank\\s+əməliyyatı|havale|banka\\s+işlemi|банковск(?:ая|ой)\\s+"
-                    + "(?:операция|перевод))\\s*(?:id|identifier|reference|number|no|#|"
-                    + "nömrəsi|referansı|numarası|ссылк[аи]|номер)"
-                    + VALUE_ASSIGNMENT
-                    + "([\\p{L}\\p{Nd}][\\p{L}\\p{Nd}._/-]{5,127})");
-
-    private static final Pattern LABELED_WALLET_ADDRESS = Pattern.compile(
-            "(?iu)(?:wallet(?:\\s+address)?|crypto\\s+address|cüzdan\\s+(?:ünvanı|adresi)|"
-                    + "кошел[её]к(?:\\s+адрес)?|адрес\\s+кошелька)"
-                    + VALUE_ASSIGNMENT
-                    + "([A-Za-z0-9:_-]{20,128})");
-
-    private static final Pattern TAX_IDENTIFIER = Pattern.compile(
-            "(?iu)(?:tax\\s*(?:id|identifier|number)|tin|vöen|vergi\\s+kimlik\\s+numarası|"
-                    + "tckn|vkn|инн|налоговый\\s+номер)"
-                    + VALUE_ASSIGNMENT
-                    + "([\\p{L}\\p{Nd}-]{8,20})");
     private static final Pattern EMAIL_ADDRESS = Pattern.compile(
             "(?iu)(?<![\\p{L}\\p{N}._%+-])[\\p{L}\\p{N}._%+-]{1,64}"
                     + "@[\\p{L}\\p{N}-]+(?:\\.[\\p{L}\\p{N}-]+){1,10}(?![\\p{L}\\p{N}._%+-])");
     private static final Pattern PHONE_CANDIDATE = Pattern.compile(
             "(?<![\\p{L}\\p{N}])(?:\\+?\\p{Nd}[\\p{Nd}(). -]{5,24}\\p{Nd})(?![\\p{L}\\p{N}])");
-    private static final Pattern PHONE_LABEL = Pattern.compile(
-            "(?iu)(?:phone|mobile|telephone|tel|telefon|mobil|телефон|мобильный)"
-                    + "\\s*(?:[:=#-]|is|dır|dir)?\\s*$");
 
-    static final String PROFILE_VERSION = "financial-privacy-scanner-v1";
+    static final String PROFILE_VERSION = "financial-privacy-scanner-v2";
     static final String PROFILE_SHA256 = profileSha256();
 
     public Result scan(String text) {
@@ -128,26 +49,6 @@ public final class FinancialPrivacyScanner {
 
         scanPan(normalized, findings);
         scanIban(normalized, findings);
-        findAssignedValue(normalized, CARD_SECURITY_CODE, FindingType.CARD_SECURITY_CODE, findings);
-        findAssignedValue(normalized, LOGIN_CREDENTIAL, FindingType.LOGIN_CREDENTIAL, findings);
-        findAssignedValue(
-                normalized,
-                RECOVERY_OR_PRIVATE_KEY,
-                FindingType.RECOVERY_OR_PRIVATE_KEY,
-                findings);
-        findAssignedValue(normalized, ACCESS_TOKEN, FindingType.ACCESS_TOKEN, findings);
-        if (TOKENIZED_LINK.matcher(normalized).find()) {
-            findings.add(FindingType.ACCESS_TOKEN, Severity.CLEAR);
-        }
-        scanAccountIdentifiers(normalized, findings);
-        findAssignedValue(normalized, ACCOUNT_BALANCE, FindingType.ACCOUNT_BALANCE, findings);
-        findAssignedValue(
-                normalized,
-                TRANSACTION_IDENTIFIER,
-                FindingType.TRANSACTION_IDENTIFIER,
-                findings);
-        scanWalletAddresses(normalized, findings);
-        scanTaxIdentifiers(normalized, findings);
         scanContactInformation(normalized, findings);
 
         return findings.result();
@@ -162,8 +63,6 @@ public final class FinancialPrivacyScanner {
             }
             if (passesLuhn(digits)) {
                 findings.add(FindingType.PAN, Severity.CLEAR);
-            } else if (hasLabelBefore(text, matcher.start(), CARD_LABEL, 64)) {
-                findings.add(FindingType.PAN, Severity.POSSIBLE);
             }
         }
     }
@@ -173,43 +72,6 @@ public final class FinancialPrivacyScanner {
         while (matcher.find()) {
             if (passesIbanMod97(matcher.group())) {
                 findings.add(FindingType.IBAN, Severity.CLEAR);
-            } else {
-                // The country/check-digit prefix makes even a mistyped value sensitive enough
-                // to avoid silently treating it as ordinary prose.
-                findings.add(FindingType.IBAN, Severity.POSSIBLE);
-            }
-        }
-    }
-
-    private static void scanAccountIdentifiers(String text, Accumulator findings) {
-        Matcher matcher = ACCOUNT_IDENTIFIER.matcher(text);
-        while (matcher.find()) {
-            String compact = matcher.group(1).replaceAll("[^\\p{L}\\p{Nd}]", "");
-            long digits = compact.codePoints().filter(Character::isDigit).count();
-            if (compact.length() >= 6 && digits >= 4) {
-                findings.add(FindingType.BANK_OR_BROKERAGE_ACCOUNT, Severity.CLEAR);
-            } else if (compact.length() >= 6 && digits >= 2) {
-                findings.add(FindingType.BANK_OR_BROKERAGE_ACCOUNT, Severity.POSSIBLE);
-            }
-        }
-    }
-
-    private static void scanWalletAddresses(String text, Accumulator findings) {
-        Matcher labeled = LABELED_WALLET_ADDRESS.matcher(text);
-        while (labeled.find()) {
-            findings.add(FindingType.WALLET_ADDRESS, Severity.POSSIBLE);
-        }
-    }
-
-    private static void scanTaxIdentifiers(String text, Accumulator findings) {
-        Matcher matcher = TAX_IDENTIFIER.matcher(text);
-        while (matcher.find()) {
-            String compact = matcher.group(1).replaceAll("[^\\p{L}\\p{Nd}]", "");
-            long digits = compact.codePoints().filter(Character::isDigit).count();
-            if (compact.length() >= 8 && digits >= 4) {
-                findings.add(FindingType.TAX_IDENTIFIER, Severity.CLEAR);
-            } else if (compact.length() >= 8 && digits >= 2) {
-                findings.add(FindingType.TAX_IDENTIFIER, Severity.POSSIBLE);
             }
         }
     }
@@ -221,10 +83,8 @@ public final class FinancialPrivacyScanner {
 
         Matcher matcher = PHONE_CANDIDATE.matcher(text);
         while (matcher.find()) {
-            if (overlapsMatch(text, matcher.start(), matcher.end(), PAN_CANDIDATE)
-                    || overlapsMatch(text, matcher.start(), matcher.end(), IBAN_CANDIDATE)
-                    || overlapsMatch(text, matcher.start(), matcher.end(), ACCOUNT_IDENTIFIER)
-                    || overlapsMatch(text, matcher.start(), matcher.end(), TAX_IDENTIFIER)) {
+            if (overlapsValidPan(text, matcher.start(), matcher.end())
+                    || overlapsMatch(text, matcher.start(), matcher.end(), IBAN_CANDIDATE)) {
                 continue;
             }
             String candidate = matcher.group();
@@ -239,29 +99,25 @@ public final class FinancialPrivacyScanner {
             boolean formatted = candidate.indexOf('(') >= 0
                     || candidate.indexOf(')') >= 0
                     || candidate.indexOf(' ') >= 0
-                    || candidate.indexOf('-') >= 0;
-            boolean labeled = hasLabelBefore(text, matcher.start(), PHONE_LABEL, 32);
-            if (explicitInternational || labeled || (formatted && digits.length() >= 10)) {
+                    || candidate.indexOf('-') >= 0
+                    || candidate.indexOf('.') >= 0;
+            if (explicitInternational || (formatted && digits.length() >= 10)) {
                 findings.add(FindingType.PHONE_NUMBER, Severity.POSSIBLE);
             }
         }
     }
 
-    private static void findAssignedValue(
-            String text, Pattern pattern, FindingType type, Accumulator findings) {
-        Matcher matcher = pattern.matcher(text);
+    private static boolean overlapsValidPan(
+            String text, int candidateStart, int candidateEnd) {
+        Matcher matcher = PAN_CANDIDATE.matcher(text);
         while (matcher.find()) {
-            String value = matcher.group(1);
-            if (!isPlaceholder(value)) {
-                findings.add(type, Severity.CLEAR);
+            if (candidateStart < matcher.end()
+                    && candidateEnd > matcher.start()
+                    && passesLuhn(digitsOnly(matcher.group()))) {
+                return true;
             }
         }
-    }
-
-    private static boolean hasLabelBefore(
-            String text, int valueStart, Pattern labelPattern, int windowLength) {
-        int start = Math.max(0, valueStart - windowLength);
-        return labelPattern.matcher(text.substring(start, valueStart)).find();
+        return false;
     }
 
     private static boolean overlapsMatch(
@@ -273,23 +129,6 @@ public final class FinancialPrivacyScanner {
             }
         }
         return false;
-    }
-
-    private static boolean isPlaceholder(String value) {
-        String normalized = value.toLowerCase(Locale.ROOT)
-                .replaceAll("^[\\[({<]+|[\\])}>]+$", "");
-        return normalized.equals("redacted")
-                || normalized.equals("hidden")
-                || normalized.equals("example")
-                || normalized.equals("required")
-                || normalized.equals("mandatory")
-                || normalized.equals("unknown")
-                || normalized.equals("none")
-                || normalized.equals("unset")
-                || normalized.equals("changed")
-                || normalized.chars().allMatch(character -> character == 'x'
-                        || character == '*'
-                        || character == '-');
     }
 
     private static String digitsOnly(String value) {
@@ -362,22 +201,12 @@ public final class FinancialPrivacyScanner {
                 "version=" + PROFILE_VERSION,
                 "normalization=NFKC;remove-format-characters",
                 "pan=" + PAN_CANDIDATE.pattern(),
-                "cardLabel=" + CARD_LABEL.pattern(),
                 "iban=" + IBAN_CANDIDATE.pattern(),
-                "cardSecurityCode=" + CARD_SECURITY_CODE.pattern(),
-                "loginCredential=" + LOGIN_CREDENTIAL.pattern(),
-                "recoveryOrPrivateKey=" + RECOVERY_OR_PRIVATE_KEY.pattern(),
-                "accessToken=" + ACCESS_TOKEN.pattern(),
-                "tokenizedLink=" + TOKENIZED_LINK.pattern(),
-                "accountIdentifier=" + ACCOUNT_IDENTIFIER.pattern(),
-                "accountBalance=" + ACCOUNT_BALANCE.pattern(),
-                "transactionIdentifier=" + TRANSACTION_IDENTIFIER.pattern(),
-                "labeledWallet=" + LABELED_WALLET_ADDRESS.pattern(),
-                "taxIdentifier=" + TAX_IDENTIFIER.pattern(),
                 "email=" + EMAIL_ADDRESS.pattern(),
                 "phone=" + PHONE_CANDIDATE.pattern(),
                 "validators=luhn-distinct-digits;iban-mod97",
-                "severity=valid-pan-iban-clear;labeled-wallet-possible;credentials-clear;contact-possible");
+                "severity=valid-pan-iban-clear;structural-contact-possible",
+                "lexical-matching=disabled");
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
                     .digest(canonical.getBytes(StandardCharsets.UTF_8)));
@@ -399,15 +228,6 @@ public final class FinancialPrivacyScanner {
     public enum FindingType {
         PAN,
         IBAN,
-        CARD_SECURITY_CODE,
-        LOGIN_CREDENTIAL,
-        RECOVERY_OR_PRIVATE_KEY,
-        ACCESS_TOKEN,
-        BANK_OR_BROKERAGE_ACCOUNT,
-        ACCOUNT_BALANCE,
-        TRANSACTION_IDENTIFIER,
-        WALLET_ADDRESS,
-        TAX_IDENTIFIER,
         PHONE_NUMBER,
         EMAIL_ADDRESS
     }

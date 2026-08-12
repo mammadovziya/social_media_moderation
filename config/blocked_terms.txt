@@ -1,0 +1,11 @@
+# Local blocked terms. One term or phrase per line; blank lines and lines starting with # are
+# ignored. Matching is whole-token/phrase, case-insensitive, and NFKC-normalized, so a term never
+# fires on a substring of a longer word.
+#
+# This list is intentionally empty. Lexical rules are a last resort in this design: current-content
+# analysis decides meaning, and a word list cannot tell a slur from a quotation of one. Add a term
+# only when it must block regardless of context, and record why.
+#
+# Save by atomically replacing this file. It is reloaded between requests. An unreadable or
+# invalid file keeps the last valid snapshot and marks the service not ready, so a bad edit cannot
+# silently disable the policy.

@@ -41,7 +41,7 @@ moderation:
   unknown-threshold: ${MODERATION_UNKNOWN_THRESHOLD:0.70}
   expected-moderation-model: ${OPENAI_MODERATION_MODEL:omni-moderation-2024-09-26}
   expected-moderation-profile-sha256: ${OPENAI_MODERATION_PROFILE_SHA256:25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073}
-  expected-classification-model: ${OPENAI_CUSTOM_MODEL:gpt-4o-mini}
+  expected-classification-model: ${OPENAI_CUSTOM_MODEL:gpt-5.4-mini}
   expected-classification-prompt-bundle-sha256: ${OPENAI_CLASSIFICATION_PROMPT_BUNDLE_SHA256:644044f7960b05e48529003e03f6b69f3dd932a31d6e39d7b4e01d57f5aa9f7e}
   expected-classification-profile-sha256: ${OPENAI_CLASSIFICATION_PROFILE_SHA256:de5d6be741ee1f30bfff85de54c71133ad541593083e7d857ff04c028dee0289}
   expected-adjudication-model: ${OPENAI_ADJUDICATION_MODEL:gpt-5.6-terra}
@@ -50,5 +50,5 @@ moderation:
   expected-adjudication-prompt-sha256: ${OPENAI_ADJUDICATION_PROMPT_SHA256:20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8}
   expected-adjudication-profile-sha256: ${OPENAI_ADJUDICATION_PROFILE_SHA256:07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef}
   expected-open-ai-timeout-seconds: ${OPENAI_TIMEOUT_SECONDS:30}
-  moderation-terms-path: ${MODERATION_TERMS_PATH:file:./config/moderation_terms.txt}
-  political-words-path: ${POLITICAL_WORDS_PATH:classpath:policy/political_words.txt}
+  blocked-terms-file: ${BLOCKED_TERMS_FILE:${user.dir}/config/blocked_terms.txt}
+  internal-response-token: ${MODERATION_INTERNAL_RESPONSE_TOKEN:}
