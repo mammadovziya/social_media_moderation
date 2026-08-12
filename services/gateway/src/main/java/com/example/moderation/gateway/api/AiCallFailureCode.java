@@ -1,0 +1,17 @@
+package com.example.moderation.gateway.api;
+
+/** Safe, stable failure classification for a billed AI model call. */
+public enum AiCallFailureCode {
+    NONE,
+    INCOMPLETE_RESPONSE,
+    UNEXPECTED_OUTPUT,
+    INVALID_OUTPUT_TEXT,
+    AMBIGUOUS_OUTPUT,
+    INVALID_STRUCTURED_OUTPUT,
+    SCHEMA_FIELDS_MISMATCH,
+    SCHEMA_VALUE_INVALID,
+    DECISION_CONTRACT_INCONSISTENT,
+    ADJUDICATION_CONTRACT_INCONSISTENT,
+    PROVIDER_RESPONSE_INVALID,
+    CONFIGURATION_MISMATCH
+}

@@ -23,6 +23,15 @@ class ImageDecisionAuditRepository {
                             content_id,
                             final_decision,
                             violation,
+                            final_reason,
+                            domain,
+                            safety_action,
+                            safety,
+                            financial_claim,
+                            financial_risk,
+                            financial_privacy,
+                            impersonation,
+                            political_context,
                             image_match,
                             policy_version,
                             policy_word_lists_digest,
@@ -74,6 +83,15 @@ class ImageDecisionAuditRepository {
                             :contentId,
                             :finalDecision,
                             :violation,
+                            :finalReason,
+                            :domain,
+                            :safetyAction,
+                            :safety,
+                            :financialClaim,
+                            :financialRisk,
+                            :financialPrivacy,
+                            :impersonation,
+                            :politicalContext,
                             :imageMatch,
                             :policyVersion,
                             :policyWordListsDigest,
@@ -126,6 +144,15 @@ class ImageDecisionAuditRepository {
                 .param("contentId", event.contentId())
                 .param("finalDecision", event.finalDecision())
                 .param("violation", event.violation())
+                .param("finalReason", event.finalReason(), Types.VARCHAR)
+                .param("domain", event.domain(), Types.VARCHAR)
+                .param("safetyAction", event.safetyAction(), Types.VARCHAR)
+                .param("safety", event.safety(), Types.VARCHAR)
+                .param("financialClaim", event.financialClaim(), Types.VARCHAR)
+                .param("financialRisk", event.financialRisk(), Types.VARCHAR)
+                .param("financialPrivacy", event.financialPrivacy(), Types.VARCHAR)
+                .param("impersonation", event.impersonation(), Types.VARCHAR)
+                .param("politicalContext", event.politicalContext(), Types.VARCHAR)
                 .param("imageMatch", event.imageMatch())
                 .param("policyVersion", event.policyVersion())
                 .param("policyWordListsDigest", event.policyWordListsDigest(), Types.CHAR)

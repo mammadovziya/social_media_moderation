@@ -1,4 +1,4 @@
 # Test-only placeholder terms
-VULGAR|reject alpha
-SEXUAL|reject beta
+VULGAR|policy marker alpha
+SEXUAL|policy marker beta
 IMPERSONATION|reserved account

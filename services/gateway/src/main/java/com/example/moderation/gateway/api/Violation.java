@@ -16,6 +16,11 @@ public enum Violation {
     SPAM_SCAM,
     VULGAR,
     IMPERSONATION,
+    OFF_TOPIC,
+    FINANCIAL_PRIVACY,
+    FINANCIAL_RISK,
+    /** @deprecated Use {@link #OFF_TOPIC}. */
+    @Deprecated
     NOT_INVESTMENT,
     KNOWN_IMAGE,
     EVIDENCE_UNAVAILABLE,
@@ -41,6 +46,9 @@ public enum Violation {
             case "spam_scam" -> SPAM_SCAM;
             case "vulgar" -> VULGAR;
             case "impersonation", "reserved_username" -> IMPERSONATION;
+            case "off_topic", "not_investment" -> OFF_TOPIC;
+            case "financial_privacy" -> FINANCIAL_PRIVACY;
+            case "financial_risk" -> FINANCIAL_RISK;
             default -> OTHER;
         };
     }

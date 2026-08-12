@@ -13,15 +13,27 @@ public interface AiProvider {
     Map<String, Object> moderateText(String text);
 
     Map<String, Object> moderateImage(
-            byte[] bytes, String contentType, String contextText);
+            byte[] bytes,
+            String contentType,
+            String text,
+            String ocrText);
 
-    Map<String, Object> classifyText(ContentType contentType, String text);
+    Map<String, Object> classifyText(
+            ContentType contentType,
+            String text,
+            String parentPostText,
+            String authorUsername,
+            String quotedText);
 
     Map<String, Object> classifyImage(
             ContentType contentType,
             byte[] bytes,
             String imageContentType,
-            String text);
+            String text,
+            String ocrText,
+            String ocrStatus,
+            boolean ocrConfidenceAccepted,
+            boolean ocrTruncated);
 
     Map<String, Object> adjudicateImage(
             byte[] bytes,

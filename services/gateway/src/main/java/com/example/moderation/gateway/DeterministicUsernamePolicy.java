@@ -38,12 +38,26 @@ final class DeterministicUsernamePolicy {
             "platforma",
             "tribe",
             "bank",
+            "broker",
+            "brokerage",
+            "investment",
+            "portfolio",
+            "trading",
             "customer",
             "client",
             "service",
             "team",
             "fake",
             "notreal");
+    private static final Set<String> LATIN_FINANCIAL_IDENTITY_CUES = Set.of(
+            "platform",
+            "platforma",
+            "bank",
+            "broker",
+            "brokerage",
+            "investment",
+            "portfolio",
+            "trading");
     private static final Set<String> LATIN_SECONDARY_ROLES = Set.of(
             "support",
             "helpdesk",
@@ -52,6 +66,9 @@ final class DeterministicUsernamePolicy {
             "system",
             "root",
             "superuser",
+            "advisor",
+            "adviser",
+            "manager",
             "destek",
             "destegi",
             "desteyi");
@@ -68,7 +85,7 @@ final class DeterministicUsernamePolicy {
         }
 
         String tokenizedText = CAMEL_CASE_BOUNDARY.matcher(text).replaceAll(" ");
-        Violation dictionaryViolation = wordLists.bannedViolation(tokenizedText);
+        Violation dictionaryViolation = wordLists.configuredViolation(tokenizedText);
         if (dictionaryViolation != Violation.NONE
                 && dictionaryViolation != Violation.IMPERSONATION) {
             return dictionaryViolation;
@@ -135,10 +152,13 @@ final class DeterministicUsernamePolicy {
         boolean hasSecondaryRole =
                 tokens.stream().anyMatch(LATIN_SECONDARY_ROLES::contains);
         String compact = compact(latinSkeleton);
-        if (LATIN_SECONDARY_ROLES.contains(compact)) {
+        if (hasCue && hasSecondaryRole) {
             return true;
         }
-        if (hasCue && hasSecondaryRole) {
+        boolean officialFinancialIdentity = (tokens.contains("official")
+                        || tokens.contains("resmi"))
+                && tokens.stream().anyMatch(LATIN_FINANCIAL_IDENTITY_CUES::contains);
+        if (officialFinancialIdentity) {
             return true;
         }
         return LATIN_IDENTITY_CUES.stream().anyMatch(cue ->

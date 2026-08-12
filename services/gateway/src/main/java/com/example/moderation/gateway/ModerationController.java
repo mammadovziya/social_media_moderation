@@ -1,13 +1,23 @@
 package com.example.moderation.gateway;
 
+import com.example.moderation.gateway.api.AiCallFailureCode;
+import com.example.moderation.gateway.api.AiCallResultStatus;
+import com.example.moderation.gateway.api.AiModelUsage;
+import com.example.moderation.gateway.api.AiUsage;
 import com.example.moderation.gateway.api.ApiError;
 import com.example.moderation.gateway.api.ContentType;
 import com.example.moderation.gateway.api.Decision;
+import com.example.moderation.gateway.api.Domain;
+import com.example.moderation.gateway.api.FinalReason;
+import com.example.moderation.gateway.api.FinancialClaim;
+import com.example.moderation.gateway.api.FinancialPrivacy;
+import com.example.moderation.gateway.api.FinancialRisk;
 import com.example.moderation.gateway.api.ImageMatch;
-import com.example.moderation.gateway.api.Investment;
+import com.example.moderation.gateway.api.Impersonation;
 import com.example.moderation.gateway.api.ModerationRequest;
 import com.example.moderation.gateway.api.ModerationResponse;
-import com.example.moderation.gateway.api.Politics;
+import com.example.moderation.gateway.api.PoliticalContext;
+import com.example.moderation.gateway.api.Safety;
 import com.example.moderation.gateway.api.Violation;
 import io.swagger.v3.oas.annotations.Hidden;
 import io.swagger.v3.oas.annotations.Operation;
@@ -24,9 +34,11 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.List;
 import java.util.HexFormat;
 import java.util.Locale;
 import java.util.Map;
@@ -55,11 +67,11 @@ public class ModerationController {
     private static final int MAX_AI_CONFIGURATION_SNAPSHOT_CHARS = 2048;
     private static final String IMAGE_TEXT_LABEL = "Image text:\n";
     private static final String PROVENANCE_SCHEMA_VERSION =
-            "image-decision-provenance-v2";
+            "image-decision-provenance-v3";
     private static final String DECISION_CONFIGURATION_VERSION =
-            "image-decision-config-v1";
+            "image-decision-config-v2";
     private static final String DECISION_IMPLEMENTATION_IDENTITY =
-            "gateway-image-policy-runtime-v1";
+            "gateway-image-policy-runtime-v2";
     private static final String AI_CONFIGURATION_SCHEMA_VERSION =
             "ai-configuration-v1";
     private static final String AI_VALIDATION_STATUS_KEY =
@@ -68,22 +80,31 @@ public class ModerationController {
             "gatewayObservedAiConfigurationDigest";
     private static final String OBSERVED_AI_SNAPSHOT_KEY =
             "gatewayObservedAiConfigurationSnapshot";
+    private static final String FREE_MODERATION_COMPLETED_KEY =
+            "gatewayFreeModerationCompleted";
+    private static final String LOCAL_POLICY_TERMINAL_KEY =
+            "gatewayLocalPolicyTerminal";
     private static final String NOT_INVOKED = "not_invoked";
     private static final String UNAVAILABLE = "unavailable";
     private static final Set<String> ALLOWED_IMAGE_TYPES =
             Set.of("image/jpeg", "image/png", "image/gif");
+    private static final Set<String> RECOGNIZED_OCR_STATUSES =
+            Set.of("ok", "no_text", "disabled", "error", "busy");
 
     private final AnalyzerClients clients;
     private final ModerationProperties properties;
     private final PolicyWordLists wordLists;
+    private final FinancialPrivacyScanner financialPrivacyScanner;
 
     public ModerationController(
             AnalyzerClients clients,
             ModerationProperties properties,
-            PolicyWordLists wordLists) {
+            PolicyWordLists wordLists,
+            FinancialPrivacyScanner financialPrivacyScanner) {
         this.clients = clients;
         this.properties = properties;
         this.wordLists = wordLists;
+        this.financialPrivacyScanner = financialPrivacyScanner;
     }
 
     @Hidden
@@ -190,6 +211,18 @@ public class ModerationController {
                     @Size(max = 20_000)
                     String text,
             @Parameter(hidden = true)
+                    @RequestParam(defaultValue = "")
+                    @Size(max = 20_000)
+                    String parentPostText,
+            @Parameter(hidden = true)
+                    @RequestParam(defaultValue = "")
+                    @Size(max = 128)
+                    String authorUsername,
+            @Parameter(hidden = true)
+                    @RequestParam(defaultValue = "")
+                    @Size(max = 10_000)
+                    String quotedText,
+            @Parameter(hidden = true)
                     @RequestParam(required = false)
                     MultipartFile image,
             @Parameter(
@@ -211,26 +244,30 @@ public class ModerationController {
         String requestId = requestId(suppliedRequestId);
         servletResponse.setHeader("X-Request-ID", requestId);
         ContentType type = parseContentType(contentType);
-        validateInputs(type, text, image);
+        validateInputs(type, text, parentPostText, authorUsername, quotedText, image);
         Violation localViolation = localViolation(type, text);
-        if (type == ContentType.USERNAME && localViolation != Violation.NONE) {
-            return new ModerationResponse(
-                    contentId,
-                    type,
-                    Decision.BLOCK,
-                    localViolation,
-                    null,
-                    null,
-                    null,
-                    null,
-                    DecisionPolicy.POLICY_VERSION);
+        FinancialPrivacy localFinancialPrivacy = financialPrivacy(
+                financialPrivacyScanner.scan(visibleCurrentText(text, quotedText)));
+        if ((type == ContentType.USERNAME
+                        && (localViolation != Violation.NONE
+                                || localFinancialPrivacy == FinancialPrivacy.CLEAR))
+                || (image == null
+                        && localFinancialPrivacy == FinancialPrivacy.CLEAR)) {
+            return localTerminalBlock(
+                    contentId, type, localViolation, localFinancialPrivacy);
         }
 
         Map<String, Object> media = null;
         Map<String, Object> ai;
-        String analysisText = text;
         if (image == null) {
-            ai = analyzeText(contentId, type, text, requestId);
+            ai = analyzeText(
+                    contentId,
+                    type,
+                    text,
+                    externalContext(parentPostText),
+                    externalContext(authorUsername),
+                    quotedText,
+                    requestId);
         } else {
             String imageContentType = requireImageContentType(image);
             byte[] bytes = image.getBytes();
@@ -238,8 +275,14 @@ public class ModerationController {
                     ? "upload"
                     : image.getOriginalFilename();
             media = analyzeMedia(bytes, filename, imageContentType, contentId, requestId);
-            analysisText = imageAnalysisText(text, media);
-            ai = "error".equals(media.get("status"))
+            FinancialPrivacy ocrFinancialPrivacy = financialPrivacy(
+                    financialPrivacyScanner.scan(currentOcrText(media)));
+            localFinancialPrivacy = strongestPrivacy(
+                    localFinancialPrivacy,
+                    ocrFinancialPrivacy);
+            ai = localFinancialPrivacy == FinancialPrivacy.CLEAR
+                    ? localPolicyAiNotRequired()
+                    : !validMediaEnvelope(media)
                     ? unavailableAi()
                     : DecisionPolicy.hasAuthoritativeExactMatch(media)
                             ? exactAssetAiNotRequired()
@@ -255,16 +298,29 @@ public class ModerationController {
                             requestId);
         }
 
+        boolean mediaEnvelopeValid = image == null || validMediaEnvelope(media);
+        Map<String, Object> decisionMedia = mediaEnvelopeValid
+                ? media
+                : Map.of("status", "error");
         DecisionPolicy.Result result = DecisionPolicy.decide(
-                media,
+                decisionMedia,
                 ai,
                 type,
                 localViolation,
+                localFinancialPrivacy,
                 properties.unknownThreshold());
         Map<String, Object> moderation = DecisionPolicy.nestedMap(ai, "moderation");
         Map<String, Object> classification = DecisionPolicy.nestedMap(ai, "classification");
-        ImageMatch match = image == null ? null : imageMatch(media);
         Map<String, Object> adjudication = DecisionPolicy.nestedMap(ai, "adjudication");
+        PolicySignals signals = effectivePolicySignals(
+                classification, adjudication, type, localFinancialPrivacy);
+        ImageMatch match = image == null
+                ? null
+                : mediaEnvelopeValid ? imageMatch(media) : ImageMatch.UNAVAILABLE;
+        Integer imageMatchScore = image == null || !mediaEnvelopeValid
+                ? null
+                : imageMatchScore(media);
+        AiUsage usage = aiUsage(ai);
         int latencyMs = (int) Math.min(
                 600_000,
                 java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
@@ -280,12 +336,15 @@ public class ModerationController {
                     moderation,
                     classification,
                     adjudication,
+                    signals,
+                    localFinancialPrivacy,
                     latencyMs);
         }
         log.info(
                 "moderation decision requestId={} contentId={} decision={} violation={} "
                         + "imageMatch={} candidateCount={} ocrStatus={} adjudicationStatus={} "
-                        + "adjudicationModel={} policyVersion={} latencyMs={}",
+                        + "adjudicationModel={} inputTokens={} outputTokens={} totalTokens={} "
+                        + "estimatedCostUsd={} costComplete={} policyVersion={} latencyMs={}",
                 requestId,
                 contentId,
                 result.decision(),
@@ -296,6 +355,11 @@ public class ModerationController {
                         .getOrDefault("status", "not_applicable"),
                 adjudication.getOrDefault("status", "not_applicable"),
                 adjudication.getOrDefault("model", "not_applicable"),
+                usage.inputTokens(),
+                usage.outputTokens(),
+                usage.totalTokens(),
+                usage.estimatedCostUsd(),
+                usage.costComplete(),
                 DecisionPolicy.POLICY_VERSION,
                 latencyMs);
 
@@ -304,19 +368,173 @@ public class ModerationController {
                 type,
                 result.decision(),
                 result.violation(),
-                type == ContentType.POST
-                        ? enumSignal(
-                                classification,
-                                "investment",
-                                Investment.class,
-                                Investment.UNCERTAIN)
-                        : null,
-                type == ContentType.USERNAME
-                        ? null
-                        : politicsSignal(classification, analysisText, type),
+                signals == null ? null : signals.legacyInvestment(),
+                signals == null ? null : signals.legacyPolitics(),
+                result.reason(),
+                signals == null ? null : signals.domain(),
+                effectiveSafetyAction(result, signals),
+                effectiveSafety(result, signals),
+                signals == null ? null : signals.financialClaim(),
+                signals == null ? localFinancialRisk(result) : signals.financialRisk(),
+                signals == null ? localFinancialPrivacy : signals.financialPrivacy(),
+                signals == null ? impersonationFor(result) : signals.impersonation(),
+                signals == null ? null : signals.politicalContext(),
                 match,
-                image == null ? null : responseOcrText(media),
+                imageMatchScore,
+                image == null || shouldSuppressOcr(signals, localFinancialPrivacy)
+                        ? null
+                        : responseOcrText(media),
+                usage,
                 DecisionPolicy.POLICY_VERSION);
+    }
+
+    /** Backward-compatible direct-call overload used by existing Java clients and tests. */
+    public ModerationResponse moderate(
+            String contentId,
+            String contentType,
+            String text,
+            MultipartFile image,
+            String suppliedRequestId,
+            HttpServletResponse servletResponse)
+            throws IOException {
+        return moderate(
+                contentId,
+                contentType,
+                text,
+                "",
+                "",
+                "",
+                image,
+                suppliedRequestId,
+                servletResponse);
+    }
+
+    private ModerationResponse localTerminalBlock(
+            String contentId,
+            ContentType type,
+            Violation localViolation,
+            FinancialPrivacy localFinancialPrivacy) {
+        DecisionPolicy.Result result;
+        if (localViolation != Violation.NONE && localViolation != Violation.IMPERSONATION) {
+            result = new DecisionPolicy.Result(Decision.BLOCK, localViolation);
+        } else if (localFinancialPrivacy == FinancialPrivacy.CLEAR) {
+            result = new DecisionPolicy.Result(
+                    Decision.BLOCK,
+                    Violation.FINANCIAL_PRIVACY,
+                    FinalReason.FINANCIAL_PRIVACY);
+        } else {
+            result = new DecisionPolicy.Result(
+                    Decision.BLOCK,
+                    Violation.IMPERSONATION,
+                    FinalReason.IMPERSONATION);
+        }
+        return new ModerationResponse(
+                contentId,
+                type,
+                result.decision(),
+                result.violation(),
+                null,
+                null,
+                result.reason(),
+                null,
+                effectiveSafetyAction(result, null),
+                safetyFor(result),
+                null,
+                localFinancialRisk(result),
+                localFinancialPrivacy,
+                localViolation == Violation.IMPERSONATION
+                        ? Impersonation.CLEAR
+                        : impersonationFor(result),
+                null,
+                null,
+                null,
+                null,
+                AiUsage.noCalls(),
+                DecisionPolicy.POLICY_VERSION);
+    }
+
+    private static PolicySignals effectivePolicySignals(
+            Map<String, Object> classification,
+            Map<String, Object> adjudication,
+            ContentType type,
+            FinancialPrivacy localFinancialPrivacy) {
+        try {
+            PolicySignals signals = "ok".equals(adjudication.get("status"))
+                    ? PolicySignals.adjudicated(adjudication)
+                    : PolicySignals.classifier(classification, type);
+            return signals.withFinancialPrivacy(localFinancialPrivacy);
+        } catch (IllegalArgumentException exception) {
+            return null;
+        }
+    }
+
+    private static Safety safetyFor(DecisionPolicy.Result result) {
+        if (result.reason() != FinalReason.SAFETY) {
+            return Safety.NONE;
+        }
+        try {
+            return Safety.valueOf(result.violation().name());
+        } catch (IllegalArgumentException exception) {
+            return Safety.OTHER;
+        }
+    }
+
+    private static Safety effectiveSafety(
+            DecisionPolicy.Result result, PolicySignals signals) {
+        return result.reason() == FinalReason.SAFETY || signals == null
+                ? safetyFor(result)
+                : signals.safety();
+    }
+
+    private static Decision effectiveSafetyAction(
+            DecisionPolicy.Result result, PolicySignals signals) {
+        return result.reason() == FinalReason.SAFETY
+                ? result.decision()
+                : signals == null ? null : signals.safetyDecision();
+    }
+
+    private static FinancialRisk localFinancialRisk(DecisionPolicy.Result result) {
+        return result.reason() == FinalReason.FINANCIAL_RISK
+                ? FinancialRisk.UNCERTAIN
+                : FinancialRisk.NONE;
+    }
+
+    private static Impersonation impersonationFor(DecisionPolicy.Result result) {
+        return result.reason() == FinalReason.IMPERSONATION
+                ? Impersonation.CLEAR
+                : Impersonation.NONE;
+    }
+
+    private static FinancialPrivacy financialPrivacy(
+            FinancialPrivacyScanner.Result result) {
+        return FinancialPrivacy.valueOf(result.severity().name());
+    }
+
+    private static FinancialPrivacy strongestPrivacy(
+            FinancialPrivacy first, FinancialPrivacy second) {
+        return first.ordinal() >= second.ordinal() ? first : second;
+    }
+
+    private static boolean shouldSuppressOcr(
+            PolicySignals signals, FinancialPrivacy localFinancialPrivacy) {
+        FinancialPrivacy effective = signals == null
+                ? localFinancialPrivacy
+                : strongestPrivacy(localFinancialPrivacy, signals.financialPrivacy());
+        return effective != FinancialPrivacy.NONE;
+    }
+
+    private static String visibleCurrentText(String text, String quotedText) {
+        if (quotedText == null || quotedText.isBlank()) {
+            return text;
+        }
+        return text + "\n\nQuoted text:\n" + quotedText;
+    }
+
+    private String externalContext(String value) {
+        return financialPrivacyScanner.scan(value).severity()
+                        == FinancialPrivacyScanner.Severity.NONE
+                ? value
+                : "[redacted: financial privacy]";
     }
 
     static String imageAnalysisText(String originalText, Map<String, Object> media) {
@@ -348,6 +566,42 @@ public class ModerationController {
         return limitWithoutSplittingSurrogate(text, MAX_ANALYSIS_TEXT_CHARS);
     }
 
+    static boolean validMediaEnvelope(Map<String, Object> media) {
+        if (media == null || !"ok".equals(media.get("status"))) {
+            return false;
+        }
+        Map<String, Object> pdq = DecisionPolicy.nestedMap(media, "pdq");
+        Map<String, Object> ocr = DecisionPolicy.nestedMap(media, "ocr");
+        Map<String, Object> image = DecisionPolicy.nestedMap(media, "image");
+        if (!(pdq.get("qualityAccepted") instanceof Boolean)
+                || !(pdq.get("candidateFound") instanceof Boolean candidateFound)
+                || !(pdq.get("candidates") instanceof List<?> candidates)
+                || candidateFound != !candidates.isEmpty()
+                || !(pdq.get("algorithm") instanceof String algorithm)
+                || algorithm.isBlank()) {
+            return false;
+        }
+        if (!(ocr.get("status") instanceof String ocrStatus)
+                || !RECOGNIZED_OCR_STATUSES.contains(ocrStatus)
+                || !(ocr.get("confidenceAccepted") instanceof Boolean)
+                || !(ocr.get("truncated") instanceof Boolean)
+                || !(ocr.get("engine") instanceof String engine)
+                || engine.isBlank()
+                || ("ok".equals(ocrStatus) && !(ocr.get("text") instanceof String))) {
+            return false;
+        }
+        return positiveNumber(image.get("width"))
+                && positiveNumber(image.get("height"))
+                && image.get("format") instanceof String format
+                && !format.isBlank()
+                && image.get("decoderProfileVersion") instanceof String decoderProfile
+                && !decoderProfile.isBlank();
+    }
+
+    private static boolean positiveNumber(Object value) {
+        return value instanceof Number number && number.longValue() > 0;
+    }
+
     static String responseOcrText(Map<String, Object> media) {
         String text = currentOcrText(media);
         return text.isBlank() ? null : text;
@@ -363,6 +617,8 @@ public class ModerationController {
             Map<String, Object> moderation,
             Map<String, Object> classification,
             Map<String, Object> adjudication,
+            PolicySignals signals,
+            FinancialPrivacy localFinancialPrivacy,
             int latencyMs) {
         Map<String, Object> pdq = DecisionPolicy.nestedMap(media, "pdq");
         Map<String, Object> ocr = DecisionPolicy.nestedMap(media, "ocr");
@@ -396,13 +652,25 @@ public class ModerationController {
                 contentId,
                 result.decision().name(),
                 result.violation().name(),
+                result.reason().name(),
+                enumName(signals == null ? null : signals.domain()),
+                enumName(effectiveSafetyAction(result, signals)),
+                enumName(effectiveSafety(result, signals)),
+                enumName(signals == null ? null : signals.financialClaim()),
+                enumName(signals == null ? localFinancialRisk(result) : signals.financialRisk()),
+                enumName(signals == null
+                        ? localFinancialPrivacy
+                        : signals.financialPrivacy()),
+                enumName(signals == null ? impersonationFor(result) : signals.impersonation()),
+                enumName(signals == null ? null : signals.politicalContext()),
                 match.name(),
                 DecisionPolicy.POLICY_VERSION,
                 wordLists.policyDigest(),
                 DecisionPolicy.authoritativeExactReferenceId(media),
                 DecisionPolicy.candidateIds(media),
                 "ok".equals(classification.get("status"))
-                        && "block".equals(classification.get("action")),
+                        && DecisionPolicy.classifierProposedBlock(
+                                classification, ContentType.POST),
                 PROVENANCE_SCHEMA_VERSION,
                 moderationStatus,
                 actualModel(moderation, moderationStatus),
@@ -502,7 +770,8 @@ public class ModerationController {
 
     private AiConfigurationEvidence aiConfigurationEvidence(
             Map<String, Object> media, Map<String, Object> ai) {
-        if (DecisionPolicy.hasAuthoritativeExactMatch(media)
+        if (Boolean.TRUE.equals(ai.get(LOCAL_POLICY_TERMINAL_KEY))
+                || DecisionPolicy.hasAuthoritativeExactMatch(media)
                 || "error".equals(media.get("status"))) {
             return AiConfigurationEvidence.notInvoked();
         }
@@ -728,7 +997,13 @@ public class ModerationController {
                 "implementation.identity=" + DECISION_IMPLEMENTATION_IDENTITY,
                 "policy.version=" + DecisionPolicy.POLICY_VERSION,
                 "policy.reducerVersion=" + DecisionPolicy.REDUCER_VERSION,
+                "policy.referenceAssetVersion="
+                        + DecisionPolicy.REFERENCE_ASSET_POLICY_VERSION,
                 "policy.wordListsDigest=" + wordLists.policyDigest(),
+                "privacyScanner.profileVersion="
+                        + FinancialPrivacyScanner.PROFILE_VERSION,
+                "privacyScanner.profileSha256="
+                        + FinancialPrivacyScanner.PROFILE_SHA256,
                 "gateway.unknownThreshold=" + canonicalDecimal(properties.unknownThreshold()),
                 "gateway.upstreamTimeoutSeconds=" + properties.upstreamTimeoutSeconds(),
                 "gateway.maxAnalysisTextChars=" + MAX_ANALYSIS_TEXT_CHARS,
@@ -1033,6 +1308,10 @@ public class ModerationController {
         return String.valueOf(value);
     }
 
+    private static String enumName(Enum<?> value) {
+        return value == null ? null : value.name();
+    }
+
     private static String limitWithoutSplittingSurrogate(String value, int maxChars) {
         if (value.length() <= maxChars) {
             return value;
@@ -1049,35 +1328,37 @@ public class ModerationController {
     private Violation localViolation(ContentType type, String text) {
         return switch (type) {
             case COMMENT, POST -> {
-                Violation dictionaryViolation = wordLists.bannedViolation(text);
-                yield dictionaryViolation == Violation.IMPERSONATION
+                Violation configuredViolation = wordLists.configuredViolation(text);
+                yield configuredViolation == Violation.IMPERSONATION
                         ? Violation.NONE
-                        : dictionaryViolation;
+                        : configuredViolation;
             }
             case USERNAME -> DeterministicUsernamePolicy.violation(text, wordLists);
         };
     }
 
-    private Politics politicsSignal(
-            Map<String, Object> classification, String text, ContentType contentType) {
-        Politics politics = enumSignal(
-                classification, "politics", Politics.class, Politics.UNCERTAIN);
-        boolean investmentRelatedPost = contentType == ContentType.POST
-                && "related".equals(classification.get("investment"));
-        boolean containsPoliticalTerm = investmentRelatedPost
-                ? wordLists.containsPoliticalTermOutsideInvestmentInstrument(text)
-                : wordLists.containsPoliticalTerm(text);
-        if (politics == Politics.NOT_RELATED && containsPoliticalTerm) {
-            return Politics.UNCERTAIN;
-        }
-        return politics;
-    }
-
     private Map<String, Object> analyzeText(
-            String contentId, ContentType type, String text, String requestId) {
+            String contentId,
+            ContentType type,
+            String text,
+            String parentPostText,
+            String authorUsername,
+            String quotedText,
+            String requestId) {
         try {
+            Map<String, Object> response = parentPostText.isBlank()
+                            && authorUsername.isBlank()
+                            && quotedText.isBlank()
+                    ? clients.analyzeText(contentId, type, text)
+                    : clients.analyzeText(
+                            contentId,
+                            type,
+                            text,
+                            parentPostText,
+                            authorUsername,
+                            quotedText);
             return validatedAiResponse(
-                    clients.analyzeText(contentId, type, text), requestId);
+                    response, requestId);
         } catch (RuntimeException exception) {
             log.error(
                     "text analyzer unavailable requestId={} failureType={}",
@@ -1129,6 +1410,7 @@ public class ModerationController {
             boolean requiresAdjudication = DecisionPolicy.requiresAdjudication(media);
             boolean adjudicationAllowed = !requiresAdjudication
                     || DecisionPolicy.hasCompleteRequiredOcr(media);
+            Map<String, Object> ocr = DecisionPolicy.nestedMap(media, "ocr");
             return validatedAiResponse(clients.analyzeImageAi(
                     bytes,
                     filename,
@@ -1137,6 +1419,9 @@ public class ModerationController {
                     type,
                     text,
                     ocrText,
+                    String.valueOf(ocr.get("status")),
+                    Boolean.TRUE.equals(ocr.get("confidenceAccepted")),
+                    Boolean.TRUE.equals(ocr.get("truncated")),
                     media,
                     requiresAdjudication,
                     adjudicationAllowed), requestId);
@@ -1157,13 +1442,21 @@ public class ModerationController {
         }
         log.error("AI analyzer configuration mismatch requestId={}", requestId);
         if (observed.isUnavailable()) {
-            return unavailableAi("mismatch", UNAVAILABLE, UNAVAILABLE);
+            return unavailableAiWithIncurredUsage(
+                    ai, "mismatch", UNAVAILABLE, UNAVAILABLE);
         }
         String observedSnapshot = observed.snapshot();
-        return unavailableAi("mismatch", sha256(observedSnapshot), observedSnapshot);
+        return unavailableAiWithIncurredUsage(
+                ai, "mismatch", sha256(observedSnapshot), observedSnapshot);
     }
 
-    private void validateInputs(ContentType type, String text, MultipartFile image) {
+    private void validateInputs(
+            ContentType type,
+            String text,
+            String parentPostText,
+            String authorUsername,
+            String quotedText,
+            MultipartFile image) {
         if (type != ContentType.POST && image != null) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST, "images are accepted only for POST");
@@ -1179,6 +1472,17 @@ public class ModerationController {
                 && text.isBlank()) {
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST, type + " requires text");
+        }
+        if (type != ContentType.COMMENT
+                && (!parentPostText.isBlank() || !quotedText.isBlank())) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "parentPostText and quotedText are accepted only for COMMENT");
+        }
+        if (type != ContentType.COMMENT && !authorUsername.isBlank()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "authorUsername is accepted only for COMMENT");
         }
     }
 
@@ -1223,14 +1527,268 @@ public class ModerationController {
         return ImageMatch.NOT_MATCHED;
     }
 
-    private static <E extends Enum<E>> E enumSignal(
-            Map<String, Object> source, String key, Class<E> enumClass, E fallback) {
+    private static Integer imageMatchScore(Map<String, Object> media) {
+        Integer distance = bestImageMatchDistance(media);
+        if (distance == null) {
+            return null;
+        }
+        int normalized = Math.max(0, Math.min(256, distance));
+        return (int) Math.round((256 - normalized) * 100.0 / 256.0);
+    }
+
+    private static Integer bestImageMatchDistance(Map<String, Object> media) {
+        Map<String, Object> pdq = DecisionPolicy.nestedMap(media, "pdq");
+        if (pdq.isEmpty()) {
+            return null;
+        }
+        Object authoritative = pdq.get("authoritativeExactMatch");
+        if (authoritative instanceof Map<?, ?> authoritativeMatch
+                && Boolean.TRUE.equals(authoritativeMatch.get("exactSha256"))) {
+            return 0;
+        }
+
+        Object candidates = pdq.get("candidates");
+        if (!(candidates instanceof List<?> list)) {
+            return null;
+        }
+        Integer bestDistance = null;
+        for (Object item : list) {
+            if (!(item instanceof Map<?, ?> candidate)) {
+                continue;
+            }
+            Integer distance = candidateDistance(candidate);
+            if (distance == null) {
+                continue;
+            }
+            if (bestDistance == null || distance < bestDistance) {
+                bestDistance = distance;
+            }
+        }
+        return bestDistance;
+    }
+
+    private static Integer candidateDistance(Map<?, ?> candidate) {
+        Object distance = candidate.get("distance");
+        Integer directDistance = distanceInt(distance);
+        if (directDistance != null) {
+            return directDistance;
+        }
+
+        Object distances = candidate.get("distances");
+        if (!(distances instanceof Map<?, ?> map)) {
+            return null;
+        }
+        Integer bestDistance = null;
+        for (Object value : map.values()) {
+            Integer parsed = distanceInt(value);
+            if (parsed == null) {
+                continue;
+            }
+            if (bestDistance == null || parsed < bestDistance) {
+                bestDistance = parsed;
+            }
+        }
+        return bestDistance;
+    }
+
+    private static Integer distanceInt(Object value) {
+        if (!(value instanceof Number valueAsNumber)) {
+            return null;
+        }
+        long asLong = valueAsNumber.longValue();
+        if (asLong < 0 || asLong > 256) {
+            return null;
+        }
+        return Math.toIntExact(asLong);
+    }
+
+    private static AiUsage aiUsage(Map<String, Object> ai) {
+        List<AiModelUsage> modelCalls = new java.util.ArrayList<>();
+        boolean usageComplete = true;
+        int freeModerationCalls = 0;
+
+        Map<String, Object> moderation = DecisionPolicy.nestedMap(ai, "moderation");
+        String moderationStatus = String.valueOf(moderation.get("status"));
+        if ("ok".equals(moderationStatus)
+                || Boolean.TRUE.equals(ai.get(FREE_MODERATION_COMPLETED_KEY))) {
+            freeModerationCalls = 1;
+        } else if ("error".equals(moderationStatus)) {
+            usageComplete = false;
+        }
+
+        for (String purpose : List.of("classification", "adjudication")) {
+            Map<String, Object> signal = DecisionPolicy.nestedMap(ai, purpose);
+            Map<String, Object> rawUsage = DecisionPolicy.nestedMap(signal, "usage");
+            if (!rawUsage.isEmpty()) {
+                AiModelUsage call = modelUsage(purpose, signal, rawUsage);
+                if (call == null) {
+                    usageComplete = false;
+                } else {
+                    modelCalls.add(call);
+                }
+            } else if ("ok".equals(signal.get("status"))
+                    || "error".equals(signal.get("status"))) {
+                usageComplete = false;
+            }
+        }
+
+        long inputTokens = 0;
+        long cachedInputTokens = 0;
+        long cacheWriteTokens = 0;
+        long outputTokens = 0;
+        long reasoningTokens = 0;
+        long totalTokens = 0;
+        BigDecimal totalCost = BigDecimal.ZERO.setScale(12);
+        boolean costComplete = usageComplete;
         try {
-            return Enum.valueOf(
-                    enumClass,
-                    String.valueOf(source.get(key)).trim().toUpperCase(Locale.ROOT));
-        } catch (IllegalArgumentException | NullPointerException exception) {
-            return fallback;
+            for (AiModelUsage call : modelCalls) {
+                inputTokens = Math.addExact(inputTokens, call.inputTokens());
+                cachedInputTokens =
+                        Math.addExact(cachedInputTokens, call.cachedInputTokens());
+                cacheWriteTokens = Math.addExact(cacheWriteTokens, call.cacheWriteTokens());
+                outputTokens = Math.addExact(outputTokens, call.outputTokens());
+                reasoningTokens = Math.addExact(reasoningTokens, call.reasoningTokens());
+                totalTokens = Math.addExact(totalTokens, call.totalTokens());
+                if (!call.costComplete() || call.estimatedCostUsd() == null) {
+                    costComplete = false;
+                } else {
+                    totalCost = totalCost.add(call.estimatedCostUsd());
+                }
+            }
+        } catch (ArithmeticException exception) {
+            return new AiUsage(
+                    modelCalls.size(),
+                    freeModerationCalls,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    null,
+                    "USD",
+                    "openai-pricing-2026-08-11",
+                    false,
+                    false,
+                    modelCalls);
+        }
+
+        return new AiUsage(
+                modelCalls.size(),
+                freeModerationCalls,
+                inputTokens,
+                cachedInputTokens,
+                cacheWriteTokens,
+                outputTokens,
+                reasoningTokens,
+                totalTokens,
+                costComplete ? totalCost.setScale(12, RoundingMode.HALF_UP) : null,
+                "USD",
+                "openai-pricing-2026-08-11",
+                usageComplete,
+                costComplete,
+                modelCalls);
+    }
+
+    private static AiModelUsage modelUsage(
+            String purpose,
+            Map<String, Object> signal,
+            Map<String, Object> usage) {
+        AiCallResultStatus resultStatus = switch (String.valueOf(signal.get("status"))) {
+            case "ok" -> AiCallResultStatus.OK;
+            case "error" -> AiCallResultStatus.ERROR;
+            default -> null;
+        };
+        AiCallFailureCode failureCode = failureCode(signal, resultStatus);
+        String model = safeProvenanceValue(signal.get("model"), null);
+        String serviceTier = safeProvenanceValue(usage.get("serviceTier"), null);
+        Long inputTokens = nonNegativeLong(usage.get("inputTokens"));
+        Long cachedInputTokens = nonNegativeLong(usage.get("cachedInputTokens"));
+        Long cacheWriteTokens = nonNegativeLong(usage.get("cacheWriteTokens"));
+        Long outputTokens = nonNegativeLong(usage.get("outputTokens"));
+        Long reasoningTokens = nonNegativeLong(usage.get("reasoningTokens"));
+        Long totalTokens = nonNegativeLong(usage.get("totalTokens"));
+        Object serviceTierAssumedValue = usage.get("serviceTierAssumed");
+        Object costCompleteValue = usage.get("costComplete");
+        if (resultStatus == null
+                || failureCode == null
+                || model == null
+                || serviceTier == null
+                || !"USD".equals(usage.get("currency"))
+                || !"openai-pricing-2026-08-11".equals(usage.get("pricingVersion"))
+                || !(serviceTierAssumedValue instanceof Boolean)
+                || !(costCompleteValue instanceof Boolean)
+                || inputTokens == null
+                || cachedInputTokens == null
+                || cacheWriteTokens == null
+                || outputTokens == null
+                || reasoningTokens == null
+                || totalTokens == null
+                || cachedInputTokens > inputTokens
+                || cacheWriteTokens > inputTokens - cachedInputTokens
+                || reasoningTokens > outputTokens
+                || inputTokens > Long.MAX_VALUE - outputTokens
+                || totalTokens != inputTokens + outputTokens) {
+            return null;
+        }
+
+        boolean serviceTierAssumed = Boolean.TRUE.equals(serviceTierAssumedValue);
+        boolean costComplete = Boolean.TRUE.equals(costCompleteValue);
+        BigDecimal estimatedCost = decimal(usage.get("estimatedCostUsd"));
+        if (costComplete && estimatedCost == null) {
+            return null;
+        }
+        return new AiModelUsage(
+                purpose,
+                resultStatus,
+                failureCode,
+                model,
+                serviceTier,
+                serviceTierAssumed,
+                inputTokens,
+                cachedInputTokens,
+                cacheWriteTokens,
+                outputTokens,
+                reasoningTokens,
+                totalTokens,
+                estimatedCost,
+                costComplete);
+    }
+
+    private static AiCallFailureCode failureCode(
+            Map<String, Object> signal, AiCallResultStatus resultStatus) {
+        if (resultStatus == AiCallResultStatus.OK) {
+            Object raw = signal.get("failureCode");
+            return raw == null || AiCallFailureCode.NONE.name().equals(raw)
+                    ? AiCallFailureCode.NONE
+                    : null;
+        }
+        if (resultStatus != AiCallResultStatus.ERROR
+                || !(signal.get("failureCode") instanceof String raw)) {
+            return null;
+        }
+        try {
+            AiCallFailureCode parsed = AiCallFailureCode.valueOf(raw);
+            return parsed == AiCallFailureCode.NONE ? null : parsed;
+        } catch (IllegalArgumentException exception) {
+            return null;
+        }
+    }
+
+    private static Long nonNegativeLong(Object raw) {
+        String value = nonNegativeLongString(raw);
+        return value == null ? null : Long.valueOf(value);
+    }
+
+    private static BigDecimal decimal(Object raw) {
+        if (!(raw instanceof Number number)) {
+            return null;
+        }
+        try {
+            BigDecimal value = new BigDecimal(number.toString());
+            return value.signum() >= 0 ? value : null;
+        } catch (NumberFormatException exception) {
+            return null;
         }
     }
 
@@ -1254,6 +1812,37 @@ public class ModerationController {
                 OBSERVED_AI_SNAPSHOT_KEY, observedConfigurationSnapshot);
     }
 
+    private static Map<String, Object> unavailableAiWithIncurredUsage(
+            Map<String, Object> original,
+            String validationStatus,
+            String observedConfigurationDigest,
+            String observedConfigurationSnapshot) {
+        Map<String, Object> unavailable = new java.util.LinkedHashMap<>(unavailableAi(
+                validationStatus,
+                observedConfigurationDigest,
+                observedConfigurationSnapshot));
+        Map<String, Object> originalModeration =
+                DecisionPolicy.nestedMap(original, "moderation");
+        if ("ok".equals(originalModeration.get("status"))) {
+            unavailable.put(FREE_MODERATION_COMPLETED_KEY, true);
+        }
+        for (String purpose : List.of("classification", "adjudication")) {
+            Map<String, Object> originalSignal = DecisionPolicy.nestedMap(original, purpose);
+            Map<String, Object> usage = DecisionPolicy.nestedMap(originalSignal, "usage");
+            String model = safeProvenanceValue(originalSignal.get("model"), null);
+            if (!usage.isEmpty() && model != null) {
+                unavailable.put(
+                        purpose,
+                        Map.of(
+                                "status", "error",
+                                "failureCode", "CONFIGURATION_MISMATCH",
+                                "model", model,
+                                "usage", usage));
+            }
+        }
+        return Map.copyOf(unavailable);
+    }
+
     private static Map<String, Object> exactAssetAiNotRequired() {
         return Map.of(
                 "moderation", Map.of("status", "not_required"),
@@ -1265,5 +1854,12 @@ public class ModerationController {
                         "candidateDisposition", "not_required",
                         "model", "not_invoked",
                         "promptVersion", "not_invoked"));
+    }
+
+    private static Map<String, Object> localPolicyAiNotRequired() {
+        Map<String, Object> result = new java.util.LinkedHashMap<>(
+                exactAssetAiNotRequired());
+        result.put(LOCAL_POLICY_TERMINAL_KEY, true);
+        return Map.copyOf(result);
     }
 }

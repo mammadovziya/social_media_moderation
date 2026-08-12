@@ -4,6 +4,7 @@ import com.example.moderation.ai.api.ContentType;
 import com.example.moderation.ai.api.TextAnalysisRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import java.io.IOException;
 import java.util.Map;
@@ -65,7 +66,12 @@ public class AiController {
     public Map<String, Object> analyzeText(
             @Valid @RequestBody TextAnalysisRequest request) {
         requireProvider();
-        return analysis.analyzeText(request.contentType(), request.text());
+        return analysis.analyzeText(
+                request.contentType(),
+                request.text(),
+                request.parentPostText(),
+                request.authorUsername(),
+                request.quotedText());
     }
 
     @PostMapping(
@@ -77,6 +83,11 @@ public class AiController {
             @RequestParam ContentType contentType,
             @RequestParam(defaultValue = "") @Size(max = 20_000) String text,
             @RequestParam(defaultValue = "") @Size(max = 20_000) String ocrText,
+            @RequestParam(defaultValue = "error")
+                    @Pattern(regexp = "ok|no_text|disabled|error|busy")
+                    String ocrStatus,
+            @RequestParam(defaultValue = "false") boolean ocrConfidenceAccepted,
+            @RequestParam(defaultValue = "false") boolean ocrTruncated,
             @RequestParam(defaultValue = "") @Size(max = 20_000) String referenceEvidence,
             @RequestParam(defaultValue = "false") boolean requiresAdjudication,
             @RequestParam(defaultValue = "true") boolean adjudicationAllowed,
@@ -111,6 +122,9 @@ public class AiController {
                 imageContentType,
                 text,
                 ocrText,
+                ocrStatus,
+                ocrConfidenceAccepted,
+                ocrTruncated,
                 referenceEvidence,
                 requiresAdjudication,
                 adjudicationAllowed);

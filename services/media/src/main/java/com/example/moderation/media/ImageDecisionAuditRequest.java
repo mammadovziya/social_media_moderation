@@ -20,6 +20,30 @@ public record ImageDecisionAuditRequest(
         @NotBlank @Size(max = 128) String contentId,
         @NotNull @Pattern(regexp = "ALLOW|BLOCK|UNKNOWN") String finalDecision,
         @NotBlank @Size(max = 64) @Pattern(regexp = "[A-Z][A-Z0-9_]*") String violation,
+        @Size(max = 64)
+                @Pattern(regexp =
+                        "NONE|KNOWN_IMAGE|SAFETY|FINANCIAL_PRIVACY|FINANCIAL_RISK|IMPERSONATION|OFF_TOPIC|EVIDENCE_UNAVAILABLE|ANALYZER_ERROR")
+                String finalReason,
+        @Size(max = 64)
+                @Pattern(regexp = "INVESTMENT_RELATED|INVESTMENT_ADJACENT|OFF_TOPIC|UNCERTAIN")
+                String domain,
+        @Size(max = 64) @Pattern(regexp = "ALLOW|BLOCK|UNKNOWN") String safetyAction,
+        @Size(max = 64)
+                @Pattern(regexp =
+                        "NONE|HARASSMENT|HATE|THREAT|SELF_HARM|SEXUAL|SEXUAL_MINORS|GRAPHIC_VIOLENCE|VIOLENCE|ILLICIT|SPAM_SCAM|VULGAR|OTHER")
+                String safety,
+        @Size(max = 64)
+                @Pattern(regexp = "NONE|OPINION|ANALYSIS|FACTUAL_CLAIM|UNCERTAIN")
+                String financialClaim,
+        @Size(max = 64)
+                @Pattern(regexp =
+                        "NONE|POTENTIALLY_MISLEADING|GUARANTEED_RETURN|INVESTMENT_SCAM|PUMP_AND_DUMP|MARKET_MANIPULATION|PHISHING|PAID_PROMOTION|UNCERTAIN")
+                String financialRisk,
+        @Size(max = 64) @Pattern(regexp = "NONE|POSSIBLE|CLEAR") String financialPrivacy,
+        @Size(max = 64) @Pattern(regexp = "NONE|POSSIBLE|CLEAR") String impersonation,
+        @Size(max = 64)
+                @Pattern(regexp = "NONE|INVESTMENT_RELEVANT|GENERAL_POLITICS|UNCERTAIN")
+                String politicalContext,
         @NotNull @Pattern(regexp =
                         "EXACT_MATCH|SIMILAR_CANDIDATE|MATCHED|NOT_MATCHED|LOW_QUALITY|UNAVAILABLE")
                 String imageMatch,
@@ -29,7 +53,7 @@ public record ImageDecisionAuditRequest(
         @NotNull @Size(max = 10)
                 List<@NotBlank @Size(max = 128) String> candidateIds,
         @NotNull Boolean classifierProposedBlock,
-        @NotNull @Pattern(regexp = "image-decision-provenance-v2")
+        @NotNull @Pattern(regexp = "image-decision-provenance-v2|image-decision-provenance-v3")
                 String provenanceSchemaVersion,
         @NotNull @Pattern(regexp = "ok|error|not_required|unavailable")
                 String moderationStatus,
@@ -100,7 +124,7 @@ public record ImageDecisionAuditRequest(
                 @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9._:+/@~-]{0,127}")
                 String candidateSelectionVersion,
         @NotNull @Size(max = 64)
-                @Pattern(regexp = "(?:image-decision-config-v1|unavailable)")
+                @Pattern(regexp = "(?:image-decision-config-v1|image-decision-config-v2|unavailable)")
                 String decisionConfigurationVersion,
         @NotNull @Size(max = 64)
                 @Pattern(regexp = "(?:[0-9a-f]{64}|unavailable)")
@@ -303,19 +327,178 @@ public record ImageDecisionAuditRequest(
                 && "unavailable".equals(decisionConfigurationVersion)
                 && "unavailable".equals(decisionConfigurationDigest)
                 && "unavailable".equals(decisionConfigurationSnapshot);
+        String expectedConfigurationVersion = "image-decision-provenance-v3"
+                        .equals(provenanceSchemaVersion)
+                ? "image-decision-config-v2"
+                : "image-decision-config-v1";
+        String expectedImplementationIdentity = "image-decision-provenance-v3"
+                        .equals(provenanceSchemaVersion)
+                ? "gateway-image-policy-runtime-v2"
+                : "gateway-image-policy-runtime-v1";
         boolean actual = isActualValue(pdqAlgorithmVersion)
                 && isActualValue(decoderProfileVersion)
                 && !"unavailable".equals(configuredModerationModel)
-                && "image-decision-config-v1".equals(decisionConfigurationVersion)
+                && expectedConfigurationVersion.equals(decisionConfigurationVersion)
                 && decisionConfigurationDigest != null
                 && decisionConfigurationDigest.matches("[0-9a-f]{64}")
                 && isActualValue(decisionConfigurationSnapshot)
                 && decisionConfigurationSnapshot.startsWith(
-                        "schema=image-decision-config-v1\n"
-                                + "implementation.identity=gateway-image-policy-runtime-v1\n")
+                        "schema=" + expectedConfigurationVersion + "\n"
+                                + "implementation.identity="
+                                + expectedImplementationIdentity
+                                + "\n")
                 && decisionConfigurationDigest.equals(sha256(decisionConfigurationSnapshot));
         return unavailable || actual;
     }
+
+    @AssertTrue(message = "v3 policy signals must be complete and coherent")
+    public boolean isPolicySignalsCoherent() {
+        if (!"image-decision-provenance-v3".equals(provenanceSchemaVersion)) {
+            return true;
+        }
+        if (finalReason == null
+                || safety == null
+                || financialRisk == null
+                || financialPrivacy == null
+                || impersonation == null) {
+            return false;
+        }
+        boolean policyModelEvaluated = "ok".equals(classificationStatus)
+                || "ok".equals(adjudicationStatus);
+        if (policyModelEvaluated
+                && (domain == null || financialClaim == null || politicalContext == null)) {
+            return false;
+        }
+        if ((policyModelEvaluated || "SAFETY".equals(finalReason))
+                && safetyAction == null) {
+            return false;
+        }
+        if (!isSafetySignalCoherent()) {
+            return false;
+        }
+        if (finalDecision == null || finalReason == null || violation == null) {
+            return false;
+        }
+
+        PolicyOutcome reduced = reducedPolicyOutcome();
+        PolicyOutcome expected = switch (finalReason) {
+            case "KNOWN_IMAGE" -> "EXACT_MATCH".equals(imageMatch)
+                    ? new PolicyOutcome("BLOCK", "KNOWN_IMAGE", "KNOWN_IMAGE")
+                    : null;
+            case "EVIDENCE_UNAVAILABLE" -> isEvidenceUnavailableWorkflowCoherent(reduced)
+                    ? new PolicyOutcome(
+                            "UNKNOWN", "EVIDENCE_UNAVAILABLE", "EVIDENCE_UNAVAILABLE")
+                    : null;
+            case "ANALYZER_ERROR" ->
+                    new PolicyOutcome("UNKNOWN", "ANALYZER_ERROR", "ANALYZER_ERROR");
+            default -> reduced;
+        };
+        return expected != null
+                && expected.decision().equals(finalDecision)
+                && expected.reason().equals(finalReason)
+                && expected.violation().equals(violation);
+    }
+
+    private boolean isSafetySignalCoherent() {
+        if (safetyAction == null) {
+            return "NONE".equals(safety);
+        }
+        return switch (safetyAction) {
+            case "ALLOW" -> "NONE".equals(safety);
+            case "BLOCK", "UNKNOWN" -> safety != null && !"NONE".equals(safety);
+            default -> false;
+        };
+    }
+
+    private boolean isEvidenceUnavailableWorkflowCoherent(PolicyOutcome reduced) {
+        boolean hasRecheckTrigger = Boolean.TRUE.equals(classifierProposedBlock)
+                || (candidateIds != null && !candidateIds.isEmpty());
+        if (!hasRecheckTrigger || !"ok".equals(classificationStatus)) {
+            return false;
+        }
+        return switch (adjudicationStatus) {
+            case "ok" -> reduced != null && "UNKNOWN".equals(reduced.decision());
+            case "error", "unavailable" -> true;
+            default -> false;
+        };
+    }
+
+    private PolicyOutcome reducedPolicyOutcome() {
+        if ("BLOCK".equals(safetyAction)) {
+            return new PolicyOutcome("BLOCK", safety, "SAFETY");
+        }
+        if ("CLEAR".equals(financialPrivacy)) {
+            return new PolicyOutcome("BLOCK", "FINANCIAL_PRIVACY", "FINANCIAL_PRIVACY");
+        }
+        if (isBlockingFinancialRisk(financialRisk)) {
+            return new PolicyOutcome("BLOCK", financialRiskViolation(), "FINANCIAL_RISK");
+        }
+        if ("CLEAR".equals(impersonation)) {
+            return new PolicyOutcome("BLOCK", "IMPERSONATION", "IMPERSONATION");
+        }
+        if ("OFF_TOPIC".equals(domain)) {
+            return new PolicyOutcome("BLOCK", "OFF_TOPIC", "OFF_TOPIC");
+        }
+        if ("UNKNOWN".equals(safetyAction)) {
+            return new PolicyOutcome("UNKNOWN", safety, "SAFETY");
+        }
+        if ("POSSIBLE".equals(financialPrivacy)) {
+            return new PolicyOutcome("UNKNOWN", "FINANCIAL_PRIVACY", "FINANCIAL_PRIVACY");
+        }
+        if (isUncertainFinancialRisk(financialRisk)) {
+            return new PolicyOutcome("UNKNOWN", "FINANCIAL_RISK", "FINANCIAL_RISK");
+        }
+        if ("POSSIBLE".equals(impersonation)) {
+            return new PolicyOutcome("UNKNOWN", "IMPERSONATION", "IMPERSONATION");
+        }
+        if ("UNCERTAIN".equals(domain)) {
+            return new PolicyOutcome("UNKNOWN", "OFF_TOPIC", "OFF_TOPIC");
+        }
+        return isNeutralAllowWorkflowCoherent()
+                ? new PolicyOutcome("ALLOW", "NONE", "NONE")
+                : null;
+    }
+
+    private boolean isNeutralAllowWorkflowCoherent() {
+        if (!"ok".equals(moderationStatus)
+                || !"ok".equals(classificationStatus)
+                || !"ALLOW".equals(safetyAction)
+                || !("INVESTMENT_RELATED".equals(domain)
+                        || "INVESTMENT_ADJACENT".equals(domain))) {
+            return false;
+        }
+        boolean hasRecheckTrigger = Boolean.TRUE.equals(classifierProposedBlock)
+                || (candidateIds != null && !candidateIds.isEmpty());
+        return hasRecheckTrigger
+                ? "ok".equals(adjudicationStatus)
+                        && "allow".equals(adjudicationAction)
+                        && "rejected".equals(adjudicationDisposition)
+                : "not_required".equals(adjudicationStatus);
+    }
+
+    private static boolean isBlockingFinancialRisk(String risk) {
+        return "GUARANTEED_RETURN".equals(risk)
+                || "INVESTMENT_SCAM".equals(risk)
+                || "PUMP_AND_DUMP".equals(risk)
+                || "MARKET_MANIPULATION".equals(risk)
+                || "PHISHING".equals(risk);
+    }
+
+    private static boolean isUncertainFinancialRisk(String risk) {
+        return "POTENTIALLY_MISLEADING".equals(risk)
+                || "PAID_PROMOTION".equals(risk)
+                || "UNCERTAIN".equals(risk);
+    }
+
+    private String financialRiskViolation() {
+        return switch (financialRisk) {
+            case "GUARANTEED_RETURN", "INVESTMENT_SCAM", "PHISHING" -> "SPAM_SCAM";
+            case "PUMP_AND_DUMP", "MARKET_MANIPULATION" -> "FINANCIAL_RISK";
+            default -> "FINANCIAL_RISK";
+        };
+    }
+
+    private record PolicyOutcome(String decision, String violation, String reason) {}
 
     @AssertTrue(message = "adjudication model and prompt provenance must match status")
     public boolean isAdjudicationProvenanceCoherent() {
@@ -357,6 +540,15 @@ public record ImageDecisionAuditRequest(
                 contentId,
                 finalDecision,
                 violation,
+                finalReason,
+                domain,
+                safetyAction,
+                safety,
+                financialClaim,
+                financialRisk,
+                financialPrivacy,
+                impersonation,
+                politicalContext,
                 imageMatch,
                 policyVersion,
                 policyWordListsDigest,

@@ -34,7 +34,7 @@ class AiPropertiesTest {
                 .hasMessageContaining("moderation model");
         assertThatThrownBy(() -> new OpenAiProperties(
                         "key",
-                        "omni-moderation-latest",
+                        "omni-moderation-2024-09-26",
                         "x".repeat(129),
                         "gpt-5.6-terra",
                         "medium",
@@ -47,7 +47,7 @@ class AiPropertiesTest {
     void boundsOpenAiTimeoutToTheGovernedOperationalRange() {
         assertThatThrownBy(() -> new OpenAiProperties(
                         "key",
-                        "omni-moderation-latest",
+                        "omni-moderation-2024-09-26",
                         "gpt-4o-mini",
                         "gpt-5.6-terra",
                         "medium",
@@ -56,7 +56,7 @@ class AiPropertiesTest {
                 .hasMessageContaining("between 1 and 300");
         assertThatThrownBy(() -> new OpenAiProperties(
                         "key",
-                        "omni-moderation-latest",
+                        "omni-moderation-2024-09-26",
                         "gpt-4o-mini",
                         "gpt-5.6-terra",
                         "medium",

@@ -39,25 +39,42 @@ class OpenAiRestClientTest {
     }
 
     @Test
+    void failureCodesAreAClosedNonContentTaxonomy() {
+        assertThat(OpenAiRestClient.OpenAiFailureCode.values())
+                .extracting(Enum::name)
+                .containsExactly(
+                        "INCOMPLETE_RESPONSE",
+                        "UNEXPECTED_OUTPUT",
+                        "INVALID_OUTPUT_TEXT",
+                        "AMBIGUOUS_OUTPUT",
+                        "INVALID_STRUCTURED_OUTPUT",
+                        "SCHEMA_FIELDS_MISMATCH",
+                        "SCHEMA_VALUE_INVALID",
+                        "DECISION_CONTRACT_INCONSISTENT",
+                        "ADJUDICATION_CONTRACT_INCONSISTENT",
+                        "PROVIDER_RESPONSE_INVALID");
+    }
+
+    @Test
     void detailsBindTheConfiguredModelsAndPromptBytes() {
         assertThat(client("test-key").details())
                 .containsEntry(
                         "moderationProfileSha256",
-                        "0e9e994cef268f7a1437292c34b9b53a932ba64fc1c5e49f8eb1a9336a73f0fa")
+                        "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073")
                 .containsEntry(
                         "classificationPromptBundleSha256",
-                        "5e37962e75241d4a185036c8ffd53ca0434d5a4870a0f7427664193f1c918277")
+                        "644044f7960b05e48529003e03f6b69f3dd932a31d6e39d7b4e01d57f5aa9f7e")
                 .containsEntry(
                         "classificationProfileSha256",
-                        "1443b6f20571589552613830416506dfc870bcb581b1f4998da181f48832f2fc")
+                        "de5d6be741ee1f30bfff85de54c71133ad541593083e7d857ff04c028dee0289")
                 .containsEntry("adjudicationModel", "gpt-5.6-terra")
                 .containsEntry("adjudicationReasoningEffort", "medium")
                 .containsEntry(
                         "adjudicationPromptSha256",
-                        "b066ec4efc4af83b6a477f3ca496ccddc716bfe84ffd4a6f5ff523a5468f6f29")
+                        "20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8")
                 .containsEntry(
                         "adjudicationProfileSha256",
-                        "06fcc036b886a71c2fd2ceae32bbbade6fa8cd0fd964cd29868073c0c6a91f81")
+                        "07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef")
                 .containsEntry("openAiTimeoutSeconds", 30L);
     }
 
@@ -88,46 +105,89 @@ class OpenAiRestClientTest {
                 (Map<String, Object>) method.invoke(client, ContentType.USERNAME);
 
         assertThat((List<String>) post.get("required"))
-                .containsExactly("action", "category", "investment", "politics");
+                .containsExactly(
+                        "safetyDisposition",
+                        "domain",
+                        "financialClaim",
+                        "financialRisk",
+                        "financialPrivacy",
+                        "impersonation",
+                        "politicalContext");
         assertThat((List<String>) comment.get("required"))
-                .containsExactly("action", "category", "politics");
+                .containsExactly(
+                        "safetyDisposition",
+                        "domain",
+                        "financialClaim",
+                        "financialRisk",
+                        "financialPrivacy",
+                        "impersonation",
+                        "politicalContext");
         assertThat((List<String>) username.get("required"))
-                .containsExactly("action", "category");
+                .containsExactly(
+                        "safetyDisposition",
+                        "financialRisk",
+                        "financialPrivacy",
+                        "impersonation");
         assertThat(post).containsEntry("additionalProperties", false);
 
         Map<String, Object> commentProperties =
                 (Map<String, Object>) comment.get("properties");
-        Map<String, Object> commentCategory =
-                (Map<String, Object>) commentProperties.get("category");
+        Map<String, Object> commentSafetyDisposition =
+                (Map<String, Object>) commentProperties.get("safetyDisposition");
         Map<String, Object> postProperties =
                 (Map<String, Object>) post.get("properties");
-        Map<String, Object> postAction =
-                (Map<String, Object>) postProperties.get("action");
-        Map<String, Object> postCategory =
-                (Map<String, Object>) postProperties.get("category");
+        Map<String, Object> postSafetyDisposition =
+                (Map<String, Object>) postProperties.get("safetyDisposition");
         Map<String, Object> usernameProperties =
                 (Map<String, Object>) username.get("properties");
-        Map<String, Object> usernameCategory =
-                (Map<String, Object>) usernameProperties.get("category");
-        assertThat((List<String>) postAction.get("enum"))
-                .containsExactly("allow", "block", "unknown");
-        assertThat((List<String>) commentCategory.get("enum")).contains("vulgar");
-        assertThat((List<String>) postCategory.get("enum")).doesNotContain("vulgar");
-        assertThat((List<String>) usernameCategory.get("enum"))
-                .contains("vulgar", "impersonation");
-        assertThat((List<String>) postCategory.get("enum"))
-                .doesNotContain("impersonation");
+        assertThat((List<String>) postSafetyDisposition.get("enum"))
+                .hasSize(25)
+                .startsWith("allow_none")
+                .contains(
+                        "block_vulgar",
+                        "unknown_vulgar",
+                        "block_spam_scam",
+                        "unknown_spam_scam")
+                .doesNotContain(
+                        "allow_vulgar", "block_none", "unknown_none", "block_impersonation");
+        assertThat((List<String>) commentSafetyDisposition.get("enum"))
+                .containsExactlyElementsOf(
+                        (List<String>) postSafetyDisposition.get("enum"));
+        assertThat(usernameProperties).containsOnlyKeys(
+                "safetyDisposition",
+                "financialRisk",
+                "financialPrivacy",
+                "impersonation");
+        assertThat((List<String>)
+                        ((Map<String, Object>) postProperties.get("domain")).get("enum"))
+                .containsExactly(
+                        "investment_related", "investment_adjacent", "off_topic", "uncertain");
+        assertThat((List<String>)
+                        ((Map<String, Object>) postProperties.get("financialRisk")).get("enum"))
+                .contains(
+                        "potentially_misleading",
+                        "guaranteed_return",
+                        "investment_scam",
+                        "pump_and_dump",
+                        "market_manipulation",
+                        "phishing",
+                        "paid_promotion");
     }
 
     @Test
     void usesTheDedicatedCommentPrompt() {
         assertThat(OpenAiRestClient.promptFor(ContentType.COMMENT))
                 .contains(
-                        "You perform two independent analyses",
-                        "critical_or_negative",
-                        "intentionally conservative COMMENT rule",
-                        "action, category, and politics",
-                        "Use action unknown with category threat")
+                        "parentPostText",
+                        "authorUsername",
+                        "quotedText",
+                        "republished visible",
+                        "safetyDisposition",
+                        "allow_none",
+                        "investment_related",
+                        "financialClaim",
+                        "financialPrivacy",
+                        "politicalContext")
                 .doesNotContain("safety_action", "safety_category");
     }
 
@@ -136,9 +196,13 @@ class OpenAiRestClientTest {
         assertThat(OpenAiRestClient.promptFor(ContentType.USERNAME))
                 .contains(
                         "Azerbaijani, English, Russian, and Turkish",
-                        "action and category",
-                        "Impersonation requires an actual role or identity claim",
-                        "morphological cognate")
+                        "bank_official",
+                        "broker_support",
+                        "safetyDisposition",
+                        "allow_none",
+                        "guaranteed_return",
+                        "financialPrivacy",
+                        "impersonation")
                 .doesNotContain(
                         "\"decision\"",
                         "\"confidence\"",
@@ -150,11 +214,16 @@ class OpenAiRestClientTest {
     void postPromptUsesTheStrictSchemaAndSpecificSafetyTaxonomy() {
         assertThat(OpenAiRestClient.promptFor(ContentType.POST))
                 .contains(
-                        "action, category, investment, and politics",
-                        "Self-directed use of words such as",
-                        "protected characteristic is the reason",
-                        "A direct future-tense threat is threat",
-                        "takes precedence over violence")
+                        "investment_related",
+                        "investment_adjacent",
+                        "off_topic",
+                        "portfolio construction",
+                        "safetyDisposition",
+                        "allow_none",
+                        "financialClaim",
+                        "pump_and_dump",
+                        "financialPrivacy",
+                        "politicalContext")
                 .doesNotContain("safety_action", "safety_category");
     }
 
@@ -172,7 +241,15 @@ class OpenAiRestClientTest {
                 .containsExactly(
                         "adjudicationMode",
                         "action",
+                        "safetyAction",
                         "category",
+                        "domain",
+                        "financialClaim",
+                        "financialRisk",
+                        "financialPrivacy",
+                        "impersonation",
+                        "politicalContext",
+                        "finalReason",
                         "candidateDisposition",
                         "evidenceBasis",
                         "reasonCode",
@@ -181,6 +258,22 @@ class OpenAiRestClientTest {
         assertThat((Map<String, Object>) properties.get("candidateIds"))
                 .containsEntry("minItems", 0)
                 .containsEntry("maxItems", 10);
+        assertThat((List<String>)
+                        ((Map<String, Object>) properties.get("category")).get("enum"))
+                .contains("vulgar");
+        assertThat((List<String>)
+                        ((Map<String, Object>) properties.get("safetyAction")).get("enum"))
+                .containsExactly("allow", "block", "unknown");
+        assertThat((List<String>)
+                        ((Map<String, Object>) properties.get("finalReason")).get("enum"))
+                .containsExactly(
+                        "none",
+                        "safety",
+                        "financial_privacy",
+                        "financial_risk",
+                        "impersonation",
+                        "off_topic",
+                        "evidence_unavailable");
     }
 
     @Test
@@ -200,13 +293,203 @@ class OpenAiRestClientTest {
                 "c".repeat(20_000),
                 "CURRENT OCR VIOLATION",
                 "{\"pdq\":{\"candidates\":[{\"referenceId\":\"reference-1\"}]}}",
-                Map.of("status", "ok", "action", "block", "category", "spam_scam"),
+                Map.ofEntries(
+                        Map.entry("status", "ok"),
+                        Map.entry("safetyAction", "allow"),
+                        Map.entry("category", "none"),
+                        Map.entry("domain", "investment_related"),
+                        Map.entry("financialClaim", "factual_claim"),
+                        Map.entry("financialRisk", "investment_scam"),
+                        Map.entry("financialPrivacy", "none"),
+                        Map.entry("impersonation", "none"),
+                        Map.entry("politicalContext", "none")),
                 "both");
 
         assertThat(context)
                 .contains("c".repeat(20_000))
                 .contains("CURRENT OCR VIOLATION")
-                .contains("reference-1", "spam_scam", "both");
+                .contains("reference-1", "investment_scam", "both");
+    }
+
+    @Test
+    void classificationTextContextPreservesConversationFieldsSeparately() throws Exception {
+        OpenAiRestClient client = client("test-key");
+        var method = OpenAiRestClient.class.getDeclaredMethod(
+                "classificationTextContext",
+                ContentType.class,
+                String.class,
+                String.class,
+                String.class,
+                String.class);
+        method.setAccessible(true);
+
+        String context = (String) method.invoke(
+                client,
+                ContentType.COMMENT,
+                "I disagree",
+                "Should I buy the ETF?",
+                "value_investor",
+                "The valuation is attractive");
+
+        JsonNode parsed = new ObjectMapper().readTree(context.substring(context.indexOf('\n') + 1));
+        assertThat(parsed.fieldNames())
+                .toIterable()
+                .containsExactly(
+                        "contentType",
+                        "currentText",
+                        "parentPostText",
+                        "authorUsername",
+                        "quotedText");
+        assertThat(parsed.path("currentText").asText()).isEqualTo("I disagree");
+        assertThat(parsed.path("parentPostText").asText()).contains("ETF");
+        assertThat(parsed.path("authorUsername").asText()).isEqualTo("value_investor");
+        assertThat(parsed.path("quotedText").asText()).contains("valuation");
+    }
+
+    @Test
+    void classificationContextPreservesOcrSeparatelyFromAMaximumCaption()
+            throws Exception {
+        OpenAiRestClient client = client("test-key");
+        var method = OpenAiRestClient.class.getDeclaredMethod(
+                "classificationImageContext",
+                ContentType.class,
+                String.class,
+                String.class,
+                String.class,
+                boolean.class,
+                boolean.class);
+        method.setAccessible(true);
+
+        String context = (String) method.invoke(
+                client,
+                ContentType.POST,
+                "c".repeat(20_000),
+                "o".repeat(20_000),
+                "ok",
+                false,
+                true);
+
+        JsonNode parsed = new ObjectMapper().readTree(context.substring(context.indexOf('\n') + 1));
+        assertThat(parsed.fieldNames())
+                .toIterable()
+                .containsExactly(
+                        "contentType",
+                        "currentText",
+                        "currentOcrText",
+                        "ocrStatus",
+                        "ocrConfidenceAccepted",
+                        "ocrTruncated");
+        assertThat(parsed.path("currentText").asText()).isEqualTo("c".repeat(20_000));
+        assertThat(parsed.path("currentOcrText").asText()).isEqualTo("o".repeat(20_000));
+        assertThat(parsed.path("ocrStatus").asText()).isEqualTo("ok");
+        assertThat(parsed.path("ocrConfidenceAccepted").asBoolean()).isFalse();
+        assertThat(parsed.path("ocrTruncated").asBoolean()).isTrue();
+
+        assertThatThrownBy(() -> method.invoke(
+                        client,
+                        ContentType.POST,
+                        "caption",
+                        "ocr",
+                        "invented",
+                        true,
+                        false))
+                .isInstanceOf(InvocationTargetException.class)
+                .hasCauseInstanceOf(OpenAiRestClient.OpenAiResponseException.class);
+    }
+
+    @Test
+    void imageClassificationPromptTreatsOcrReliabilityAsConfidenceMetadata() throws Exception {
+        String prompt;
+        try (var stream = OpenAiRestClientTest.class.getResourceAsStream(
+                "/prompts/image-classification-context-v1.txt")) {
+            assertThat(stream).isNotNull();
+            prompt = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        assertThat(prompt)
+                .contains(
+                        "untrusted machine extraction",
+                        "ocrConfidenceAccepted",
+                        "ocrTruncated",
+                        "never erase a sensitive financial/privacy exposure");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void moderationInputPreservesCaptionAndOcrAsSeparateItems() throws Exception {
+        OpenAiRestClient client = client("test-key");
+        var method = OpenAiRestClient.class.getDeclaredMethod(
+                "moderationImageInput",
+                byte[].class,
+                String.class,
+                String.class,
+                String.class);
+        method.setAccessible(true);
+
+        List<Map<String, Object>> input = (List<Map<String, Object>>) method.invoke(
+                client,
+                new byte[] {1, 2, 3},
+                "image/png",
+                "c".repeat(20_000),
+                "o".repeat(20_000));
+
+        assertThat(input).hasSize(2);
+        assertThat(input.get(0))
+                .containsEntry("type", "text")
+                .hasEntrySatisfying("text", value -> assertThat(String.valueOf(value))
+                        .contains(
+                                "\"currentText\":\"" + "c".repeat(20_000) + "\"",
+                                "\"currentOcrText\":\"" + "o".repeat(20_000) + "\""));
+        assertThat(input.get(1)).containsEntry("type", "image_url");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void emittedPayloadBuildersBindStrictJsonSchemas() throws Exception {
+        OpenAiRestClient client = client("test-key");
+        List<Map<String, Object>> input = List.of(Map.of(
+                "role", "user", "content", "untrusted content"));
+
+        var classificationMethod = OpenAiRestClient.class.getDeclaredMethod(
+                "classificationPayload", ContentType.class, List.class);
+        classificationMethod.setAccessible(true);
+        Map<String, Object> classificationPayload =
+                (Map<String, Object>) classificationMethod.invoke(
+                        client, ContentType.POST, input);
+
+        var adjudicationMethod = OpenAiRestClient.class.getDeclaredMethod(
+                "adjudicationPayload", List.class);
+        adjudicationMethod.setAccessible(true);
+        Map<String, Object> adjudicationPayload =
+                (Map<String, Object>) adjudicationMethod.invoke(client, input);
+
+        assertStrictSchemaPayload(
+                classificationPayload, "content_analysis", input);
+        assertThat(classificationPayload).doesNotContainKey("reasoning");
+        assertStrictSchemaPayload(
+                adjudicationPayload, "image_candidate_adjudication", input);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void classificationPinsNoReasoningForReviewedReasoningModels() throws Exception {
+        List<Map<String, Object>> input = List.of(Map.of(
+                "role", "user", "content", "untrusted content"));
+        var method = OpenAiRestClient.class.getDeclaredMethod(
+                "classificationPayload", ContentType.class, List.class);
+        method.setAccessible(true);
+
+        for (String model : List.of(
+                "gpt-5.4-mini",
+                "gpt-5.4-mini-2026-03-17",
+                "gpt-5.6-luna",
+                "gpt-5.6-terra")) {
+            Map<String, Object> payload = (Map<String, Object>) method.invoke(
+                    client("test-key", model), ContentType.POST, input);
+            assertThat(payload)
+                    .containsEntry("model", model)
+                    .containsEntry("reasoning", Map.of("effort", "none"));
+        }
     }
 
     @Test
@@ -223,8 +506,14 @@ class OpenAiRestClientTest {
         Map<String, Object> unorderedSignal = new java.util.HashMap<>();
         unorderedSignal.put("model", "gpt-4o-mini");
         unorderedSignal.put("category", "spam_scam");
-        unorderedSignal.put("action", "block");
+        unorderedSignal.put("safetyAction", "block");
         unorderedSignal.put("status", "ok");
+        unorderedSignal.put("domain", "investment_related");
+        unorderedSignal.put("financialClaim", "factual_claim");
+        unorderedSignal.put("financialRisk", "investment_scam");
+        unorderedSignal.put("financialPrivacy", "none");
+        unorderedSignal.put("impersonation", "none");
+        unorderedSignal.put("politicalContext", "none");
         unorderedSignal.put("attackerField", "must-not-propagate");
 
         String context = (String) method.invoke(
@@ -247,7 +536,17 @@ class OpenAiRestClientTest {
                         "candidateEvidence");
         assertThat(contextNode.path("proposedClassifierSignal").fieldNames())
                 .toIterable()
-                .containsExactly("status", "action", "category", "model");
+                .containsExactly(
+                        "status",
+                        "safetyAction",
+                        "category",
+                        "domain",
+                        "financialClaim",
+                        "financialRisk",
+                        "financialPrivacy",
+                        "impersonation",
+                        "politicalContext",
+                        "model");
         assertThat(contextNode.toString()).doesNotContain("attackerField");
     }
 
@@ -263,7 +562,7 @@ class OpenAiRestClientTest {
 
         assertThat(normalized)
                 .containsEntry("status", "ok")
-                .containsEntry("model", "omni-moderation-latest")
+                .containsEntry("model", "omni-moderation-2024-09-26")
                 .containsEntry("flagged", true);
         assertThat((Map<String, Boolean>) normalized.get("categories"))
                 .hasSize(13)
@@ -279,8 +578,8 @@ class OpenAiRestClientTest {
     void malformedModerationEvidenceFailsClosed() throws Exception {
         for (String malformed : List.of(
                 "{}",
-                "{\"model\":\"omni-moderation-latest\",\"results\":[]}",
-                "{\"model\":\"omni-moderation-latest\",\"results\":[{}]}",
+                "{\"model\":\"omni-moderation-2024-09-26\",\"results\":[]}",
+                "{\"model\":\"omni-moderation-2024-09-26\",\"results\":[{}]}",
                 response("false", Map.of(), Map.of(), Set.of(), Set.of()),
                 response(false, Map.of("hate", "false"), Map.of(), Set.of(), Set.of()),
                 response(false, Map.of(), Map.of("hate", "0.1"), Set.of(), Set.of()),
@@ -295,7 +594,7 @@ class OpenAiRestClientTest {
                         MODERATION_CATEGORIES,
                         MODERATION_CATEGORIES),
                 """
-                {"model":"omni-moderation-latest","results":[{"flagged":false,\
+                {"model":"omni-moderation-2024-09-26","results":[{"flagged":false,\
                 "categories":{"hate":false},"category_scores":{"hate":0.1}}]}
                 """)) {
             assertThatThrownBy(() -> normalizeModeration(malformed))
@@ -337,43 +636,46 @@ class OpenAiRestClientTest {
     @Test
     void structuredDecisionIsValidatedLocallyAndCannotOverrideTrustedMetadata()
             throws Exception {
-        assertThat(parseStructuredDecision(
-                        """
-                        {"action":"allow","category":"none",\
-                        "investment":"related","politics":"not_related"}
-                        """,
-                        ContentType.POST))
+        String valid = """
+                {"safetyDisposition":"allow_none",\
+                "domain":"investment_related","financialClaim":"analysis",\
+                "financialRisk":"none","financialPrivacy":"none",\
+                "impersonation":"none","politicalContext":"none"}
+                """;
+        assertThat(parseStructuredDecision(valid, ContentType.POST))
                 .containsExactlyInAnyOrderEntriesOf(Map.of(
-                        "action", "allow",
+                        "safetyAction", "allow",
                         "category", "none",
-                        "investment", "related",
-                        "politics", "not_related"));
+                        "domain", "investment_related",
+                        "financialClaim", "analysis",
+                        "financialRisk", "none",
+                        "financialPrivacy", "none",
+                        "impersonation", "none",
+                        "politicalContext", "none"));
+        assertThat(parseStructuredDecision(
+                        valid.replace(
+                                "\"safetyDisposition\":\"allow_none\"",
+                                "\"safetyDisposition\":\"block_vulgar\""),
+                        ContentType.POST))
+                .containsEntry("category", "vulgar")
+                .containsEntry("safetyAction", "block");
 
         for (String malformed : List.of(
-                """
-                {"action":"allow","category":"none","investment":"related",\
-                "politics":"not_related","model":"attacker-controlled"}
-                """,
-                """
-                {"action":1,"category":"none","investment":"related",\
-                "politics":"not_related"}
-                """,
-                """
-                {"action":"allow","category":"invented","investment":"related",\
-                "politics":"not_related"}
-                """,
-                """
-                {"action":"allow","category":"hate","investment":"related",\
-                "politics":"not_related"}
-                """,
-                """
-                {"action":"allow","action":"block","category":"none",\
-                "investment":"related","politics":"not_related"}
-                """,
-                """
-                {"action":"allow","category":"none","investment":"related",\
-                "politics":"not_related"} {}
-                """)) {
+                valid.replace("}", ",\"model\":\"attacker-controlled\"}"),
+                valid.replace(
+                        "\"safetyDisposition\":\"allow_none\"",
+                        "\"safetyDisposition\":1"),
+                valid.replace(
+                        "\"safetyDisposition\":\"allow_none\"",
+                        "\"safetyDisposition\":\"unknown_none\""),
+                valid.replace(
+                        "\"safetyDisposition\":\"allow_none\"",
+                        "\"safetyDisposition\":\"block_invented\""),
+                valid.replace(
+                        "\"safetyDisposition\":\"allow_none\"",
+                        "\"safetyDisposition\":\"allow_none\","
+                                + "\"safetyDisposition\":\"block_vulgar\""),
+                valid + "{}")) {
             assertThatThrownBy(() ->
                             parseStructuredDecision(malformed, ContentType.POST))
                     .isInstanceOf(OpenAiRestClient.OpenAiResponseException.class);
@@ -381,14 +683,75 @@ class OpenAiRestClientTest {
     }
 
     @Test
+    void structuredDecisionFailuresUseStableNonContentCodes() throws Exception {
+        String valid = """
+                {"safetyDisposition":"allow_none",\
+                "domain":"investment_related","financialClaim":"analysis",\
+                "financialRisk":"none","financialPrivacy":"none",\
+                "impersonation":"none","politicalContext":"none"}
+                """;
+
+        assertThat(failureCode(() -> parseStructuredDecision("{", ContentType.POST)))
+                .isEqualTo(OpenAiRestClient.OpenAiFailureCode.INVALID_STRUCTURED_OUTPUT);
+        assertThat(failureCode(() -> parseStructuredDecision(
+                        valid.replace(",\"politicalContext\":\"none\"", ""),
+                        ContentType.POST)))
+                .isEqualTo(OpenAiRestClient.OpenAiFailureCode.SCHEMA_FIELDS_MISMATCH);
+        assertThat(failureCode(() -> parseStructuredDecision(
+                        valid.replace("investment_related", "invented"),
+                        ContentType.POST)))
+                .isEqualTo(OpenAiRestClient.OpenAiFailureCode.SCHEMA_VALUE_INVALID);
+
+        var parser = OpenAiRestClient.class.getDeclaredMethod(
+                "parseSafetyDisposition", String.class);
+        parser.setAccessible(true);
+        assertThat(failureCode(() -> {
+                    try {
+                        parser.invoke(null, "block_none");
+                    } catch (InvocationTargetException exception) {
+                        if (exception.getCause()
+                                instanceof OpenAiRestClient.OpenAiResponseException failure) {
+                            throw failure;
+                        }
+                        throw exception;
+                    }
+                }))
+                .isEqualTo(
+                        OpenAiRestClient.OpenAiFailureCode.DECISION_CONTRACT_INCONSISTENT);
+    }
+
+    @Test
     void adjudicationRejectsAdditionalDuplicateAndSchemaInvalidFields() throws Exception {
         String valid = """
                 {"adjudicationMode":"candidate_recheck","action":"allow",\
-                "category":"none","candidateDisposition":"rejected",\
+                "safetyAction":"allow",\
+                "category":"none","domain":"investment_related",\
+                "financialClaim":"analysis","financialRisk":"none",\
+                "financialPrivacy":"none","impersonation":"none",\
+                "politicalContext":"none","finalReason":"none",\
+                "candidateDisposition":"rejected",\
                 "evidenceBasis":"current_text","reasonCode":"current_content_safe",\
                 "candidateIds":["reference-1"]}
                 """;
         assertThat(parseAdjudication(valid).action()).isEqualTo("allow");
+        String vulgarBlock = """
+                {"adjudicationMode":"candidate_recheck","action":"block",\
+                "safetyAction":"block",\
+                "category":"vulgar","domain":"investment_related",\
+                "financialClaim":"none","financialRisk":"none",\
+                "financialPrivacy":"none","impersonation":"none",\
+                "politicalContext":"none","finalReason":"safety",\
+                "candidateDisposition":"confirmed",\
+                "evidenceBasis":"current_text","reasonCode":"current_policy_violation",\
+                "candidateIds":["reference-1"]}
+                """;
+        assertThat(parseAdjudication(vulgarBlock).category()).isEqualTo("vulgar");
+        assertThat(failureCode(() -> parseAdjudication(valid.replace(
+                        "\"candidateDisposition\":\"rejected\"",
+                        "\"candidateDisposition\":\"confirmed\""))))
+                .isEqualTo(
+                        OpenAiRestClient.OpenAiFailureCode
+                                .ADJUDICATION_CONTRACT_INCONSISTENT);
 
         for (String malformed : List.of(
                 valid.replace("}", ",\"model\":\"attacker-controlled\"}"),
@@ -435,6 +798,32 @@ class OpenAiRestClientTest {
         }
     }
 
+    @Test
+    void responseEnvelopeFailuresUseStableNonContentCodes() throws Exception {
+        String valid = """
+                {"object":"response","status":"completed","error":null,\
+                "incomplete_details":null,"output":[{\
+                "type":"message","status":"completed","role":"assistant",\
+                "content":[{"type":"output_text","text":"{}"}]}]}
+                """;
+
+        assertThat(failureCode(() -> findOutputText(
+                        valid.replaceFirst("completed", "incomplete"))))
+                .isEqualTo(OpenAiRestClient.OpenAiFailureCode.INCOMPLETE_RESPONSE);
+        assertThat(failureCode(() -> findOutputText(
+                        valid.replace("\"role\":\"assistant\"", "\"role\":\"user\""))))
+                .isEqualTo(OpenAiRestClient.OpenAiFailureCode.UNEXPECTED_OUTPUT);
+        assertThat(failureCode(() -> findOutputText(
+                        valid.replace("\"text\":\"{}\"", "\"text\":\"\""))))
+                .isEqualTo(OpenAiRestClient.OpenAiFailureCode.INVALID_OUTPUT_TEXT);
+        assertThat(failureCode(() -> findOutputText(valid.replace(
+                        "]}",
+                        "]},{\"type\":\"message\",\"status\":\"completed\","
+                                + "\"role\":\"assistant\",\"content\":[{"
+                                + "\"type\":\"output_text\",\"text\":\"{}\"}]}]}"))))
+                .isEqualTo(OpenAiRestClient.OpenAiFailureCode.AMBIGUOUS_OUTPUT);
+    }
+
     @SuppressWarnings("unchecked")
     private Map<String, Object> normalizeModeration(String json) throws Exception {
         OpenAiRestClient client = client("test-key");
@@ -469,7 +858,7 @@ class OpenAiRestClientTest {
         removedCategories.forEach(categories::remove);
         removedScores.forEach(scores::remove);
         return new ObjectMapper().writeValueAsString(Map.of(
-                "model", "omni-moderation-latest",
+                "model", "omni-moderation-2024-09-26",
                 "results", List.of(Map.of(
                         "flagged", flagged,
                         "categories", categories,
@@ -538,12 +927,54 @@ class OpenAiRestClientTest {
         }
     }
 
+    private static OpenAiRestClient.OpenAiFailureCode failureCode(
+            ThrowingOperation operation) throws Exception {
+        try {
+            operation.run();
+        } catch (OpenAiRestClient.OpenAiResponseException exception) {
+            return exception.failureCode();
+        }
+        throw new AssertionError("expected OpenAiResponseException");
+    }
+
+    @FunctionalInterface
+    private interface ThrowingOperation {
+        void run() throws Exception;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void assertStrictSchemaPayload(
+            Map<String, Object> payload,
+            String expectedSchemaName,
+            List<Map<String, Object>> expectedInput) {
+        assertThat(payload)
+                .containsEntry("service_tier", "default")
+                .containsEntry("store", false)
+                .containsEntry("input", expectedInput)
+                .containsKeys("model", "max_output_tokens", "text");
+        Map<String, Object> text = (Map<String, Object>) payload.get("text");
+        Map<String, Object> format = (Map<String, Object>) text.get("format");
+        assertThat(format)
+                .containsEntry("type", "json_schema")
+                .containsEntry("name", expectedSchemaName)
+                .containsEntry("strict", true)
+                .containsKey("schema");
+        assertThat((Map<String, Object>) format.get("schema"))
+                .containsEntry("type", "object")
+                .containsEntry("additionalProperties", false)
+                .containsKeys("required", "properties");
+    }
+
     private OpenAiRestClient client(String key) {
+        return client(key, "gpt-4o-mini");
+    }
+
+    private OpenAiRestClient client(String key, String customModel) {
         return new OpenAiRestClient(
                 new OpenAiProperties(
                         key,
-                        "omni-moderation-latest",
-                        "gpt-4o-mini",
+                        "omni-moderation-2024-09-26",
+                        customModel,
                         "gpt-5.6-terra",
                         "medium",
                         30),

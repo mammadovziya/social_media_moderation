@@ -2,19 +2,19 @@
 
 Status: local candidate-retrieval gate is **PASS**; production release is **NO-GO** pending held-out calibration, approved model-backed validation, and deployment security controls
 
-Policy contract: `image-policy-v1`
+Policy contract: `investment-community-policy-v2`
 
 Automated adjudicator: `gpt-5.6-terra` through the OpenAI Responses API
 
-Adjudication contract: `image-adjudication-v2`
+Adjudication contract: `image-adjudication-v4`
 
 ## Executive decision
 
-PDQ is a retrieval index, not an identity system and not a moderation rule. A similar image can reuse the same background while replacing the words that made an earlier image harmful. Therefore a PDQ hit only finds reference candidates. The service re-evaluates the current upload's bytes, pixels, OCR, text, and composition before it can block.
+PDQ is a retrieval index, not an identity system and not a moderation rule. A similar image can reuse the same background while replacing the words that made an earlier image harmful. Therefore a PDQ hit only finds reference candidates. The service re-evaluates the current upload's bytes, pixels, OCR, text, composition, investment-domain relevance, financial risk/privacy, and impersonation before it can decide.
 
 There is no human-review state. When required evidence or the automated adjudicator is unavailable, incomplete, or contradictory, the synchronous terminal result is `UNKNOWN`. The caller may retry under its own bounded policy; it must not convert `UNKNOWN` into `ALLOW`.
 
-The first controlled live run on 2026-08-03 is intentionally retained as a failed release gate: 64 cases, 96.875% decision accuracy, no harmful allows, two benign false blocks, and only 32.8125% intended retrieval coverage. The result proves that single-frame PDQ is insufficient for the declared crop/rotation envelope and that a non-deterministic classifier block must be verified. It predates the final v2 classifier-block recheck and integrated visual-retrieval path, so it is diagnostic evidence, not a claim that the new path passes. Neither gate is weakened to make the demo pass.
+The first controlled live run on 2026-08-03 is intentionally retained as a failed release gate: 64 cases, 96.875% decision accuracy, no harmful allows, two benign false blocks, and only 32.8125% intended retrieval coverage. The result proves that single-frame PDQ is insufficient for the declared crop/rotation envelope and that a non-deterministic classifier block must be verified. It predates the final classifier-block recheck and integrated visual-retrieval path, so it is diagnostic evidence, not a claim that the new path passes. Neither gate is weakened to make the demo pass.
 
 ## Non-negotiable invariants
 
@@ -29,6 +29,8 @@ The first controlled live run on 2026-08-03 is intentionally retained as a faile
 9. Missing media, OCR, classifier, retrieval, or required adjudicator evidence returns `UNKNOWN`; no candidate may cause a fail-closed block by itself.
 10. Reference activation is a separate, controlled operation. Runtime model decisions never auto-promote an upload into the reference set.
 11. Policy, model, prompt, OCR, decoder, fingerprint/descriptor implementation, and thresholds are versioned decision inputs.
+12. Domain, safety action/category, financial claim, financial risk, financial privacy, impersonation, and political context are independent signals. Retrieval similarity cannot fill or override any of them, and the safety action must not be inferred from the overall decision.
+13. A deterministic financial-privacy scanner evaluates authored text and current-image OCR. Possible or clear sensitive data suppresses OCR from the public response; clear exposure blocks and possible exposure returns `UNKNOWN`.
 
 ## Request flow
 
@@ -38,6 +40,7 @@ flowchart TD
     A --> C["SHA-256 exact lookup"]
     B --> D["Full-frame PDQ"]
     B --> E["Tesseract TSV OCR: text, boxes, confidence"]
+    E --> S["Deterministic financial-privacy scan"]
     E --> F["Mask current text regions"]
     F --> G["Masked-background PDQ"]
     D --> H["Bounded reference candidate retrieval"]
@@ -47,22 +50,24 @@ flowchart TD
     W --> H
     C --> I{"Active EXACT_ASSET SHA match?"}
     I -->|yes| J["BLOCK / KNOWN_IMAGE"]
-    I -->|no| K["Current moderation + classifier"]
+    I -->|no| K["Current multi-axis moderation + classifier"]
     H --> K
-    K --> L{"Independent hard current violation?"}
+    S --> L{"Independent hard current safety/privacy violation?"}
+    K --> L
     L -->|yes| M["BLOCK / current category"]
-    L -->|no| U{"POST clearly not investment-related?"}
-    U -->|yes| NI["BLOCK / NOT_INVESTMENT"]
-    U -->|no| T{"Candidate or classifier proposed block?"}
-    T -->|no| N["Deterministic policy result"]
-    T -->|yes, candidate| O{"Required OCR complete?"}
-    T -->|yes, classifier only| Q
+    L -->|no| T{"Classifier proposed safety or financial-policy block?"}
+    T -->|no| U{"Current domain clearly off-topic?"}
+    U -->|yes| NI["BLOCK / OFF_TOPIC"]
+    U -->|no| CAND{"Retrieved candidate?"}
+    CAND -->|no| N["Reduce remaining independent policy signals"]
+    CAND -->|yes| O{"Required candidate OCR complete or not applicable?"}
+    T -->|yes| O
     O -->|no| P["UNKNOWN"]
     O -->|yes| Q["gpt-5.6-terra bound adjudication"]
     Q --> R{"Schema + semantic validation"}
     R -->|invalid/unavailable/conflict| P
     R -->|confirmed current violation| M
-    R -->|candidate rejected| N
+    R -->|current content safe| N
 ```
 
 The masked fingerprint can help find a reused template, but it remains retrieval-only. It deliberately removes current OCR regions so that changed overlay words do not cause the background lookup itself to decide policy. Controlled ablations also showed that OCR-derived masking is not stable enough to be the only background-search channel: applying Tesseract boxes to ORB features reduced intended rank-1 recall to 35–36/64 and raised cross-template relations above 91%. That method is explicitly rejected, not silently enabled.
@@ -87,19 +92,28 @@ Legacy `blocked_pdq_hashes` records have no trustworthy decision basis. They are
 | Invalid, oversized, unsupported, animated, or unsafe image | Validation error (4xx), not a moderation decision |
 | Active `EXACT_ASSET` has identical original-byte SHA | `BLOCK / KNOWN_IMAGE` |
 | Current moderation service flags current content | `BLOCK / current category` |
-| Deterministic username/comment policy blocks | `BLOCK / local category` |
+| A configured POST/comment/username term blocks | `BLOCK / local category` |
+| Deterministic current text/OCR exposes clear financial data | `BLOCK / FINANCIAL_PRIVACY` |
 | Mandatory current analyzer is unavailable | `UNKNOWN / ANALYZER_ERROR` |
-| A trusted POST classification is clearly `investment=not_related` | `BLOCK / NOT_INVESTMENT` without Terra |
-| Non-deterministic image classifier proposes block | Require Terra classifier-block recheck |
-| Terra rejects the proposed classifier block and no hard signal remains | Continue ordinary policy / `ALLOW` |
+| A trusted classification is clearly `domain=off_topic`, with no proposed classifier policy block | `BLOCK / OFF_TOPIC` without Terra |
+| Non-deterministic classifier proposes a safety, decisive financial-risk, clear financial-privacy, or clear-impersonation block | Require Terra classifier-block recheck |
+| Terra rejects the proposed classifier block and no hard signal remains | Continue remaining policy, including `OFF_TOPIC` |
 | Terra cannot resolve a proposed classifier block | `UNKNOWN / EVIDENCE_UNAVAILABLE` |
-| Current classifier is uncertain and no other resolution exists | `UNKNOWN` |
+| Current financial privacy or impersonation is `possible` | `UNKNOWN / corresponding reason` |
+| Financial risk is `potentially_misleading`, `paid_promotion`, or `uncertain` | `UNKNOWN / FINANCIAL_RISK` |
+| Domain is `uncertain` and no stronger signal exists | `UNKNOWN / OFF_TOPIC` |
 | Similar candidate needs OCR and OCR is disabled, busy, failed, low-confidence, or truncated | `UNKNOWN / EVIDENCE_UNAVAILABLE` |
 | Similar candidate and Terra confirms a current violation | `BLOCK / adjudicated category` |
 | Similar candidate and Terra rejects the candidate for the current content | Continue the ordinary current-content policy |
 | Terra timeout, refusal, invalid JSON/schema, or unavailable response | `UNKNOWN / EVIDENCE_UNAVAILABLE` |
 | Terra returns an internally inconsistent `ok` contract, wrong mode, or wrong candidate IDs | `UNKNOWN / ANALYZER_ERROR` |
 | No blocking/uncertain evidence remains | `ALLOW / NONE` |
+
+The terminal result does not overwrite the independent safety axis. A safe
+off-topic or financial-policy block records `safetyAction=ALLOW` and
+`safety=NONE`; an unresolved non-safety signal can likewise produce overall
+`UNKNOWN` with safety `ALLOW`. Exact-asset and deterministic non-safety
+short circuits omit the safety action when no safety evaluation occurred.
 
 ### Cost-safe short circuits
 
@@ -109,13 +123,36 @@ The runtime avoids model calls when the result is already determined or cannot b
 - a failed mandatory media analysis returns unavailable evidence without invoking image models;
 - a hard current-content moderation block does not invoke Terra;
 - a failed mandatory moderation or classification signal does not invoke Terra, because the final result is already `UNKNOWN`;
-- a trusted POST classification of `investment=not_related` is already a terminal policy block and does not invoke Terra, even when a visual candidate or image-classifier proposal exists;
+- a trusted `domain=off_topic` classification skips candidate-only Terra work, but a simultaneous classifier safety or financial-policy proposal is still adjudicated before the domain rule is enforced;
 - missing, low-confidence, or truncated OCR required by a retrieved candidate suppresses Terra and returns unavailable evidence;
 - the live evaluator cannot send gateway requests until its explicit API-spend confirmation flag is supplied.
 
 These are decision-preserving optimizations, not weaker screening. Any code path that still needs current-content judgment retains the full current-image checks.
 
-Base analyzer evidence is contract-checked before it can become `status=ok`. Moderation requires one typed result, the complete governed 13-category minimum with matching finite scores, consistent `flagged` state, and a bound provider model. Custom classification requires the exact content-type field set, closed enum values, no duplicate or trailing JSON, and consistent action/category semantics. Partial or malformed evidence becomes `UNKNOWN`.
+Base analyzer evidence is contract-checked before it can become `status=ok`.
+Moderation requires one typed result, the complete governed 13-category minimum
+with matching finite scores, consistent `flagged` state, and a bound provider
+model. POST and COMMENT classification requires exactly `safetyDisposition`,
+`domain`, `financialClaim`, `financialRisk`, `financialPrivacy`,
+`impersonation`, and `politicalContext`. USERNAME classification omits the
+three non-applicable domain/claim/political fields. `safetyDisposition` is one
+closed combined enum: `allow_none`, `block_<category>`, or
+`unknown_<category>`. The AI service deterministically derives the public
+`safetyAction` and `category` from it, so illegal pairs such as
+`unknown`/`none` cannot enter the gateway. Uncertainty in domain, financial
+risk, financial privacy, impersonation, or politics does not change an
+otherwise safe disposition from `allow_none`. The gateway then reduces all
+independent axes into the overall decision. A deterministic non-safety short
+circuit omits `safetyAction` rather than fabricating `ALLOW`. Closed enums, no
+duplicate or trailing JSON, and exact schema fields are mandatory. Partial or
+malformed evidence becomes `UNKNOWN`.
+
+Image classification receives OCR text as an independent untrusted field plus
+the closed OCR status and the confidence-accepted/truncated flags. Reliability
+metadata calibrates how much weight the extraction receives; it cannot negate
+sensitive data or another violation confirmed by current pixels or consistent
+current evidence. The deterministic privacy scanner still examines every OCR
+result, including low-confidence and truncated results, before any model egress.
 
 Flagged moderation categories are reduced with a fixed taxonomy priority, not
 provider map iteration order. A custom classifier block may refine only an
@@ -123,24 +160,44 @@ approved generic provider category into a more specific policy category; it
 cannot downgrade minors, hate, threatening, self-harm, or graphic-violence
 evidence. Equal unflagged scores use the same deterministic priority and a
 stable final tie-break. This governed fusion behavior is
-`decision-reducer-v2`, recorded in every current decision-configuration
+`decision-reducer-v4`, recorded in every current decision-configuration
 snapshot alongside the classification prompt and request-profile digests.
 
 ## Terra contract
 
-The call uses `store: false`, original-detail image input, bounded current text, and a bounded list of candidate metadata. Reasoning effort is configurable and defaults to `medium`.
+The call uses `store: false`, original-detail image input, separately bounded current text and OCR, and a bounded list of candidate metadata. Reasoning effort is configurable and defaults to `medium`.
 
 Strict output fields are:
 
 - `adjudicationMode`: `candidate_recheck | classifier_block_recheck | both`
-- `action`: `allow | block | unknown`
-- `category`: closed policy enum
+- `action`: overall `allow | block | unknown`
+- `safetyAction`: independent safety-axis `allow | block | unknown`
+- `category`: closed safety enum
+- `domain`: `investment_related | investment_adjacent | off_topic | uncertain`
+- `financialClaim`: `none | opinion | analysis | factual_claim | uncertain`
+- `financialRisk`: `none | potentially_misleading | guaranteed_return | investment_scam | pump_and_dump | market_manipulation | phishing | paid_promotion | uncertain`
+- `financialPrivacy`: `none | possible | clear`
+- `impersonation`: `none | possible | clear`
+- `politicalContext`: `none | investment_relevant | general_politics | uncertain`
+- `finalReason`: `none | safety | financial_privacy | financial_risk | impersonation | off_topic | evidence_unavailable`
 - `candidateDisposition`: `confirmed | rejected | inconclusive`
 - `evidenceBasis`: `current_visual | current_text | composition | insufficient`
 - `reasonCode`: closed operational enum
 - `candidateIds`: every bounded retrieved ID exactly once for candidate modes; empty for classifier-only mode
 
-Application validation enforces valid combinations and binds the response to the actual trigger. For example, `block` requires a non-`none` category, `confirmed`, and non-insufficient evidence; `allow` requires category `none` and `rejected`; `unknown` requires `inconclusive` and `insufficient`. A `both` response cannot clear a classifier proposal merely by citing reference-only similarity.
+Application validation enforces cross-field reduction, valid combinations, and
+binding to the actual trigger. A `block` requires `confirmed`,
+non-insufficient current evidence, and a concrete `finalReason`; `category`
+must be non-`none` for a safety block but may remain `none` for a financial,
+impersonation, or domain block. `allow` requires `category=none`,
+`finalReason=none`, `rejected`, an allowed domain, and no unresolved
+financial/privacy/impersonation signal. `unknown` requires `inconclusive`
+and `insufficient`, with either the unresolved policy reason or
+`evidence_unavailable`. A `both` response cannot clear a classifier proposal
+merely by citing reference-only similarity. Independently,
+`safetyAction=allow` requires `category=none`, while `block` or `unknown`
+requires a non-`none` category. Thus an adjudicated off-topic or financial
+`action=block` may correctly coexist with `safetyAction=allow`.
 
 The provider response is also bound to the configured model. A pinned dated model must be returned exactly; an undated governed model such as `gpt-5.6-terra` may resolve only to itself or its dated `gpt-5.6-terra-YYYY-MM-DD` snapshot. A missing or different response model invalidates the evidence and produces `UNKNOWN`. The resolved model is recorded in the decision evidence for audit and rollback.
 
@@ -156,18 +213,50 @@ The provider response is also bound to the configured model. A pinned dated mode
 - Never log raw image bytes, post text, OCR text, API keys, or full provider responses.
 - Persist final image decisions synchronously in the append-only audit table. If that write fails, return 503 instead of returning an unaudited moderation decision.
 
-The current v2 audit schema stores no image bytes, OCR text, or post text. Every new row carries a bounded canonical decision-configuration snapshot whose recomputed SHA-256 must equal its stored digest. That snapshot binds the policy and word list; exact, PDQ, masked-PDQ, OCR, decoder, and ORB implementations and thresholds; immutable visual-catalogue identity; gateway and analyzer timeouts; request/image limits; and configured AI provider/model/request contracts. The moderation, classification, and adjudication profile hashes cover the complete provider request and response contract, including endpoints, message roles and content types, prompts, schemas, image detail, token/reasoning limits, parser rules, and strict semantic response validation—not just prompt text.
+The current `image-decision-provenance-v3` audit schema stores no image bytes,
+OCR text, or post text. It persists the public domain, safety action/category,
+financial-claim, financial-risk, financial-privacy, impersonation,
+political-context, and final-reason signals alongside the terminal decision.
+Every new v3 row carries a bounded
+canonical `image-decision-config-v2` snapshot whose recomputed SHA-256 must
+equal its stored digest. That snapshot binds the policy and word list; exact,
+PDQ, masked-PDQ, OCR, decoder, and ORB implementations and thresholds;
+immutable visual-catalogue identity; gateway and analyzer timeouts;
+request/image limits; reducer version; and configured AI
+provider/model/request contracts. The moderation, classification, and
+adjudication profile hashes cover the complete provider request and response
+contract, including endpoints, message roles and content types, prompts,
+schemas, image detail, token/reasoning limits, parser rules, and strict semantic
+response validation—not just prompt text.
 
-Configured AI identity is retained separately from the service's observed canonical configuration. Each audited decision records `matched`, `mismatch`, `unavailable`, or `not_invoked`, plus the observed snapshot and digest when available. A mismatch cannot be accepted as evidence and makes the decision `UNKNOWN`, while preserving enough non-secret provenance to diagnose it. Migration V9 adds this v2 provenance without rewriting historical records: legacy rows remain explicitly labelled `legacy-v7`, new inserts must use `image-decision-provenance-v2`, and update, delete, and truncate are rejected by database triggers.
+Configured AI identity is retained separately from the service's observed
+canonical configuration. Each audited decision records `matched`, `mismatch`,
+`unavailable`, or `not_invoked`, plus the observed snapshot and digest when
+available. A mismatch cannot be accepted as evidence and makes the decision
+`UNKNOWN`, while preserving enough non-secret provenance to diagnose it.
+Migration V10 adds the v3 public policy signals without rewriting historical
+rows. During the rolling-upgrade and rollback window, the insert trigger accepts
+both `image-decision-provenance-v2` with `image-decision-config-v1` and
+`image-decision-provenance-v3` with `image-decision-config-v2`. V2 rows may
+leave the new policy-signal columns null; v3 evaluated rows must satisfy the
+complete signal and safety-action coherence checks. This is transitional
+producer compatibility, not a permanent public contract. After all v2 gateway
+producers are retired and the agreed rollback/replay window has drained, a
+follow-up migration will remove v2 insert acceptance while preserving existing
+v2 rows as readable immutable history. Update, delete, and truncate remain
+rejected by database triggers.
 
 ## Required telemetry
 
 Emit correlated metrics and audit events for:
 
-- final decision, violation, resolution basis, policy version, and request ID;
+- final decision, violation, final reason, every independent policy signal,
+  policy/reducer version, and request ID;
 - exact SHA hit and reference ID;
 - candidate count, fingerprint type, and distance distribution;
 - OCR status, latency, confidence/coverage, language set, truncation, and engine version;
+- financial-privacy scanner severity/finding class and public-OCR suppression,
+  without logging the matched value;
 - classifier/moderation disagreement;
 - Terra invocation, model/prompt version, latency, contract-validity, result, and unknown rate;
 - database/index revision and rebuild latency;
@@ -200,7 +289,7 @@ The local evaluator contains paired same-background/different-text cases because
 
 The integrated media-only run is API-spend-free and byte-bound to the immutable local corpus: manifest SHA-256 `db34846fc23573d8db7172a85094e2802a94d6bd8abc73aba51884258c8087b1`, corpus SHA-256 `832e849f82a1d8f4cf58a2ac98069a9d24745c6d8609650fe45d6ce017d0d4ee`. It proves the candidate-only contract, exact-SHA behavior, intended retrieval, governed specificity rule, and real Java-to-FastAPI multipart path. It is not production approval: the four references and thresholds are evaluated on the same synthetic corpus, not a separately governed, production-representative held-out set. Final current-content adjudication remains mandatory regardless of retrieval quality.
 
-Network-disabled unit and contract suites pass 198/198 tests: gateway 102, media 61, AI adapter 35. The visual engine's full suite passes 24/24 tests; its production-image core was also freshly rechecked offline through the dependency-free fallback at 19/19. The local evaluation utilities pass 14/14. The model-backed 64-case gateway gate was deliberately not rerun because no API-spend approval was granted; no provider quota was consumed by this evidence refresh.
+Network-disabled unit and contract suites pass 226/226 tests: gateway 123, media 61, AI adapter 42. The visual engine's full suite passes 24/24 tests; its production-image core was also freshly rechecked offline through the dependency-free fallback at 19/19. The local evaluation utilities pass 22/22. The model-backed 64-case gateway gate was deliberately not rerun because no API-spend approval was granted; no provider quota was consumed by this evidence refresh.
 
 The saved failed live report predates per-image manifest hashes and is retained only as diagnostic history; it cannot satisfy the immutable-corpus release gate. A future live rerun will bind every image byte through the corpus digest and requires explicit approval because it consumes configured model API quota. The evaluator refuses to start without an explicit confirmation flag.
 

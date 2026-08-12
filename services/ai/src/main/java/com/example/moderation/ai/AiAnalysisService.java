@@ -4,6 +4,7 @@ import com.example.moderation.ai.api.ContentType;
 import jakarta.annotation.PreDestroy;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -15,10 +16,16 @@ import org.springframework.stereotype.Service;
 @Service
 public class AiAnalysisService {
     private static final Logger log = LoggerFactory.getLogger(AiAnalysisService.class);
-    private static final int MAX_ANALYSIS_TEXT_CHARS = 20_000;
-    private static final String IMAGE_TEXT_LABEL = "Image text:\n";
+    static final String IMAGE_ADJUDICATION_INVOCATION_POLICY_VERSION =
+            "image-adjudication-invocation-v4";
     private static final String IMAGE_ADJUDICATION_PROMPT_VERSION =
-            "image-adjudication-v2";
+            "image-adjudication-v4";
+    private static final Set<String> DECISIVE_FINANCIAL_RISKS = Set.of(
+            "guaranteed_return",
+            "investment_scam",
+            "pump_and_dump",
+            "market_manipulation",
+            "phishing");
 
     private final AiProvider provider;
     private final AiProperties properties;
@@ -29,11 +36,23 @@ public class AiAnalysisService {
         this.properties = properties;
     }
 
-    public Map<String, Object> analyzeText(ContentType contentType, String text) {
+    public Map<String, Object> analyzeText(
+            ContentType contentType,
+            String text,
+            String parentPostText,
+            String authorUsername,
+            String quotedText) {
         CompletableFuture<Map<String, Object>> moderation =
                 capture("moderation", () -> provider.moderateText(text));
         CompletableFuture<Map<String, Object>> classification =
-                capture("classification", () -> provider.classifyText(contentType, text));
+                capture(
+                        "classification",
+                        () -> provider.classifyText(
+                                contentType,
+                                text,
+                                parentPostText,
+                                authorUsername,
+                                quotedText));
         return signals(moderation.join(), classification.join());
     }
 
@@ -43,36 +62,43 @@ public class AiAnalysisService {
             String imageContentType,
             String text,
             String ocrText,
+            String ocrStatus,
+            boolean ocrConfidenceAccepted,
+            boolean ocrTruncated,
             String referenceEvidence,
             boolean requiresAdjudication,
             boolean adjudicationAllowed) {
-        String baseAnalysisText = imageAnalysisText(text, ocrText);
-        String context = baseAnalysisText.isBlank()
-                ? ""
-                : "Post text: " + baseAnalysisText;
         CompletableFuture<Map<String, Object>> moderation = capture(
                 "moderation",
-                () -> provider.moderateImage(bytes, imageContentType, context));
+                () -> provider.moderateImage(
+                        bytes, imageContentType, text, ocrText));
         CompletableFuture<Map<String, Object>> classification = capture(
                 "classification",
                 () -> provider.classifyImage(
-                        contentType, bytes, imageContentType, baseAnalysisText));
+                        contentType,
+                        bytes,
+                        imageContentType,
+                        text,
+                        ocrText,
+                        ocrStatus,
+                        ocrConfidenceAccepted,
+                        ocrTruncated));
         Map<String, Object> classificationSignal = classification.join();
         Map<String, Object> moderationSignal = moderation.join();
         boolean hardModerationBlock = "ok".equals(moderationSignal.get("status"))
                 && Boolean.TRUE.equals(moderationSignal.get("flagged"));
         boolean baseSignalsReady = "ok".equals(moderationSignal.get("status"))
                 && "ok".equals(classificationSignal.get("status"));
-        boolean classifierProposedBlock = "ok".equals(classificationSignal.get("status"))
-                && "block".equals(classificationSignal.get("action"));
-        boolean terminalNotInvestmentBlock = contentType == ContentType.POST
+        boolean classifierPolicyTrigger = classifierRequiresAdjudication(classificationSignal);
+        boolean terminalOffTopicBlock = contentType == ContentType.POST
                 && "ok".equals(classificationSignal.get("status"))
-                && "not_related".equals(classificationSignal.get("investment"));
+                && "off_topic".equals(classificationSignal.get("domain"));
         boolean shouldAdjudicate = baseSignalsReady
                 && !hardModerationBlock
-                && !terminalNotInvestmentBlock
-                && adjudicationAllowed
-                && (requiresAdjudication || classifierProposedBlock);
+                && (classifierPolicyTrigger
+                        || (adjudicationAllowed
+                                && requiresAdjudication
+                                && !terminalOffTopicBlock));
         Map<String, Object> adjudication = shouldAdjudicate
                 ? capture(
                                 "adjudication",
@@ -91,61 +117,44 @@ public class AiAnalysisService {
                         adjudicationStatus(
                                 baseSignalsReady,
                                 hardModerationBlock,
-                                terminalNotInvestmentBlock,
+                                terminalOffTopicBlock,
                                 requiresAdjudication,
-                                classifierProposedBlock,
+                                classifierPolicyTrigger,
                                 adjudicationAllowed)));
         return signals(moderationSignal, classificationSignal, adjudication);
-    }
-
-    private static String imageAnalysisText(String originalText, String ocrText) {
-        if (ocrText == null || ocrText.isBlank()) {
-            return originalText;
-        }
-        String label = originalText.isEmpty()
-                ? IMAGE_TEXT_LABEL
-                : "\n\n" + IMAGE_TEXT_LABEL;
-        int textLimit = MAX_ANALYSIS_TEXT_CHARS - originalText.length() - label.length();
-        if (textLimit <= 0) {
-            return originalText;
-        }
-        String limitedOcr = limitWithoutSplittingSurrogate(ocrText, textLimit);
-        return limitedOcr.isEmpty() ? originalText : originalText + label + limitedOcr;
-    }
-
-    private static String limitWithoutSplittingSurrogate(String value, int limit) {
-        if (value.length() <= limit) {
-            return value;
-        }
-        int end = limit;
-        if (end > 0
-                && Character.isHighSurrogate(value.charAt(end - 1))
-                && end < value.length()
-                && Character.isLowSurrogate(value.charAt(end))) {
-            end--;
-        }
-        return value.substring(0, end);
     }
 
     private static String adjudicationStatus(
             boolean baseSignalsReady,
             boolean hardModerationBlock,
-            boolean terminalNotInvestmentBlock,
+            boolean terminalOffTopicBlock,
             boolean requiresAdjudication,
-            boolean classifierProposedBlock,
+            boolean classifierPolicyTrigger,
             boolean adjudicationAllowed) {
         if (!baseSignalsReady) {
             return "error";
         }
-        if (terminalNotInvestmentBlock) {
+        if (terminalOffTopicBlock && !classifierPolicyTrigger) {
             return "not_required";
         }
         if (!hardModerationBlock
-                && (requiresAdjudication || classifierProposedBlock)
+                && requiresAdjudication
+                && !classifierPolicyTrigger
                 && !adjudicationAllowed) {
             return "unavailable";
         }
         return "not_required";
+    }
+
+    static boolean classifierRequiresAdjudication(Map<String, Object> classification) {
+        if (!"ok".equals(classification.get("status"))) {
+            return false;
+        }
+        return "block".equals(classification.get("safetyAction"))
+                || DECISIVE_FINANCIAL_RISKS.contains(
+                        String.valueOf(classification.get("financialRisk")))
+                || "clear".equals(classification.get("financialPrivacy"))
+                || "clear".equals(classification.get("impersonation"));
     }
 
     private Map<String, Object> withAdjudicationMetadata(Map<String, Object> signal) {
@@ -243,10 +252,31 @@ public class AiAnalysisService {
                                 name,
                                 provider.name(),
                                 exception.getClass().getSimpleName());
+                        if (exception
+                                instanceof OpenAiRestClient.OpenAiResponseException
+                                        openAiException) {
+                            Map<String, Object> failed = new LinkedHashMap<>();
+                            failed.put("status", "error");
+                            failed.put("provider", provider.name());
+                            failed.put(
+                                    "error",
+                                    openAiException.usage().isEmpty()
+                                            ? "provider_request_failed"
+                                            : "provider_response_invalid");
+                            failed.put("failureCode", openAiException.failureCode().name());
+                            if (!openAiException.usage().isEmpty()) {
+                                failed.put("model", openAiException.responseModel());
+                                failed.put("usage", openAiException.usage());
+                            }
+                            return Map.copyOf(failed);
+                        }
                         return Map.of(
                                 "status", "error",
                                 "provider", provider.name(),
-                                "error", "provider_request_failed");
+                                "error", "provider_request_failed",
+                                "failureCode",
+                                OpenAiRestClient.OpenAiFailureCode.PROVIDER_RESPONSE_INVALID
+                                        .name());
                     }
                 },
                 executor);

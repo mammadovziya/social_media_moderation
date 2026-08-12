@@ -40,13 +40,27 @@ public class AnalyzerClients {
     @SuppressWarnings("unchecked")
     public Map<String, Object> analyzeText(
             String contentId, ContentType contentType, String text) {
+        return analyzeText(contentId, contentType, text, "", "", "");
+    }
+
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> analyzeText(
+            String contentId,
+            ContentType contentType,
+            String text,
+            String parentPostText,
+            String authorUsername,
+            String quotedText) {
         return aiClient.post()
                 .uri("/internal/v1/analyze/text")
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of(
                         "contentId", contentId,
                         "contentType", contentType,
-                        "text", text))
+                        "text", text,
+                        "parentPostText", parentPostText,
+                        "authorUsername", authorUsername,
+                        "quotedText", quotedText))
                 .retrieve()
                 .body(Map.class);
     }
@@ -73,6 +87,9 @@ public class AnalyzerClients {
             ContentType contentType,
             String text,
             String ocrText,
+            String ocrStatus,
+            boolean ocrConfidenceAccepted,
+            boolean ocrTruncated,
             Map<String, Object> referenceEvidence,
             boolean requiresAdjudication,
             boolean adjudicationAllowed) {
@@ -82,6 +99,11 @@ public class AnalyzerClients {
         form.add("contentType", contentType.name());
         form.add("text", text);
         form.add("ocrText", ocrText);
+        form.add("ocrStatus", ocrStatus);
+        form.add(
+                "ocrConfidenceAccepted",
+                Boolean.toString(ocrConfidenceAccepted));
+        form.add("ocrTruncated", Boolean.toString(ocrTruncated));
         form.add("referenceEvidence", boundedJson(referenceEvidence));
         form.add("requiresAdjudication", Boolean.toString(requiresAdjudication));
         form.add("adjudicationAllowed", Boolean.toString(adjudicationAllowed));

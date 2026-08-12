@@ -1,10 +1,11 @@
 package com.example.moderation.gateway;
 
 import com.example.moderation.gateway.api.Violation;
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -25,6 +26,9 @@ import org.springframework.stereotype.Component;
 @Component
 public final class PolicyWordLists {
     private static final Logger log = LoggerFactory.getLogger(PolicyWordLists.class);
+    private static final int MAX_POLICY_FILE_BYTES = 1_048_576;
+    private static final int MAX_POLICY_TERM_COUNT = 10_000;
+    private static final int MAX_POLICY_TERM_CODE_POINTS = 256;
     private static final Pattern IGNORED_CHARACTER =
             Pattern.compile("[\\p{Cf}\\u0307]");
     private static final Pattern INNER_PUNCTUATION =
@@ -42,28 +46,28 @@ public final class PolicyWordLists {
                     .map(PolicyWordLists::termPattern)
                     .toList();
 
-    private final List<BannedTerm> bannedTerms;
+    private final List<ModerationTerm> moderationTerms;
     private final List<PoliticalTerm> politicalTerms;
     private final String policyDigest;
 
     public PolicyWordLists(ResourceLoader resourceLoader, ModerationProperties properties) {
-        this.bannedTerms =
-                loadBannedTerms(resourceLoader.getResource(properties.moderationTermsPath()));
+        this.moderationTerms =
+                loadModerationTerms(resourceLoader.getResource(properties.moderationTermsPath()));
         this.politicalTerms =
                 loadPoliticalTerms(resourceLoader.getResource(properties.politicalWordsPath()));
-        this.policyDigest = policyDigest(bannedTerms, politicalTerms);
+        this.policyDigest = policyDigest(moderationTerms, politicalTerms);
         log.info(
-                "loaded deterministic policy dictionaries bannedTerms={} politicalTerms={}",
-                bannedTerms.size(),
+                "loaded deterministic policy dictionaries moderationTerms={} politicalTerms={}",
+                moderationTerms.size(),
                 politicalTerms.size());
     }
 
-    Violation bannedViolation(String text) {
+    Violation configuredViolation(String text) {
         if (text == null || text.isBlank()) {
             return Violation.NONE;
         }
         String normalized = normalize(text);
-        Violation violation = findBannedViolation(normalized);
+        Violation violation = findConfiguredViolation(normalized);
         if (violation != Violation.NONE) {
             return violation;
         }
@@ -71,13 +75,13 @@ public final class PolicyWordLists {
         String candidate = foldMixedScriptLookalikes(deobfuscated);
         return candidate.equals(normalized)
                 ? Violation.NONE
-                : findBannedViolation(candidate);
+                : findConfiguredViolation(candidate);
     }
 
-    private Violation findBannedViolation(String normalized) {
-        return bannedTerms.stream()
+    private Violation findConfiguredViolation(String normalized) {
+        return moderationTerms.stream()
                 .filter(term -> term.pattern().matcher(normalized).find())
-                .map(BannedTerm::violation)
+                .map(ModerationTerm::violation)
                 .findFirst()
                 .orElse(Violation.NONE);
     }
@@ -109,10 +113,10 @@ public final class PolicyWordLists {
         return policyDigest;
     }
 
-    private static List<BannedTerm> loadBannedTerms(Resource resource) {
-        List<String> lines = readRequiredLines(resource, "banned words");
-        List<BannedTerm> result = new ArrayList<>();
-        Set<String> seen = new LinkedHashSet<>();
+    private static List<ModerationTerm> loadModerationTerms(Resource resource) {
+        List<String> lines = readRequiredLines(resource, "moderation terms");
+        List<ModerationTerm> result = new ArrayList<>();
+        Set<String> seenTerms = new LinkedHashSet<>();
         for (int index = 0; index < lines.size(); index++) {
             String line = policyLine(lines.get(index));
             if (line.isEmpty()) {
@@ -129,20 +133,27 @@ public final class PolicyWordLists {
                 throw invalidLine(resource, index, "unknown violation enum");
             }
             if (violation == Violation.NONE
+                    || violation == Violation.OFF_TOPIC
+                    || violation == Violation.FINANCIAL_PRIVACY
+                    || violation == Violation.FINANCIAL_RISK
                     || violation == Violation.NOT_INVESTMENT
                     || violation == Violation.KNOWN_IMAGE
+                    || violation == Violation.EVIDENCE_UNAVAILABLE
                     || violation == Violation.ANALYZER_ERROR) {
-                throw invalidLine(resource, index, "unsupported dictionary violation");
+                throw invalidLine(resource, index, "unsupported configured violation");
             }
             String term = normalize(fields[1]);
-            String uniqueKey = violation + "|" + term;
-            if (!seen.add(uniqueKey)) {
-                throw invalidLine(resource, index, "duplicate term for violation");
+            validateNormalizedTerm(resource, index, term);
+            if (!seenTerms.add(term)) {
+                throw invalidLine(
+                        resource,
+                        index,
+                        "duplicate or conflicting normalized term");
             }
-            result.add(new BannedTerm(violation, term, termPattern(term)));
-        }
-        if (result.isEmpty()) {
-            throw new IllegalStateException("banned words dictionary is empty: " + resource);
+            if (result.size() >= MAX_POLICY_TERM_COUNT) {
+                throw invalidLine(resource, index, "too many moderation terms");
+            }
+            result.add(new ModerationTerm(violation, term, termPattern(term)));
         }
         return List.copyOf(result);
     }
@@ -157,8 +168,12 @@ public final class PolicyWordLists {
                 continue;
             }
             String term = normalize(line);
+            validateNormalizedTerm(resource, index, term);
             if (!seen.add(term)) {
                 continue;
+            }
+            if (result.size() >= MAX_POLICY_TERM_COUNT) {
+                throw invalidLine(resource, index, "too many political terms");
             }
             result.add(new PoliticalTerm(term, termPattern(term)));
         }
@@ -169,12 +184,12 @@ public final class PolicyWordLists {
     }
 
     private static String policyDigest(
-            List<BannedTerm> bannedTerms, List<PoliticalTerm> politicalTerms) {
+            List<ModerationTerm> moderationTerms, List<PoliticalTerm> politicalTerms) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            updateDigest(digest, "policy-word-lists/v2");
-            for (BannedTerm term : bannedTerms) {
-                updateDigest(digest, "banned");
+            updateDigest(digest, "policy-word-lists/v3");
+            for (ModerationTerm term : moderationTerms) {
+                updateDigest(digest, "moderation");
                 updateDigest(digest, term.violation().name());
                 updateDigest(digest, term.term());
             }
@@ -202,12 +217,47 @@ public final class PolicyWordLists {
         if (!resource.exists() || !resource.isReadable()) {
             throw new IllegalStateException(label + " dictionary is not readable: " + resource);
         }
-        try (BufferedReader reader = new BufferedReader(
-                new InputStreamReader(resource.getInputStream(), StandardCharsets.UTF_8))) {
-            return reader.lines().toList();
+        try (InputStream input = resource.getInputStream()) {
+            byte[] encoded = input.readNBytes(MAX_POLICY_FILE_BYTES + 1);
+            if (encoded.length > MAX_POLICY_FILE_BYTES) {
+                throw new IllegalStateException(
+                        label + " dictionary exceeds " + MAX_POLICY_FILE_BYTES + " bytes: "
+                                + resource);
+            }
+            String decoded;
+            try {
+                decoded = StandardCharsets.UTF_8
+                        .newDecoder()
+                        .onMalformedInput(CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(CodingErrorAction.REPORT)
+                        .decode(ByteBuffer.wrap(encoded))
+                        .toString();
+            } catch (CharacterCodingException exception) {
+                throw new IllegalStateException(
+                        label + " dictionary is not valid UTF-8: " + resource,
+                        exception);
+            }
+            return decoded.lines().toList();
         } catch (IOException exception) {
             throw new IllegalStateException(
                     "could not read " + label + " dictionary: " + resource, exception);
+        }
+    }
+
+    private static void validateNormalizedTerm(
+            Resource resource, int zeroBasedIndex, String term) {
+        if (term.isBlank()
+                || term.codePoints().noneMatch(Character::isLetterOrDigit)) {
+            throw invalidLine(
+                    resource,
+                    zeroBasedIndex,
+                    "term is empty after normalization or has no letters or digits");
+        }
+        if (term.codePointCount(0, term.length()) > MAX_POLICY_TERM_CODE_POINTS) {
+            throw invalidLine(
+                    resource,
+                    zeroBasedIndex,
+                    "term exceeds " + MAX_POLICY_TERM_CODE_POINTS + " code points");
         }
     }
 
@@ -313,7 +363,7 @@ public final class PolicyWordLists {
                         + reason);
     }
 
-    private record BannedTerm(Violation violation, String term, Pattern pattern) {}
+    private record ModerationTerm(Violation violation, String term, Pattern pattern) {}
 
     private record PoliticalTerm(String term, Pattern pattern) {}
 }

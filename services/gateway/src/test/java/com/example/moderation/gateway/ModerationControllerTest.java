@@ -13,12 +13,22 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.example.moderation.gateway.api.AiCallFailureCode;
+import com.example.moderation.gateway.api.AiCallResultStatus;
 import com.example.moderation.gateway.api.ContentType;
 import com.example.moderation.gateway.api.Decision;
+import com.example.moderation.gateway.api.Domain;
+import com.example.moderation.gateway.api.FinalReason;
+import com.example.moderation.gateway.api.FinancialClaim;
+import com.example.moderation.gateway.api.FinancialPrivacy;
+import com.example.moderation.gateway.api.FinancialRisk;
 import com.example.moderation.gateway.api.ImageMatch;
+import com.example.moderation.gateway.api.Impersonation;
 import com.example.moderation.gateway.api.Investment;
 import com.example.moderation.gateway.api.ModerationResponse;
+import com.example.moderation.gateway.api.PoliticalContext;
 import com.example.moderation.gateway.api.Politics;
+import com.example.moderation.gateway.api.Safety;
 import com.example.moderation.gateway.api.Violation;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -52,10 +62,333 @@ class ModerationControllerTest {
         assertThat(result.decision()).isEqualTo(Decision.ALLOW);
         assertThat(result.investment()).isEqualTo(Investment.RELATED);
         assertThat(result.politics()).isEqualTo(Politics.NOT_RELATED);
+        assertThat(result.reason()).isEqualTo(FinalReason.NONE);
+        assertThat(result.domain()).isEqualTo(Domain.INVESTMENT_RELATED);
+        assertThat(result.safetyAction()).isEqualTo(Decision.ALLOW);
+        assertThat(result.safety()).isEqualTo(Safety.NONE);
+        assertThat(result.financialClaim()).isEqualTo(FinancialClaim.NONE);
+        assertThat(result.financialRisk()).isEqualTo(FinancialRisk.NONE);
+        assertThat(result.financialPrivacy()).isEqualTo(FinancialPrivacy.NONE);
+        assertThat(result.impersonation()).isEqualTo(Impersonation.NONE);
+        assertThat(result.politicalContext()).isEqualTo(PoliticalContext.NONE);
         assertThat(result.imageMatch()).isNull();
         assertThat(result.ocrText()).isNull();
-        assertThat(new ObjectMapper().writeValueAsString(result))
-                .doesNotContain("\"ocrText\"");
+        assertThat(result.aiUsage().meteredCalls()).isOne();
+        assertThat(result.aiUsage().freeModerationCalls()).isOne();
+        assertThat(result.aiUsage().usageComplete()).isTrue();
+        assertThat(result.aiUsage().costComplete()).isTrue();
+        com.fasterxml.jackson.databind.JsonNode json =
+                new ObjectMapper().valueToTree(result);
+        java.util.List<String> keys = new java.util.ArrayList<>();
+        json.fieldNames().forEachRemaining(keys::add);
+        assertThat(keys).containsExactlyInAnyOrder(
+                "contentId",
+                "contentType",
+                "decision",
+                "violation",
+                "investment",
+                "politics",
+                "reason",
+                "domain",
+                "safetyAction",
+                "safety",
+                "financialClaim",
+                "financialRisk",
+                "financialPrivacy",
+                "impersonation",
+                "politicalContext",
+                "aiUsage",
+                "policyVersion");
+    }
+
+    @Test
+    void finalProviderSafetyBlockOverridesAConflictingClassifierSafetySignal()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(
+                successfulAi("related", "not_related"));
+        ai.put(
+                "moderation",
+                Map.of(
+                        "status", "ok",
+                        "model", "omni-moderation-2024-09-26",
+                        "flagged", true,
+                        "categories", Map.of("hate", true),
+                        "categoryScores", Map.of("hate", 0.99)));
+        when(clients.analyzeText("post-hate", ContentType.POST, "provider-flagged text"))
+                .thenReturn(Map.copyOf(ai));
+
+        ModerationResponse result = controller(clients).moderate(
+                "post-hate",
+                "post",
+                "provider-flagged text",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.HATE);
+        assertThat(result.reason()).isEqualTo(FinalReason.SAFETY);
+        assertThat(result.safetyAction()).isEqualTo(Decision.BLOCK);
+        assertThat(result.safety()).isEqualTo(Safety.HATE);
+    }
+
+    @Test
+    void clearTextFinancialPrivacyBlocksBeforeAnyExternalAnalyzerCall()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+
+        ModerationResponse result = controller(clients).moderate(
+                "post-private",
+                "post",
+                "Card number: 4111 1111 1111 1111",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.FINANCIAL_PRIVACY);
+        assertThat(result.reason()).isEqualTo(FinalReason.FINANCIAL_PRIVACY);
+        assertThat(result.safetyAction()).isNull();
+        assertThat(result.financialPrivacy()).isEqualTo(FinancialPrivacy.CLEAR);
+        assertThat(result.aiUsage().meteredCalls()).isZero();
+        verifyNoInteractions(clients);
+    }
+
+    @Test
+    void deterministicPrivacyAndUsernameImpersonationRemainIndependent()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+
+        ModerationResponse result = controller(clients).moderate(
+                "user-private-admin",
+                "username",
+                "admin_4111111111111111",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.FINANCIAL_PRIVACY);
+        assertThat(result.reason()).isEqualTo(FinalReason.FINANCIAL_PRIVACY);
+        assertThat(result.financialPrivacy()).isEqualTo(FinancialPrivacy.CLEAR);
+        assertThat(result.impersonation()).isEqualTo(Impersonation.CLEAR);
+        assertThat(result.safetyAction()).isNull();
+        verifyNoInteractions(clients);
+    }
+
+    @Test
+    void returnsProviderTokenUsageAndEstimatedCost() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(
+                successfulAi("related", "not_related"));
+        Map<String, Object> classification = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(ai, "classification"));
+        classification.put("model", "gpt-4o-mini-2024-07-18");
+        classification.put("usage", Map.ofEntries(
+                Map.entry("inputTokens", 1_000L),
+                Map.entry("cachedInputTokens", 200L),
+                Map.entry("cacheWriteTokens", 0L),
+                Map.entry("outputTokens", 100L),
+                Map.entry("reasoningTokens", 0L),
+                Map.entry("totalTokens", 1_100L),
+                Map.entry("serviceTier", "default"),
+                Map.entry("serviceTierAssumed", false),
+                Map.entry("currency", "USD"),
+                Map.entry("pricingVersion", "openai-pricing-2026-08-11"),
+                Map.entry("costComplete", true),
+                Map.entry("estimatedCostUsd", new java.math.BigDecimal("0.000195000000"))));
+        ai.put("classification", Map.copyOf(classification));
+        when(clients.analyzeText("post-cost", ContentType.POST, "ETF investment"))
+                .thenReturn(Map.copyOf(ai));
+
+        ModerationResponse result = controller(clients).moderate(
+                "post-cost",
+                "post",
+                "ETF investment",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.aiUsage().meteredCalls()).isOne();
+        assertThat(result.aiUsage().freeModerationCalls()).isOne();
+        assertThat(result.aiUsage().inputTokens()).isEqualTo(1_000L);
+        assertThat(result.aiUsage().totalTokens()).isEqualTo(1_100L);
+        assertThat(result.aiUsage().estimatedCostUsd())
+                .isEqualByComparingTo("0.000195000000");
+        assertThat(result.aiUsage().usageComplete()).isTrue();
+        assertThat(result.aiUsage().costComplete()).isTrue();
+        assertThat(result.aiUsage().modelCalls()).singleElement()
+                .satisfies(call -> {
+                    assertThat(call.purpose()).isEqualTo("classification");
+                    assertThat(call.resultStatus()).isEqualTo(AiCallResultStatus.OK);
+                    assertThat(call.failureCode()).isEqualTo(AiCallFailureCode.NONE);
+                    assertThat(call.model()).isEqualTo("gpt-4o-mini-2024-07-18");
+                });
+    }
+
+    @Test
+    void preservesBilledUsageAndExposesErrorResultForFailedClassification()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(
+                successfulAi("related", "not_related"));
+        ai.put(
+                "classification",
+                Map.of(
+                        "status", "error",
+                        "model", "gpt-5.6-terra",
+                        "failureCode", "DECISION_CONTRACT_INCONSISTENT",
+                        "usage", modelUsage()));
+        when(clients.analyzeText("post-failed-call", ContentType.POST, "ETF investment"))
+                .thenReturn(Map.copyOf(ai));
+
+        ModerationResponse result = controller(clients).moderate(
+                "post-failed-call",
+                "post",
+                "ETF investment",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
+        assertThat(result.violation()).isEqualTo(Violation.ANALYZER_ERROR);
+        assertThat(result.aiUsage().meteredCalls()).isOne();
+        assertThat(result.aiUsage().inputTokens()).isEqualTo(100L);
+        assertThat(result.aiUsage().estimatedCostUsd())
+                .isEqualByComparingTo("0.000320000000");
+        assertThat(result.aiUsage().usageComplete()).isTrue();
+        assertThat(result.aiUsage().costComplete()).isTrue();
+        assertThat(result.aiUsage().modelCalls()).singleElement()
+                .satisfies(call -> {
+                    assertThat(call.purpose()).isEqualTo("classification");
+                    assertThat(call.resultStatus()).isEqualTo(AiCallResultStatus.ERROR);
+                    assertThat(call.failureCode())
+                            .isEqualTo(AiCallFailureCode.DECISION_CONTRACT_INCONSISTENT);
+                });
+    }
+
+    @Test
+    void rejectsUnknownFailureCodeFromPublicUsageWithoutRelabelingIt()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(
+                successfulAi("related", "not_related"));
+        ai.put(
+                "classification",
+                Map.of(
+                        "status", "error",
+                        "model", "gpt-5.6-terra",
+                        "failureCode", "UNSAFE_RAW_PROVIDER_ERROR",
+                        "usage", modelUsage()));
+        when(clients.analyzeText("post-unknown-code", ContentType.POST, "ETF investment"))
+                .thenReturn(Map.copyOf(ai));
+
+        ModerationResponse result = controller(clients).moderate(
+                "post-unknown-code",
+                "post",
+                "ETF investment",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.aiUsage().meteredCalls()).isZero();
+        assertThat(result.aiUsage().usageComplete()).isFalse();
+        assertThat(result.aiUsage().costComplete()).isFalse();
+        assertThat(result.aiUsage().modelCalls()).isEmpty();
+    }
+
+    @Test
+    void forwardsParentContextForAContextDependentComment() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.analyzeText(
+                        "comment-context",
+                        ContentType.COMMENT,
+                        "Absolutely. I would buy it.",
+                        "What do you think about NVIDIA stock?",
+                        "valueinvestor",
+                        ""))
+                .thenReturn(successfulAi("related", "not_related"));
+
+        ModerationResponse result = controller(clients).moderate(
+                "comment-context",
+                "comment",
+                "Absolutely. I would buy it.",
+                "What do you think about NVIDIA stock?",
+                "valueinvestor",
+                "",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.domain()).isEqualTo(Domain.INVESTMENT_RELATED);
+        verify(clients).analyzeText(
+                "comment-context",
+                ContentType.COMMENT,
+                "Absolutely. I would buy it.",
+                "What do you think about NVIDIA stock?",
+                "valueinvestor",
+                "");
+    }
+
+    @Test
+    void blocksAContextuallyOffTopicComment() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.analyzeText(
+                        "comment-off-topic",
+                        ContentType.COMMENT,
+                        "My dog is cute.",
+                        "What do you think about NVIDIA stock?",
+                        "",
+                        ""))
+                .thenReturn(successfulAi("not_related", "not_related"));
+
+        ModerationResponse result = controller(clients).moderate(
+                "comment-off-topic",
+                "comment",
+                "My dog is cute.",
+                "What do you think about NVIDIA stock?",
+                "",
+                "",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.OFF_TOPIC);
+        assertThat(result.reason()).isEqualTo(FinalReason.OFF_TOPIC);
+        assertThat(result.domain()).isEqualTo(Domain.OFF_TOPIC);
+        assertThat(result.safetyAction()).isEqualTo(Decision.ALLOW);
+    }
+
+    @Test
+    void returnsIndependentFinancialRiskAndClaimSignals() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.analyzeText("post-risk", ContentType.POST, "Sponsored: buy this token."))
+                .thenReturn(successfulAiWithSignals(
+                        "investment_related",
+                        "factual_claim",
+                        "paid_promotion",
+                        "none",
+                        "none",
+                        "none"));
+
+        ModerationResponse result = controller(clients).moderate(
+                "post-risk",
+                "post",
+                "Sponsored: buy this token.",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
+        assertThat(result.violation()).isEqualTo(Violation.FINANCIAL_RISK);
+        assertThat(result.reason()).isEqualTo(FinalReason.FINANCIAL_RISK);
+        assertThat(result.safetyAction()).isEqualTo(Decision.ALLOW);
+        assertThat(result.safety()).isEqualTo(Safety.NONE);
+        assertThat(result.financialClaim()).isEqualTo(FinancialClaim.FACTUAL_CLAIM);
+        assertThat(result.financialRisk()).isEqualTo(FinancialRisk.PAID_PROMOTION);
     }
 
     @Test
@@ -80,6 +413,51 @@ class ModerationControllerTest {
 
         assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
         assertThat(result.violation()).isEqualTo(Violation.ANALYZER_ERROR);
+        assertThat(result.aiUsage().meteredCalls()).isOne();
+        assertThat(result.aiUsage().inputTokens()).isEqualTo(100L);
+        assertThat(result.aiUsage().estimatedCostUsd())
+                .isEqualByComparingTo("0.000320000000");
+        assertThat(result.aiUsage().usageComplete()).isTrue();
+        assertThat(result.aiUsage().costComplete()).isTrue();
+        assertThat(result.aiUsage().modelCalls()).singleElement()
+                .satisfies(call -> {
+                    assertThat(call.resultStatus()).isEqualTo(AiCallResultStatus.ERROR);
+                    assertThat(call.failureCode())
+                            .isEqualTo(AiCallFailureCode.CONFIGURATION_MISMATCH);
+                });
+    }
+
+    @Test
+    void configurationMismatchPreservesEveryIncurredModelCall() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        Map<String, Object> mismatched = new java.util.LinkedHashMap<>(candidateAllowAi());
+        Map<String, Object> wrongConfiguration = new java.util.LinkedHashMap<>(
+                aiConfiguration());
+        wrongConfiguration.put("customModel", "unexpected-model");
+        mismatched.put("configuration", Map.copyOf(wrongConfiguration));
+        when(clients.analyzeText("post-two-calls", ContentType.POST, "ETF investment"))
+                .thenReturn(Map.copyOf(mismatched));
+
+        ModerationResponse result = controller(clients).moderate(
+                "post-two-calls",
+                "post",
+                "ETF investment",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
+        assertThat(result.aiUsage().meteredCalls()).isEqualTo(2);
+        assertThat(result.aiUsage().inputTokens()).isEqualTo(200L);
+        assertThat(result.aiUsage().outputTokens()).isEqualTo(20L);
+        assertThat(result.aiUsage().totalTokens()).isEqualTo(220L);
+        assertThat(result.aiUsage().estimatedCostUsd())
+                .isEqualByComparingTo("0.000640000000");
+        assertThat(result.aiUsage().usageComplete()).isTrue();
+        assertThat(result.aiUsage().costComplete()).isTrue();
+        assertThat(result.aiUsage().modelCalls())
+                .extracting(call -> call.failureCode())
+                .containsOnly(AiCallFailureCode.CONFIGURATION_MISMATCH);
     }
 
     @Test
@@ -93,12 +471,9 @@ class ModerationControllerTest {
                         eq("profile.png"),
                         eq("image/png"),
                         eq("post-profile")))
-                .thenReturn(Map.of(
-                        "status", "ok",
-                        "ocr", Map.of(
-                                "status", "no_text",
-                                "engine", "tesseract-test-v1"),
-                        "pdq", Map.of("qualityAccepted", true)));
+                .thenReturn(completeMedia(
+                        Map.of("qualityAccepted", true),
+                        Map.of("status", "no_text", "engine", "tesseract-test-v1")));
         Map<String, Object> wrongConfiguration =
                 new java.util.LinkedHashMap<>(aiConfiguration());
         wrongConfiguration.put("customModel", "unexpected-model");
@@ -113,6 +488,9 @@ class ModerationControllerTest {
                         eq(ContentType.POST),
                         eq("Investment update"),
                         eq(""),
+                        eq("no_text"),
+                        eq(false),
+                        eq(false),
                         any(Map.class),
                         eq(false),
                         eq(true)))
@@ -172,6 +550,8 @@ class ModerationControllerTest {
                         Map.ofEntries(
                                 Map.entry("matched", false),
                                 Map.entry("qualityAccepted", true),
+                                Map.entry("candidateFound", false),
+                                Map.entry("candidates", java.util.List.of()),
                                 Map.entry("algorithm", "pdq-256"),
                                 Map.entry("implementation", "meta-threat-exchange-java"),
                                 Map.entry(
@@ -213,6 +593,9 @@ class ModerationControllerTest {
                         eq(ContentType.POST),
                         eq("Combined post text"),
                         eq("Government image caption"),
+                        eq("ok"),
+                        eq(true),
+                        eq(false),
                         any(Map.class),
                         eq(false),
                         eq(true)))
@@ -230,10 +613,10 @@ class ModerationControllerTest {
                 .analyzeMedia(
                         any(byte[].class), eq("post.png"), eq("image/png"), eq("post-2"));
         assertThat(result.decision()).isEqualTo(Decision.BLOCK);
-        assertThat(result.violation()).isEqualTo(Violation.NOT_INVESTMENT);
+        assertThat(result.violation()).isEqualTo(Violation.OFF_TOPIC);
         assertThat(result.imageMatch()).isEqualTo(ImageMatch.NOT_MATCHED);
         assertThat(result.ocrText()).isEqualTo("Government image caption");
-        assertThat(result.politics()).isEqualTo(Politics.CRITICAL_OR_NEGATIVE);
+        assertThat(result.politics()).isEqualTo(Politics.UNCERTAIN);
         ArgumentCaptor<ImageDecisionAuditPayload> audit =
                 ArgumentCaptor.forClass(ImageDecisionAuditPayload.class);
         verify(clients).persistImageDecisionAudit(audit.capture());
@@ -242,6 +625,7 @@ class ModerationControllerTest {
                         ImageDecisionAuditPayload::contentId,
                         ImageDecisionAuditPayload::finalDecision,
                         ImageDecisionAuditPayload::violation,
+                        ImageDecisionAuditPayload::safetyAction,
                         ImageDecisionAuditPayload::imageMatch,
                         ImageDecisionAuditPayload::policyVersion,
                         ImageDecisionAuditPayload::ocrDigest,
@@ -255,34 +639,43 @@ class ModerationControllerTest {
                         ImageDecisionAuditPayload::visualReferenceSnapshotDigest,
                         ImageDecisionAuditPayload::candidateSelectionVersion,
                         ImageDecisionAuditPayload::decisionConfigurationVersion,
+                        ImageDecisionAuditPayload::provenanceSchemaVersion,
                         ImageDecisionAuditPayload::aiConfigurationStatus)
                 .containsExactly(
                         "post-2",
                         "BLOCK",
-                        "NOT_INVESTMENT",
+                        "OFF_TOPIC",
+                        "ALLOW",
                         "NOT_MATCHED",
-                        "image-policy-v1",
+                        DecisionPolicy.POLICY_VERSION,
                         "a".repeat(64),
-                        "omni-moderation-latest",
+                        "omni-moderation-2024-09-26",
                         "gpt-5.6-terra",
-                        "0e9e994cef268f7a1437292c34b9b53a932ba64fc1c5e49f8eb1a9336a73f0fa",
+                        "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                         "gpt-5.6-terra",
                         "medium",
-                        "b066ec4efc4af83b6a477f3ca496ccddc716bfe84ffd4a6f5ff523a5468f6f29",
+                        "20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8",
                         "java-imageio-first-frame-jpeg-png-static-gif-v1@java-21.0.11+10-LTS",
                         "b".repeat(64),
                         "orb-homography-specificity-v1",
-                        "image-decision-config-v1",
+                        "image-decision-config-v2",
+                        "image-decision-provenance-v3",
                         "matched");
         assertThat(audit.getValue().policyWordListsDigest()).matches("[0-9a-f]{64}");
         String configurationSnapshot = audit.getValue().decisionConfigurationSnapshot();
         assertThat(configurationSnapshot)
                 .startsWith(
-                        "schema=image-decision-config-v1\n"
-                                + "implementation.identity=gateway-image-policy-runtime-v1\n")
+                        "schema=image-decision-config-v2\n"
+                                + "implementation.identity=gateway-image-policy-runtime-v2\n")
                 .contains(
-                        "policy.version=image-policy-v1",
-                        "policy.reducerVersion=decision-reducer-v2",
+                        "policy.version=" + DecisionPolicy.POLICY_VERSION,
+                        "policy.reducerVersion=" + DecisionPolicy.REDUCER_VERSION,
+                        "policy.referenceAssetVersion="
+                                + DecisionPolicy.REFERENCE_ASSET_POLICY_VERSION,
+                        "privacyScanner.profileVersion="
+                                + FinancialPrivacyScanner.PROFILE_VERSION,
+                        "privacyScanner.profileSha256="
+                                + FinancialPrivacyScanner.PROFILE_SHA256,
                         "pdq.distanceThreshold=",
                         "ocr.profileVersion=",
                         "visual.candidateSelectionVersion=",
@@ -301,16 +694,15 @@ class ModerationControllerTest {
     }
 
     @Test
-    void usesOcrTextForPoliticalFallbackInMixedInvestmentContent() throws Exception {
+    void reportsPoliticalContextClassifiedFromMixedImageContent() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         MockMultipartFile image = new MockMultipartFile(
                 "image", "post.png", "image/png", new byte[] {1, 2, 3});
         when(clients.analyzeMedia(
                         any(byte[].class), eq("post.png"), eq("image/png"), eq("post-ocr")))
-                .thenReturn(Map.of(
-                        "status", "ok",
-                        "ocr", Map.of("status", "ok", "text", "Government policy"),
-                        "pdq", Map.of("matched", false, "qualityAccepted", true)));
+                .thenReturn(completeMedia(
+                        Map.of("matched", false, "qualityAccepted", true),
+                        Map.of("status", "ok", "text", "Government policy")));
         when(clients.analyzeImageAi(
                         any(byte[].class),
                         eq("post.png"),
@@ -319,10 +711,13 @@ class ModerationControllerTest {
                         eq(ContentType.POST),
                         eq("Market update"),
                         eq("Government policy"),
+                        eq("ok"),
+                        eq(false),
+                        eq(false),
                         any(Map.class),
                         eq(false),
                         eq(true)))
-                .thenReturn(successfulAi("related", "not_related"));
+                .thenReturn(successfulAi("related", "general_politics"));
 
         ModerationResponse result = controller(clients)
                 .moderate(
@@ -364,7 +759,7 @@ class ModerationControllerTest {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         String text = "I hold ETFs, and the government should resign.";
         when(clients.analyzeText("post-mixed", ContentType.POST, text))
-                .thenReturn(successfulAi("related", "not_related"));
+                .thenReturn(successfulAi("related", "general_politics"));
 
         ModerationResponse result = controller(clients)
                 .moderate(
@@ -441,19 +836,18 @@ class ModerationControllerTest {
         String ocrText = "CURRENT OCR VIOLATION";
         MockMultipartFile image = new MockMultipartFile(
                 "image", "post.png", "image/png", new byte[] {1, 2, 3});
-        Map<String, Object> media = Map.of(
-                "status", "ok",
-                "ocr", Map.of(
-                        "status", "ok",
-                        "text", ocrText,
-                        "confidenceAccepted", true,
-                        "truncated", false),
-                "pdq", Map.of(
+        Map<String, Object> media = completeMedia(
+                Map.of(
                         "qualityAccepted", true,
                         "candidateFound", true,
                         "candidates", java.util.List.of(Map.of(
                                 "referenceId", "reference-1",
-                                "decisionBasis", "TEXT_DEPENDENT"))));
+                                "decisionBasis", "TEXT_DEPENDENT"))),
+                Map.of(
+                        "status", "ok",
+                        "text", ocrText,
+                        "confidenceAccepted", true,
+                        "truncated", false));
         when(clients.analyzeMedia(
                         any(byte[].class), eq("post.png"), eq("image/png"), eq("post-max")))
                 .thenReturn(media);
@@ -465,6 +859,9 @@ class ModerationControllerTest {
                         eq(ContentType.POST),
                         eq(caption),
                         eq(ocrText),
+                        eq("ok"),
+                        eq(true),
+                        eq(false),
                         eq(media),
                         eq(true),
                         eq(true)))
@@ -487,6 +884,9 @@ class ModerationControllerTest {
                 eq(ContentType.POST),
                 eq(caption),
                 eq(ocrText),
+                eq("ok"),
+                eq(true),
+                eq(false),
                 eq(media),
                 eq(true),
                 eq(true));
@@ -497,19 +897,18 @@ class ModerationControllerTest {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         MockMultipartFile image = new MockMultipartFile(
                 "image", "post.png", "image/png", new byte[] {1, 2, 3});
-        Map<String, Object> media = Map.of(
-                "status", "ok",
-                "ocr", Map.of(
-                        "status", "ok",
-                        "text", "LOW CONFIDENCE TEXT",
-                        "confidenceAccepted", false,
-                        "truncated", false),
-                "pdq", Map.of(
+        Map<String, Object> media = completeMedia(
+                Map.of(
                         "qualityAccepted", false,
                         "candidateFound", true,
                         "candidates", java.util.List.of(Map.of(
                                 "referenceId", "reference-1",
-                                "decisionBasis", "TEXT_DEPENDENT"))));
+                                "decisionBasis", "TEXT_DEPENDENT"))),
+                Map.of(
+                        "status", "ok",
+                        "text", "LOW CONFIDENCE TEXT",
+                        "confidenceAccepted", false,
+                        "truncated", false));
         when(clients.analyzeMedia(
                         any(byte[].class), eq("post.png"), eq("image/png"), eq("post-ocr-low")))
                 .thenReturn(media);
@@ -521,6 +920,9 @@ class ModerationControllerTest {
                         eq(ContentType.POST),
                         eq("Investment update"),
                         eq("LOW CONFIDENCE TEXT"),
+                        eq("ok"),
+                        eq(false),
+                        eq(false),
                         eq(media),
                         eq(true),
                         eq(false)))
@@ -545,6 +947,9 @@ class ModerationControllerTest {
                 eq(ContentType.POST),
                 any(String.class),
                 any(String.class),
+                eq("ok"),
+                eq(false),
+                eq(false),
                 eq(media),
                 eq(true),
                 eq(false));
@@ -560,22 +965,22 @@ class ModerationControllerTest {
                 "exactSha256", true,
                 "decisionBasis", "EXACT_ASSET",
                 "status", "ACTIVE",
-                "policyVersion", "image-policy-v1");
+                "policyVersion", DecisionPolicy.REFERENCE_ASSET_POLICY_VERSION);
         when(clients.analyzeMedia(
                         any(byte[].class),
                         eq("prohibited.png"),
                         eq("image/png"),
                         eq("post-exact")))
-                .thenReturn(Map.of(
-                        "status", "ok",
-                        "ocr", Map.of(
+                .thenReturn(completeMedia(
+                        Map.of(
+                                "qualityAccepted", true,
+                                "candidateFound", true,
+                                "authoritativeExactMatch", exactReference,
+                                "candidates", java.util.List.of(exactReference)),
+                        Map.of(
                                 "status", "no_text",
                                 "confidenceAccepted", false,
-                                "truncated", false),
-                        "pdq", Map.of(
-                                "qualityAccepted", true,
-                                "authoritativeExactMatch", exactReference,
-                                "candidates", java.util.List.of(exactReference))));
+                                "truncated", false)));
 
         ModerationResponse result = controller(clients).moderate(
                 "post-exact",
@@ -596,6 +1001,9 @@ class ModerationControllerTest {
                 any(ContentType.class),
                 any(String.class),
                 any(String.class),
+                any(String.class),
+                anyBoolean(),
+                anyBoolean(),
                 any(Map.class),
                 anyBoolean(),
                 anyBoolean());
@@ -634,6 +1042,9 @@ class ModerationControllerTest {
                 any(ContentType.class),
                 any(String.class),
                 any(String.class),
+                any(String.class),
+                anyBoolean(),
+                anyBoolean(),
                 any(Map.class),
                 anyBoolean(),
                 anyBoolean());
@@ -644,17 +1055,118 @@ class ModerationControllerTest {
     }
 
     @Test
+    void malformedMediaEnvelopeReturnsUnknownWithoutSpendingOnImageModels()
+            throws Exception {
+        assertThat(ModerationController.validMediaEnvelope(Map.of())).isFalse();
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        MockMultipartFile image = new MockMultipartFile(
+                "image", "post.png", "image/png", new byte[] {1, 2, 3});
+        when(clients.analyzeMedia(
+                        any(byte[].class),
+                        eq("post.png"),
+                        eq("image/png"),
+                        eq("post-malformed-media")))
+                .thenReturn(Map.of(
+                        "status", "ok",
+                        "pdq", Map.of(
+                                "authoritativeExactMatch",
+                                Map.of(
+                                        "referenceId", "untrusted-malformed-exact",
+                                        "exactSha256", true,
+                                        "decisionBasis", "EXACT_ASSET",
+                                        "status", "ACTIVE",
+                                        "policyVersion",
+                                        DecisionPolicy.REFERENCE_ASSET_POLICY_VERSION)),
+                        "ocr", Map.of("unexpected", true),
+                        "image", Map.of("unexpected", true)));
+
+        ModerationResponse result = controller(clients).moderate(
+                "post-malformed-media",
+                "post",
+                "Investment update",
+                image,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
+        assertThat(result.violation()).isEqualTo(Violation.ANALYZER_ERROR);
+        verify(clients, never()).analyzeImageAi(
+                any(byte[].class),
+                any(String.class),
+                any(String.class),
+                any(String.class),
+                any(ContentType.class),
+                any(String.class),
+                any(String.class),
+                any(String.class),
+                anyBoolean(),
+                anyBoolean(),
+                any(Map.class),
+                anyBoolean(),
+                anyBoolean());
+    }
+
+    @Test
+    void clearPrivacyInLowConfidenceTruncatedOcrBlocksBeforeExternalImageAi()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        MockMultipartFile image = new MockMultipartFile(
+                "image", "statement.png", "image/png", new byte[] {1, 2, 3});
+        Map<String, Object> media = completeMedia(
+                Map.of("qualityAccepted", true),
+                Map.of(
+                        "status", "ok",
+                        "text", "Card number: 4111 1111 1111 1111",
+                        "confidenceAccepted", false,
+                        "truncated", true));
+        when(clients.analyzeMedia(
+                        any(byte[].class),
+                        eq("statement.png"),
+                        eq("image/png"),
+                        eq("post-private-ocr")))
+                .thenReturn(media);
+
+        ModerationResponse result = controller(clients).moderate(
+                "post-private-ocr",
+                "post",
+                "Portfolio statement",
+                image,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.FINANCIAL_PRIVACY);
+        assertThat(result.financialPrivacy()).isEqualTo(FinancialPrivacy.CLEAR);
+        assertThat(result.ocrText()).isNull();
+        verify(clients, never()).analyzeImageAi(
+                any(byte[].class),
+                any(String.class),
+                any(String.class),
+                any(String.class),
+                any(ContentType.class),
+                any(String.class),
+                any(String.class),
+                any(String.class),
+                anyBoolean(),
+                anyBoolean(),
+                any(Map.class),
+                anyBoolean(),
+                anyBoolean());
+    }
+
+    @Test
     void auditFailurePreventsReturningAnUnauditedImageDecision() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         MockMultipartFile image = new MockMultipartFile(
                 "image", "post.png", "image/png", new byte[] {1, 2, 3});
         when(clients.analyzeMedia(
                         any(byte[].class), eq("post.png"), eq("image/png"), eq("post-audit")))
-                .thenReturn(Map.of(
-                        "status", "ok",
-                        "ocr", Map.of("status", "no_text", "confidenceAccepted", false,
-                                "truncated", false),
-                        "pdq", Map.of("candidateFound", false, "qualityAccepted", true)));
+                .thenReturn(completeMedia(
+                        Map.of("candidateFound", false, "qualityAccepted", true),
+                        Map.of(
+                                "status", "no_text",
+                                "confidenceAccepted", false,
+                                "truncated", false)));
         when(clients.analyzeImageAi(
                         any(byte[].class),
                         eq("post.png"),
@@ -663,6 +1175,9 @@ class ModerationControllerTest {
                         eq(ContentType.POST),
                         eq("Investment update"),
                         eq(""),
+                        eq("no_text"),
+                        eq(false),
+                        eq(false),
                         any(Map.class),
                         eq(false),
                         eq(true)))
@@ -728,11 +1243,11 @@ class ModerationControllerTest {
     }
 
     @Test
-    void politicalDictionaryMakesMissedPoliticalTopicUncertain() throws Exception {
+    void generalPoliticalContextIsExposedThroughLegacyUncertainEnum() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         String text = "The government announced a new policy.";
         when(clients.analyzeText("comment-2", ContentType.COMMENT, text))
-                .thenReturn(successfulAi("related", "not_related"));
+                .thenReturn(successfulAi("related", "general_politics"));
 
         ModerationResponse result = controller(clients)
                 .moderate(
@@ -768,9 +1283,9 @@ class ModerationControllerTest {
     }
 
     @Test
-    void privateListBlocksCommentEvenWhenAiAllows() throws Exception {
+    void configuredTermBlocksCommentEvenWhenAiAllows() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
-        String text = "This contains reject-alpha.";
+        String text = "This contains policy-marker-alpha.";
         when(clients.analyzeText("comment-local", ContentType.COMMENT, text))
                 .thenReturn(successfulAi("related", "not_related"));
 
@@ -788,9 +1303,9 @@ class ModerationControllerTest {
     }
 
     @Test
-    void privateListBlocksPostEvenWhenAiAllows() throws Exception {
+    void configuredTermBlocksPostEvenWhenAiAllows() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
-        String text = "Investment update containing reject-alpha.";
+        String text = "Investment update containing policy-marker-alpha.";
         when(clients.analyzeText("post-local", ContentType.POST, text))
                 .thenReturn(successfulAi("related", "not_related"));
 
@@ -829,14 +1344,14 @@ class ModerationControllerTest {
     }
 
     @Test
-    void privateListBlocksUsernameBeforeAi() throws Exception {
+    void configuredTermBlocksUsernameBeforeAi() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
 
         ModerationResponse result = controller(clients)
                 .moderate(
                         "user-local",
                         "username",
-                        "reject_beta_user",
+                        "policy_marker_beta_user",
                         null,
                         null,
                         new MockHttpServletResponse());
@@ -891,16 +1406,16 @@ class ModerationControllerTest {
                 9_437_184,
                 30,
                 0.70,
-                "omni-moderation-latest",
-                "0e9e994cef268f7a1437292c34b9b53a932ba64fc1c5e49f8eb1a9336a73f0fa",
+                "omni-moderation-2024-09-26",
+                "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                 "gpt-5.6-terra",
-                "5e37962e75241d4a185036c8ffd53ca0434d5a4870a0f7427664193f1c918277",
-                "1443b6f20571589552613830416506dfc870bcb581b1f4998da181f48832f2fc",
+                "644044f7960b05e48529003e03f6b69f3dd932a31d6e39d7b4e01d57f5aa9f7e",
+                "de5d6be741ee1f30bfff85de54c71133ad541593083e7d857ff04c028dee0289",
                 "gpt-5.6-terra",
                 "medium",
-                "image-adjudication-v2",
-                "b066ec4efc4af83b6a477f3ca496ccddc716bfe84ffd4a6f5ff523a5468f6f29",
-                "06fcc036b886a71c2fd2ceae32bbbade6fa8cd0fd964cd29868073c0c6a91f81",
+                "image-adjudication-v4",
+                "20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8",
+                "07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef",
                 30,
                 "classpath:policy/test_policy_terms.txt",
                 "classpath:policy/political_words.txt");
@@ -911,7 +1426,8 @@ class ModerationControllerTest {
         return new ModerationController(
                 clients,
                 properties,
-                new PolicyWordLists(new DefaultResourceLoader(), properties));
+                new PolicyWordLists(new DefaultResourceLoader(), properties),
+                new FinancialPrivacyScanner());
     }
 
     private static Map<String, Object> successfulAi(
@@ -920,17 +1436,22 @@ class ModerationControllerTest {
                 "moderation",
                 Map.of(
                         "status", "ok",
-                        "model", "omni-moderation-latest",
+                        "model", "omni-moderation-2024-09-26",
                         "flagged", false,
                         "categoryScores", Map.of()),
                 "classification",
-                Map.of(
-                        "status", "ok",
-                        "model", "gpt-5.6-terra",
-                        "action", "allow",
-                        "category", "none",
-                        "investment", investment,
-                        "politics", politics),
+                Map.ofEntries(
+                        Map.entry("status", "ok"),
+                        Map.entry("model", "gpt-5.6-terra"),
+                        Map.entry("safetyAction", "allow"),
+                        Map.entry("category", "none"),
+                        Map.entry("domain", domain(investment)),
+                        Map.entry("financialClaim", "none"),
+                        Map.entry("financialRisk", "none"),
+                        Map.entry("financialPrivacy", "none"),
+                        Map.entry("impersonation", "none"),
+                        Map.entry("politicalContext", politicalContext(politics)),
+                        Map.entry("usage", modelUsage())),
                 "configuration",
                 aiConfiguration());
     }
@@ -940,42 +1461,67 @@ class ModerationControllerTest {
                 "moderation",
                 Map.of(
                         "status", "ok",
-                        "model", "omni-moderation-latest",
+                        "model", "omni-moderation-2024-09-26",
                         "flagged", false,
                         "categoryScores", Map.of()),
                 "classification",
-                Map.of(
-                        "status", "ok",
-                        "model", "gpt-5.6-terra",
-                        "action", "allow",
-                        "category", "none"),
+                Map.ofEntries(
+                        Map.entry("status", "ok"),
+                        Map.entry("model", "gpt-5.6-terra"),
+                        Map.entry("safetyAction", "allow"),
+                        Map.entry("category", "none"),
+                        Map.entry("financialRisk", "none"),
+                        Map.entry("financialPrivacy", "none"),
+                        Map.entry("impersonation", "none"),
+                        Map.entry("usage", modelUsage())),
                 "configuration",
                 aiConfiguration());
+    }
+
+    private static Map<String, Object> successfulAiWithSignals(
+            String domain,
+            String financialClaim,
+            String financialRisk,
+            String financialPrivacy,
+            String impersonation,
+            String politicalContext) {
+        Map<String, Object> result = new java.util.LinkedHashMap<>(
+                successfulAi(domain, politicalContext));
+        Map<String, Object> classification = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(result, "classification"));
+        classification.put("domain", domain(domain));
+        classification.put("financialClaim", financialClaim);
+        classification.put("financialRisk", financialRisk);
+        classification.put("financialPrivacy", financialPrivacy);
+        classification.put("impersonation", impersonation);
+        classification.put("politicalContext", politicalContext(politicalContext));
+        result.put("classification", Map.copyOf(classification));
+        return Map.copyOf(result);
     }
 
     private static Map<String, Object> aiConfiguration() {
         return Map.ofEntries(
                 Map.entry("provider", "openai"),
-                Map.entry("moderationModel", "omni-moderation-latest"),
+                Map.entry("moderationModel", "omni-moderation-2024-09-26"),
                 Map.entry(
                         "moderationProfileSha256",
-                        "0e9e994cef268f7a1437292c34b9b53a932ba64fc1c5e49f8eb1a9336a73f0fa"),
+                        "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073"),
                 Map.entry("customModel", "gpt-5.6-terra"),
                 Map.entry(
                         "classificationPromptBundleSha256",
-                        "5e37962e75241d4a185036c8ffd53ca0434d5a4870a0f7427664193f1c918277"),
+                        "644044f7960b05e48529003e03f6b69f3dd932a31d6e39d7b4e01d57f5aa9f7e"),
                 Map.entry(
                         "classificationProfileSha256",
-                        "1443b6f20571589552613830416506dfc870bcb581b1f4998da181f48832f2fc"),
+                        "de5d6be741ee1f30bfff85de54c71133ad541593083e7d857ff04c028dee0289"),
                 Map.entry("adjudicationModel", "gpt-5.6-terra"),
                 Map.entry("adjudicationReasoningEffort", "medium"),
-                Map.entry("adjudicationPromptVersion", "image-adjudication-v2"),
+                Map.entry("adjudicationPromptVersion", "image-adjudication-v4"),
                 Map.entry(
                         "adjudicationPromptSha256",
-                        "b066ec4efc4af83b6a477f3ca496ccddc716bfe84ffd4a6f5ff523a5468f6f29"),
+                        "20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8"),
                 Map.entry(
                         "adjudicationProfileSha256",
-                        "06fcc036b886a71c2fd2ceae32bbbade6fa8cd0fd964cd29868073c0c6a91f81"),
+                        "07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef"),
                 Map.entry("openAiTimeoutSeconds", 30L),
                 Map.entry("maxImageBytes", 8_388_608L),
                 Map.entry("maxImageRequestBytes", 9_437_184L));
@@ -984,18 +1530,90 @@ class ModerationControllerTest {
     private static Map<String, Object> candidateAllowAi() {
         Map<String, Object> result = new java.util.LinkedHashMap<>(
                 successfulAi("related", "not_related"));
-        result.put("adjudication", Map.of(
-                "status", "ok",
-                "model", "gpt-5.6-terra",
-                "promptVersion", "image-adjudication-v2",
-                "adjudicationMode", "candidate_recheck",
-                "action", "allow",
-                "category", "none",
-                "candidateDisposition", "rejected",
-                "evidenceBasis", "current_text",
-                "reasonCode", "current_content_safe",
-                "candidateIds", java.util.List.of("reference-1")));
+        result.put("adjudication", Map.ofEntries(
+                Map.entry("status", "ok"),
+                Map.entry("model", "gpt-5.6-terra"),
+                Map.entry("promptVersion", "image-adjudication-v4"),
+                Map.entry("adjudicationMode", "candidate_recheck"),
+                Map.entry("action", "allow"),
+                Map.entry("safetyAction", "allow"),
+                Map.entry("category", "none"),
+                Map.entry("domain", "investment_related"),
+                Map.entry("financialClaim", "none"),
+                Map.entry("financialRisk", "none"),
+                Map.entry("financialPrivacy", "none"),
+                Map.entry("impersonation", "none"),
+                Map.entry("politicalContext", "none"),
+                Map.entry("finalReason", "none"),
+                Map.entry("candidateDisposition", "rejected"),
+                Map.entry("evidenceBasis", "current_text"),
+                Map.entry("reasonCode", "current_content_safe"),
+                Map.entry("candidateIds", java.util.List.of("reference-1")),
+                Map.entry("usage", modelUsage())));
         return Map.copyOf(result);
+    }
+
+    private static Map<String, Object> completeMedia(
+            Map<String, Object> pdqValues, Map<String, Object> ocrValues) {
+        Map<String, Object> pdq = new java.util.LinkedHashMap<>(pdqValues);
+        pdq.putIfAbsent("candidates", java.util.List.of());
+        pdq.putIfAbsent(
+                "candidateFound",
+                pdq.get("candidates") instanceof java.util.List<?> candidates
+                        && !candidates.isEmpty());
+        pdq.putIfAbsent("algorithm", "pdq-256");
+
+        Map<String, Object> ocr = new java.util.LinkedHashMap<>(ocrValues);
+        ocr.putIfAbsent("confidenceAccepted", false);
+        ocr.putIfAbsent("truncated", false);
+        ocr.putIfAbsent("engine", "tesseract-test-v1");
+
+        return Map.of(
+                "status", "ok",
+                "pdq", Map.copyOf(pdq),
+                "ocr", Map.copyOf(ocr),
+                "image",
+                        Map.of(
+                                "width", 640,
+                                "height", 360,
+                                "format", "png",
+                                "decoderProfileVersion", "test-decoder-v1"));
+    }
+
+    private static Map<String, Object> modelUsage() {
+        return Map.ofEntries(
+                Map.entry("inputTokens", 100L),
+                Map.entry("cachedInputTokens", 0L),
+                Map.entry("cacheWriteTokens", 0L),
+                Map.entry("outputTokens", 10L),
+                Map.entry("reasoningTokens", 0L),
+                Map.entry("totalTokens", 110L),
+                Map.entry("serviceTier", "default"),
+                Map.entry("serviceTierAssumed", false),
+                Map.entry("currency", "USD"),
+                Map.entry("pricingVersion", "openai-pricing-2026-08-11"),
+                Map.entry("costComplete", true),
+                Map.entry(
+                        "estimatedCostUsd",
+                        new java.math.BigDecimal("0.000320000000")));
+    }
+
+    private static String domain(String value) {
+        return switch (value) {
+            case "related" -> "investment_related";
+            case "adjacent" -> "investment_adjacent";
+            case "not_related" -> "off_topic";
+            default -> value;
+        };
+    }
+
+    private static String politicalContext(String value) {
+        return switch (value) {
+            case "not_related" -> "none";
+            case "critical_or_negative", "positive_or_supportive", "neutral_or_descriptive" ->
+                    "general_politics";
+            default -> value;
+        };
     }
 
     private static String sha256(String value) {

@@ -25,6 +25,22 @@ public record ModerationRequest(
                         maxLength = 20_000)
                 String text,
         @Schema(
+                        description =
+                                "Optional parent-post context for COMMENT moderation. "
+                                        + "Used for relevance only and never treated as the comment author's words.",
+                        example = "How do you assess NVIDIA's current valuation?",
+                        maxLength = 20_000)
+                String parentPostText,
+        @Schema(
+                        description = "Optional COMMENT-author username supplied as context",
+                        example = "value_investor_az",
+                        maxLength = 128)
+                String authorUsername,
+        @Schema(
+                        description = "Optional text visibly quoted by a COMMENT",
+                        maxLength = 10_000)
+                String quotedText,
+        @Schema(
                         description = "Optional JPEG, PNG or GIF for posts",
                         type = "string",
                         format = "binary")

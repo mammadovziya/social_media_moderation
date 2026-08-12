@@ -29,7 +29,7 @@ ai:
 
 openai:
   api-key: ${OPENAI_API_KEY:}
-  moderation-model: ${OPENAI_MODERATION_MODEL:omni-moderation-latest}
+  moderation-model: ${OPENAI_MODERATION_MODEL:omni-moderation-2024-09-26}
   custom-model: ${OPENAI_CUSTOM_MODEL:gpt-4o-mini}
   adjudication-model: ${OPENAI_ADJUDICATION_MODEL:gpt-5.6-terra}
   adjudication-reasoning-effort: ${OPENAI_ADJUDICATION_REASONING_EFFORT:medium}

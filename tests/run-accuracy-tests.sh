@@ -66,43 +66,189 @@ if ! jq -e -s --argjson expected_count "$EXPECTED_CASE_COUNT" '
     and all(.[];
         (.id | type == "string" and length > 0)
         and (.text | type == "string" and length > 0)
+        and ((.parentPostText // "") | type == "string")
+        and ((.authorUsername // "") | type == "string")
+        and ((.quotedText // "") | type == "string")
         and (.language as $value
             | ["AZ", "EN", "RU", "TR"] | index($value) != null)
         and (.contentType as $value
             | ["POST", "COMMENT", "USERNAME"] | index($value) != null)
+        and (
+            if .contentType == "COMMENT" then true
+            elif .contentType == "POST" then
+                ((.parentPostText // "") == ""
+                    and (.quotedText // "") == ""
+                    and (.authorUsername // "") == "")
+            else
+                ((.parentPostText // "") == ""
+                    and (.quotedText // "") == ""
+                    and (.authorUsername // "") == "")
+            end
+        )
         and (.expected.decision as $value
             | ["ALLOW", "BLOCK", "UNKNOWN"] | index($value) != null)
         and (.expected.violation as $value
             | [
                 "NONE", "HARASSMENT", "HATE", "THREAT", "SELF_HARM",
                 "SEXUAL", "SEXUAL_MINORS", "GRAPHIC_VIOLENCE", "VIOLENCE",
-                "ILLICIT", "SPAM_SCAM", "VULGAR", "IMPERSONATION", "NOT_INVESTMENT",
-                "KNOWN_IMAGE", "ANALYZER_ERROR", "EVIDENCE_UNAVAILABLE", "OTHER"
+                "ILLICIT", "SPAM_SCAM", "VULGAR", "IMPERSONATION",
+                "OFF_TOPIC", "FINANCIAL_PRIVACY", "FINANCIAL_RISK",
+                "NOT_INVESTMENT", "KNOWN_IMAGE", "ANALYZER_ERROR",
+                "EVIDENCE_UNAVAILABLE", "OTHER"
+              ] | index($value) != null)
+        and (.expected.reason as $value
+            | [
+                "NONE", "KNOWN_IMAGE", "SAFETY", "FINANCIAL_PRIVACY",
+                "FINANCIAL_RISK", "IMPERSONATION", "OFF_TOPIC",
+                "EVIDENCE_UNAVAILABLE", "ANALYZER_ERROR"
               ] | index($value) != null)
         and (
-            if .contentType == "POST" then
+            .expected.safetyAction == null
+            or (.expected.safetyAction as $value
+                | ["ALLOW", "BLOCK", "UNKNOWN"] | index($value) != null)
+        )
+        and (.expected.safety as $value
+            | [
+                "NONE", "HARASSMENT", "HATE", "THREAT", "SELF_HARM",
+                "SEXUAL", "SEXUAL_MINORS", "GRAPHIC_VIOLENCE", "VIOLENCE",
+                "ILLICIT", "SPAM_SCAM", "VULGAR", "OTHER"
+              ] | index($value) != null)
+        and (.expected.financialRisk as $value
+            | [
+                "NONE", "POTENTIALLY_MISLEADING", "GUARANTEED_RETURN",
+                "INVESTMENT_SCAM", "PUMP_AND_DUMP", "MARKET_MANIPULATION",
+                "PHISHING", "PAID_PROMOTION", "UNCERTAIN"
+              ] | index($value) != null)
+        and (.expected.financialPrivacy as $value
+            | ["NONE", "POSSIBLE", "CLEAR"] | index($value) != null)
+        and (.expected.impersonation as $value
+            | ["NONE", "POSSIBLE", "CLEAR"] | index($value) != null)
+        and (
+            if .contentType == "POST" or .contentType == "COMMENT" then
                 (.expected | keys | sort)
-                    == ["decision", "investment", "politics", "violation"]
-                and (.expected.investment as $value
-                    | ["RELATED", "NOT_RELATED", "UNCERTAIN"]
-                    | index($value) != null)
-                and (.expected.politics as $value
-                    | [
-                        "NOT_RELATED", "NEUTRAL_OR_SUPPORTIVE",
-                        "CRITICAL_OR_NEGATIVE", "HIGH_RISK", "UNCERTAIN"
-                      ] | index($value) != null)
-            elif .contentType == "COMMENT" then
-                (.expected | keys | sort)
-                    == ["decision", "politics", "violation"]
-                and (.expected.politics as $value
-                    | [
-                        "NOT_RELATED", "NEUTRAL_OR_SUPPORTIVE",
-                        "CRITICAL_OR_NEGATIVE", "HIGH_RISK", "UNCERTAIN"
-                      ] | index($value) != null)
+                    == [
+                        "decision", "domain", "financialClaim", "financialPrivacy",
+                        "financialRisk", "impersonation", "investment",
+                        "politicalContext", "politics", "reason", "safety",
+                        "safetyAction", "violation"
+                      ]
+                and (
+                    .expected.investment == null
+                    or (.expected.investment as $value
+                        | ["RELATED", "ADJACENT", "NOT_RELATED", "UNCERTAIN"]
+                        | index($value) != null)
+                )
+                and (
+                    .expected.politics == null
+                    or (.expected.politics as $value
+                        | [
+                            "NOT_RELATED", "NEUTRAL_OR_SUPPORTIVE",
+                            "CRITICAL_OR_NEGATIVE", "HIGH_RISK", "UNCERTAIN"
+                          ] | index($value) != null)
+                )
+                and (
+                    .expected.domain == null
+                    or (.expected.domain as $value
+                        | [
+                            "INVESTMENT_RELATED", "INVESTMENT_ADJACENT",
+                            "OFF_TOPIC", "UNCERTAIN"
+                          ] | index($value) != null)
+                )
+                and (
+                    .expected.financialClaim == null
+                    or (.expected.financialClaim as $value
+                        | ["NONE", "OPINION", "ANALYSIS", "FACTUAL_CLAIM", "UNCERTAIN"]
+                        | index($value) != null)
+                )
+                and (
+                    .expected.politicalContext == null
+                    or (.expected.politicalContext as $value
+                        | [
+                            "NONE", "INVESTMENT_RELEVANT", "GENERAL_POLITICS",
+                            "UNCERTAIN"
+                          ] | index($value) != null)
+                )
             else
-                (.expected | keys | sort) == ["decision", "violation"]
+                (.expected | keys | sort)
+                    == [
+                        "decision", "financialPrivacy", "financialRisk",
+                        "impersonation", "reason", "safety", "safetyAction",
+                        "violation"
+                      ]
             end
         )
+    )
+    and all(.[] | select(.contentType != "USERNAME");
+        if .expected.domain == null then
+            .expected.investment == null
+            and .expected.politics == null
+            and .expected.financialClaim == null
+            and .expected.politicalContext == null
+        else
+            (
+                {
+                  "INVESTMENT_RELATED": "RELATED",
+                  "INVESTMENT_ADJACENT": "ADJACENT",
+                  "OFF_TOPIC": "NOT_RELATED",
+                  "UNCERTAIN": "UNCERTAIN"
+                }[.expected.domain] == .expected.investment
+            )
+            and (
+                if .expected.politicalContext == "NONE" then
+                    .expected.politics == "NOT_RELATED"
+                else
+                    .expected.politics == "UNCERTAIN"
+                end
+            )
+            and .expected.financialClaim != null
+            and .expected.politicalContext != null
+        end
+    )
+    and all(.[];
+        if .expected.safetyAction == null then
+            .expected.safety == "NONE"
+        elif .expected.safetyAction == "ALLOW" then
+            .expected.safety == "NONE"
+        else
+            .expected.safety != "NONE"
+        end
+    )
+    and (
+        [
+          "POTENTIALLY_MISLEADING", "GUARANTEED_RETURN", "INVESTMENT_SCAM",
+          "PUMP_AND_DUMP", "MARKET_MANIPULATION", "PHISHING", "PAID_PROMOTION"
+        ]
+        - [.[].expected.financialRisk]
+        | length == 0
+    )
+    and (
+        ["INVESTMENT_ADJACENT", "OFF_TOPIC"] - [.[].expected.domain]
+        | length == 0
+    )
+    and (
+        ["POSSIBLE", "CLEAR"] - [.[].expected.financialPrivacy]
+        | length == 0
+    )
+    and any(.[];
+        .contentType == "COMMENT"
+        and ((.parentPostText // "") | length > 0)
+    )
+    and any(.[];
+        .expected.impersonation == "CLEAR"
+    )
+    and any(.[];
+        .expected.decision == "BLOCK"
+        and .expected.safetyAction == "ALLOW"
+    )
+    and any(.[];
+        .expected.decision == "UNKNOWN"
+        and .expected.safetyAction == "ALLOW"
+    )
+    and any(.[];
+        .expected.safetyAction == "UNKNOWN"
+    )
+    and any(.[];
+        .expected.safetyAction == null
     )
 ' "$DATASET" >/dev/null; then
     printf 'Dataset schema or enum validation failed: %s\n' "$DATASET" >&2
@@ -118,6 +264,23 @@ if [[ "${VALIDATE_ONLY:-0}" == "1" ]]; then
     jq -r -s '
         group_by(.language)[]
         | "  \(.[0].language): \(length)"
+    ' "$DATASET"
+    jq -r -s '
+        group_by(.expected.safetyAction)[]
+        | "  safetyAction=\(.[0].expected.safetyAction // "OMITTED"): \(length)"
+    ' "$DATASET"
+    jq -r -s '
+        . as $cases
+        | ["BLOCK", "UNKNOWN"][]
+        | . as $decision
+        | [
+            $cases[]
+            | select(
+                .expected.decision == $decision
+                and .expected.safetyAction == "ALLOW"
+              )
+          ]
+        | "  non-safety \($decision) with safetyAction=ALLOW: \(length)"
     ' "$DATASET"
     exit 0
 fi
@@ -167,6 +330,24 @@ investment_correct=0
 investment_total=0
 politics_correct=0
 politics_total=0
+reason_correct=0
+reason_total=0
+domain_correct=0
+domain_total=0
+safety_correct=0
+safety_total=0
+safety_action_correct=0
+safety_action_total=0
+financial_claim_correct=0
+financial_claim_total=0
+financial_risk_correct=0
+financial_risk_total=0
+financial_privacy_correct=0
+financial_privacy_total=0
+impersonation_correct=0
+impersonation_total=0
+political_context_correct=0
+political_context_total=0
 
 post_correct=0
 post_total=0
@@ -217,6 +398,9 @@ while IFS= read -r test_case || [[ -n "$test_case" ]]; do
     content_type="$(jq -r '.contentType' <<<"$test_case")"
     language="$(jq -r '.language' <<<"$test_case")"
     text_value="$(jq -r '.text' <<<"$test_case")"
+    parent_post_text="$(jq -r '.parentPostText // ""' <<<"$test_case")"
+    author_username="$(jq -r '.authorUsername // ""' <<<"$test_case")"
+    quoted_text="$(jq -r '.quotedText // ""' <<<"$test_case")"
     expected_json="$(jq -cS '.expected' <<<"$test_case")"
 
     case "$content_type" in
@@ -234,16 +418,27 @@ while IFS= read -r test_case || [[ -n "$test_case" ]]; do
     body_file="$work_dir/response-$index.json"
     error_file="$work_dir/curl-$index.log"
     curl_exit=0
+    curl_args=(
+        -sS
+        --max-time "$REQUEST_TIMEOUT_SECONDS"
+        -o "$body_file"
+        -w '%{http_code}'
+        "$BASE_URL/v1/moderate"
+        --form-string "contentId=$case_id"
+        --form-string "contentType=$content_type"
+        --form-string "text=$text_value"
+    )
+    if [[ -n "$parent_post_text" ]]; then
+        curl_args+=(--form-string "parentPostText=$parent_post_text")
+    fi
+    if [[ -n "$author_username" ]]; then
+        curl_args+=(--form-string "authorUsername=$author_username")
+    fi
+    if [[ -n "$quoted_text" ]]; then
+        curl_args+=(--form-string "quotedText=$quoted_text")
+    fi
     http_code="$(
-        curl -sS \
-            --max-time "$REQUEST_TIMEOUT_SECONDS" \
-            -o "$body_file" \
-            -w '%{http_code}' \
-            "$BASE_URL/v1/moderate" \
-            --form-string "contentId=$case_id" \
-            --form-string "contentType=$content_type" \
-            --form-string "text=$text_value" \
-            2>"$error_file"
+        curl "${curl_args[@]}" 2>"$error_file"
     )" || curl_exit=$?
 
     response_is_json=false
@@ -260,6 +455,15 @@ while IFS= read -r test_case || [[ -n "$test_case" ]]; do
         "$COLOR_BOLD" "$index" "$case_count" "$case_id" \
         "$content_type" "$language" "$COLOR_RESET"
     printf 'Text:     %s\n' "$text_value"
+    if [[ -n "$parent_post_text" ]]; then
+        printf 'Parent:   %s\n' "$parent_post_text"
+    fi
+    if [[ -n "$author_username" ]]; then
+        printf 'Author:   %s\n' "$author_username"
+    fi
+    if [[ -n "$quoted_text" ]]; then
+        printf 'Quoted:   %s\n' "$quoted_text"
+    fi
     printf 'Expected: %s\n' "$expected_json"
     printf 'Response: %s\n' "$response_text"
 
@@ -300,11 +504,15 @@ while IFS= read -r test_case || [[ -n "$test_case" ]]; do
         fi
     done
 
-    for field_name in decision violation investment politics; do
+    for field_name in decision violation reason domain safetyAction safety financialClaim financialRisk financialPrivacy impersonation politicalContext investment politics; do
         expected_value="$(
             jq -r --arg field "$field_name" \
-                'if .expected | has($field) then
-                    .expected[$field]
+                'if (.expected | has($field)) then
+                    if .expected[$field] == null then
+                        "__EXPECTED_OMITTED__"
+                    else
+                        .expected[$field]
+                    end
                  else
                     "__NOT_EXPECTED__"
                  end' <<<"$test_case"
@@ -317,11 +525,24 @@ while IFS= read -r test_case || [[ -n "$test_case" ]]; do
         case "$field_name" in
             decision) decision_total=$((decision_total + 1)) ;;
             violation) violation_total=$((violation_total + 1)) ;;
+            reason) reason_total=$((reason_total + 1)) ;;
+            domain) domain_total=$((domain_total + 1)) ;;
+            safetyAction) safety_action_total=$((safety_action_total + 1)) ;;
+            safety) safety_total=$((safety_total + 1)) ;;
+            financialClaim) financial_claim_total=$((financial_claim_total + 1)) ;;
+            financialRisk) financial_risk_total=$((financial_risk_total + 1)) ;;
+            financialPrivacy) financial_privacy_total=$((financial_privacy_total + 1)) ;;
+            impersonation) impersonation_total=$((impersonation_total + 1)) ;;
+            politicalContext) political_context_total=$((political_context_total + 1)) ;;
             investment) investment_total=$((investment_total + 1)) ;;
             politics) politics_total=$((politics_total + 1)) ;;
         esac
 
-        if [[ "$response_is_json" == true ]]; then
+        if [[ "$response_is_json" == true && "$expected_value" == "__EXPECTED_OMITTED__" ]]; then
+            actual_value="$(
+                jq -r --arg field "$field_name" 'if has($field) then "__UNEXPECTED_PRESENT__:" + (.[$field] | tostring) else "__EXPECTED_OMITTED__" end' "$body_file"
+            )"
+        elif [[ "$response_is_json" == true ]]; then
             actual_value="$(
                 jq -r --arg field "$field_name" \
                     'if has($field) then .[$field] else "__MISSING__" end' \
@@ -336,6 +557,15 @@ while IFS= read -r test_case || [[ -n "$test_case" ]]; do
             case "$field_name" in
                 decision) decision_correct=$((decision_correct + 1)) ;;
                 violation) violation_correct=$((violation_correct + 1)) ;;
+                reason) reason_correct=$((reason_correct + 1)) ;;
+                domain) domain_correct=$((domain_correct + 1)) ;;
+                safetyAction) safety_action_correct=$((safety_action_correct + 1)) ;;
+                safety) safety_correct=$((safety_correct + 1)) ;;
+                financialClaim) financial_claim_correct=$((financial_claim_correct + 1)) ;;
+                financialRisk) financial_risk_correct=$((financial_risk_correct + 1)) ;;
+                financialPrivacy) financial_privacy_correct=$((financial_privacy_correct + 1)) ;;
+                impersonation) impersonation_correct=$((impersonation_correct + 1)) ;;
+                politicalContext) political_context_correct=$((political_context_correct + 1)) ;;
                 investment) investment_correct=$((investment_correct + 1)) ;;
                 politics) politics_correct=$((politics_correct + 1)) ;;
             esac
@@ -390,6 +620,15 @@ print_metric "Turkish exact accuracy" "$tr_correct" "$tr_total"
 printf '\nBy label\n'
 print_metric "decision" "$decision_correct" "$decision_total"
 print_metric "violation" "$violation_correct" "$violation_total"
+print_metric "reason" "$reason_correct" "$reason_total"
+print_metric "domain" "$domain_correct" "$domain_total"
+print_metric "safetyAction" "$safety_action_correct" "$safety_action_total"
+print_metric "safety" "$safety_correct" "$safety_total"
+print_metric "financialClaim" "$financial_claim_correct" "$financial_claim_total"
+print_metric "financialRisk" "$financial_risk_correct" "$financial_risk_total"
+print_metric "financialPrivacy" "$financial_privacy_correct" "$financial_privacy_total"
+print_metric "impersonation" "$impersonation_correct" "$impersonation_total"
+print_metric "politicalContext" "$political_context_correct" "$political_context_total"
 print_metric "investment" "$investment_correct" "$investment_total"
 print_metric "politics" "$politics_correct" "$politics_total"
 

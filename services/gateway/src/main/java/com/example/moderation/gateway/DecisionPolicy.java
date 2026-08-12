@@ -2,13 +2,20 @@ package com.example.moderation.gateway;
 
 import com.example.moderation.gateway.api.ContentType;
 import com.example.moderation.gateway.api.Decision;
+import com.example.moderation.gateway.api.Domain;
+import com.example.moderation.gateway.api.FinalReason;
+import com.example.moderation.gateway.api.FinancialPrivacy;
+import com.example.moderation.gateway.api.FinancialRisk;
+import com.example.moderation.gateway.api.Impersonation;
+import com.example.moderation.gateway.api.Safety;
 import com.example.moderation.gateway.api.Violation;
 import java.util.List;
 import java.util.Map;
 
 public final class DecisionPolicy {
-    public static final String POLICY_VERSION = "image-policy-v1";
-    public static final String REDUCER_VERSION = "decision-reducer-v2";
+    public static final String POLICY_VERSION = "investment-community-policy-v2";
+    public static final String REDUCER_VERSION = "decision-reducer-v4";
+    public static final String REFERENCE_ASSET_POLICY_VERSION = "image-policy-v1";
     private static final List<String> FLAGGED_CATEGORY_PRIORITY = List.of(
             "sexual/minors",
             "self-harm/intent",
@@ -32,8 +39,25 @@ public final class DecisionPolicy {
             ContentType contentType,
             Violation localViolation,
             double unknownThreshold) {
+        return decide(
+                media,
+                ai,
+                contentType,
+                localViolation,
+                FinancialPrivacy.NONE,
+                unknownThreshold);
+    }
+
+    public static Result decide(
+            Map<String, Object> media,
+            Map<String, Object> ai,
+            ContentType contentType,
+            Violation localViolation,
+            FinancialPrivacy localFinancialPrivacy,
+            double unknownThreshold) {
         if (hasAuthoritativeExactMatch(media)) {
-            return new Result(Decision.BLOCK, Violation.KNOWN_IMAGE);
+            return new Result(
+                    Decision.BLOCK, Violation.KNOWN_IMAGE, FinalReason.KNOWN_IMAGE);
         }
 
         Map<String, Object> moderation = nestedMap(ai, "moderation");
@@ -44,91 +68,245 @@ public final class DecisionPolicy {
             return new Result(
                     Decision.BLOCK,
                     resolveFlaggedCategory(
-                            nestedMap(moderation, "categories"), classification));
+                            nestedMap(moderation, "categories"), classification),
+                    FinalReason.SAFETY);
         }
 
         if (localViolation != null
                 && localViolation != Violation.NONE) {
-            return new Result(Decision.BLOCK, localViolation);
+            return new Result(
+                    Decision.BLOCK, localViolation, finalReason(localViolation));
+        }
+        if (localFinancialPrivacy == FinancialPrivacy.CLEAR) {
+            return new Result(
+                    Decision.BLOCK,
+                    Violation.FINANCIAL_PRIVACY,
+                    FinalReason.FINANCIAL_PRIVACY);
         }
 
         boolean analyzerUnavailable =
                 !"ok".equals(moderation.get("status"))
                         || !"ok".equals(classification.get("status"))
-                        || (media != null && "error".equals(media.get("status")));
+                        || (media != null && !"ok".equals(media.get("status")));
         if (analyzerUnavailable) {
-            return new Result(Decision.UNKNOWN, Violation.ANALYZER_ERROR);
+            return analyzerError();
         }
 
-        String customAction = String.valueOf(classification.get("action"));
-        Violation customViolation =
-                Violation.fromProvider(classification.get("category"));
-        boolean classifierProposedBlock = media != null && "block".equals(customAction);
-        if (media == null && "block".equals(customAction)) {
-            return new Result(
-                    Decision.BLOCK,
-                    customViolation == Violation.NONE ? Violation.OTHER : customViolation);
-        }
-        if (!"allow".equals(customAction)
-                && !classifierProposedBlock
-                && !"unknown".equals(customAction)) {
-            return new Result(Decision.UNKNOWN, Violation.ANALYZER_ERROR);
+        PolicySignals signals;
+        try {
+            signals = PolicySignals.classifier(classification, contentType)
+                    .withFinancialPrivacy(localFinancialPrivacy);
+        } catch (IllegalArgumentException exception) {
+            return analyzerError();
         }
 
-        String investment = contentType == ContentType.POST
-                ? String.valueOf(classification.get("investment"))
-                : "";
-        if ("not_related".equals(investment)) {
-            return new Result(Decision.BLOCK, Violation.NOT_INVESTMENT);
-        }
-
-        Violation primaryUncertainty;
-        if ("unknown".equals(customAction)) {
-            primaryUncertainty = customViolation;
-            if (primaryUncertainty == Violation.NONE
-                    && !(contentType == ContentType.POST
-                            && "uncertain".equals(investment))) {
-                primaryUncertainty = Violation.OTHER;
+        boolean classifierPolicyBlock = requiresPolicyAdjudication(signals);
+        if (media == null) {
+            Result reduced = reduceSignals(signals);
+            if (reduced.decision() != Decision.ALLOW) {
+                return reduced;
             }
-        } else {
-            primaryUncertainty = classifierProposedBlock
-                    ? Violation.NONE
-                    : customViolation;
+        } else if (signals.domain() == Domain.OFF_TOPIC && !classifierPolicyBlock) {
+            return offTopic();
         }
 
         ScoreCategory score = highestScore(nestedMap(moderation, "categoryScores"));
         if (score.score() < 0) {
             score = highestScore(nestedMap(moderation, "category_scores"));
         }
-        if (score.score() >= unknownThreshold) {
+        if (!classifierPolicyBlock && score.score() >= unknownThreshold) {
             Violation scoreViolation = Violation.fromProvider(score.category());
-            primaryUncertainty = scoreViolation == Violation.NONE
-                    ? Violation.OTHER
-                    : scoreViolation;
+            return new Result(
+                    Decision.UNKNOWN,
+                    scoreViolation == Violation.NONE ? Violation.OTHER : scoreViolation,
+                    FinalReason.SAFETY);
         }
 
         boolean candidateTrigger = requiresAdjudication(media);
-        if (candidateTrigger || classifierProposedBlock) {
-            if (candidateTrigger && !hasCompleteRequiredOcr(media)) {
-                return new Result(Decision.UNKNOWN, Violation.EVIDENCE_UNAVAILABLE);
+        if (candidateTrigger || classifierPolicyBlock) {
+            if (candidateTrigger
+                    && !classifierPolicyBlock
+                    && !hasCompleteRequiredOcr(media)) {
+                return evidenceUnavailable();
             }
             Result adjudicated = adjudicatedResult(
-                    nestedMap(ai, "adjudication"), media, classifierProposedBlock);
-            if (adjudicated.decision() != Decision.ALLOW) {
-                return adjudicated;
-            }
-            primaryUncertainty = Violation.NONE;
-        }
-        if (primaryUncertainty != Violation.NONE) {
-            return new Result(Decision.UNKNOWN, primaryUncertainty);
+                    nestedMap(ai, "adjudication"), media, classifierPolicyBlock);
+            return adjudicated;
         }
 
-        if (contentType == ContentType.POST) {
-            if (!"related".equals(investment)) {
-                return new Result(Decision.UNKNOWN, Violation.NOT_INVESTMENT);
-            }
+        return reduceSignals(signals);
+    }
+
+    public static boolean classifierProposedBlock(
+            Map<String, Object> classification, ContentType contentType) {
+        try {
+            return requiresPolicyAdjudication(
+                    PolicySignals.classifier(classification, contentType));
+        } catch (IllegalArgumentException exception) {
+            return false;
         }
-        return new Result(Decision.ALLOW, Violation.NONE);
+    }
+
+    private static boolean requiresPolicyAdjudication(PolicySignals signals) {
+        return signals.safetyDecision() == Decision.BLOCK
+                || PolicySignals.isBlockingFinancialRisk(signals.financialRisk())
+                || signals.financialPrivacy() == FinancialPrivacy.CLEAR
+                || signals.impersonation() == Impersonation.CLEAR;
+    }
+
+    private static Result reduceSignals(PolicySignals signals) {
+        if (signals.safetyDecision() == Decision.BLOCK) {
+            Violation violation = violation(signals.safety());
+            return new Result(
+                    Decision.BLOCK,
+                    violation == Violation.NONE ? Violation.OTHER : violation,
+                    FinalReason.SAFETY);
+        }
+        if (signals.financialPrivacy() == FinancialPrivacy.CLEAR) {
+            return new Result(
+                    Decision.BLOCK,
+                    Violation.FINANCIAL_PRIVACY,
+                    FinalReason.FINANCIAL_PRIVACY);
+        }
+        if (PolicySignals.isBlockingFinancialRisk(signals.financialRisk())) {
+            return new Result(
+                    Decision.BLOCK,
+                    financialRiskViolation(signals.financialRisk()),
+                    FinalReason.FINANCIAL_RISK);
+        }
+        if (signals.impersonation() == Impersonation.CLEAR) {
+            return new Result(
+                    Decision.BLOCK, Violation.IMPERSONATION, FinalReason.IMPERSONATION);
+        }
+        if (signals.domain() == Domain.OFF_TOPIC) {
+            return offTopic();
+        }
+        if (signals.safetyDecision() == Decision.UNKNOWN) {
+            Violation violation = violation(signals.safety());
+            return new Result(
+                    Decision.UNKNOWN,
+                    violation == Violation.NONE ? Violation.OTHER : violation,
+                    FinalReason.SAFETY);
+        }
+        if (signals.financialPrivacy() == FinancialPrivacy.POSSIBLE) {
+            return new Result(
+                    Decision.UNKNOWN,
+                    Violation.FINANCIAL_PRIVACY,
+                    FinalReason.FINANCIAL_PRIVACY);
+        }
+        if (PolicySignals.isUncertainFinancialRisk(signals.financialRisk())) {
+            return new Result(
+                    Decision.UNKNOWN,
+                    Violation.FINANCIAL_RISK,
+                    FinalReason.FINANCIAL_RISK);
+        }
+        if (signals.impersonation() == Impersonation.POSSIBLE) {
+            return new Result(
+                    Decision.UNKNOWN, Violation.IMPERSONATION, FinalReason.IMPERSONATION);
+        }
+        if (signals.domain() == Domain.UNCERTAIN) {
+            return new Result(
+                    Decision.UNKNOWN, Violation.OFF_TOPIC, FinalReason.OFF_TOPIC);
+        }
+        return new Result(Decision.ALLOW, Violation.NONE, FinalReason.NONE);
+    }
+
+    private static Result resultForAdjudicatedReason(
+            Decision action, FinalReason reason, PolicySignals signals) {
+        if (action == Decision.ALLOW) {
+            return reason == FinalReason.NONE
+                    ? new Result(Decision.ALLOW, Violation.NONE, FinalReason.NONE)
+                    : analyzerError();
+        }
+        if (action == Decision.UNKNOWN) {
+            return switch (reason) {
+                case SAFETY -> new Result(
+                        Decision.UNKNOWN,
+                        violation(signals.safety()) == Violation.NONE
+                                ? Violation.OTHER
+                                : violation(signals.safety()),
+                        FinalReason.SAFETY);
+                case FINANCIAL_PRIVACY -> new Result(
+                        Decision.UNKNOWN,
+                        Violation.FINANCIAL_PRIVACY,
+                        FinalReason.FINANCIAL_PRIVACY);
+                case FINANCIAL_RISK -> new Result(
+                        Decision.UNKNOWN,
+                        Violation.FINANCIAL_RISK,
+                        FinalReason.FINANCIAL_RISK);
+                case IMPERSONATION -> new Result(
+                        Decision.UNKNOWN,
+                        Violation.IMPERSONATION,
+                        FinalReason.IMPERSONATION);
+                case OFF_TOPIC -> new Result(
+                        Decision.UNKNOWN, Violation.OFF_TOPIC, FinalReason.OFF_TOPIC);
+                case EVIDENCE_UNAVAILABLE -> evidenceUnavailable();
+                case NONE, KNOWN_IMAGE, ANALYZER_ERROR -> analyzerError();
+            };
+        }
+        return switch (reason) {
+            case SAFETY -> new Result(
+                    Decision.BLOCK,
+                    violation(signals.safety()) == Violation.NONE
+                            ? Violation.OTHER
+                            : violation(signals.safety()),
+                    FinalReason.SAFETY);
+            case FINANCIAL_PRIVACY -> new Result(
+                    Decision.BLOCK,
+                    Violation.FINANCIAL_PRIVACY,
+                    FinalReason.FINANCIAL_PRIVACY);
+            case FINANCIAL_RISK -> new Result(
+                    Decision.BLOCK,
+                    financialRiskViolation(signals.financialRisk()),
+                    FinalReason.FINANCIAL_RISK);
+            case IMPERSONATION -> new Result(
+                    Decision.BLOCK, Violation.IMPERSONATION, FinalReason.IMPERSONATION);
+            case OFF_TOPIC -> offTopic();
+            case NONE, KNOWN_IMAGE, EVIDENCE_UNAVAILABLE, ANALYZER_ERROR -> analyzerError();
+        };
+    }
+
+    private static Violation financialRiskViolation(FinancialRisk risk) {
+        return switch (risk) {
+            case GUARANTEED_RETURN, INVESTMENT_SCAM, PHISHING -> Violation.SPAM_SCAM;
+            case PUMP_AND_DUMP, MARKET_MANIPULATION -> Violation.FINANCIAL_RISK;
+            case NONE, POTENTIALLY_MISLEADING, PAID_PROMOTION, UNCERTAIN ->
+                    Violation.FINANCIAL_RISK;
+        };
+    }
+
+    private static Violation violation(Safety safety) {
+        return Violation.fromProvider(safety.name().toLowerCase(java.util.Locale.ROOT));
+    }
+
+    private static Result offTopic() {
+        return new Result(Decision.BLOCK, Violation.OFF_TOPIC, FinalReason.OFF_TOPIC);
+    }
+
+    private static Result analyzerError() {
+        return new Result(
+                Decision.UNKNOWN, Violation.ANALYZER_ERROR, FinalReason.ANALYZER_ERROR);
+    }
+
+    private static Result evidenceUnavailable() {
+        return new Result(
+                Decision.UNKNOWN,
+                Violation.EVIDENCE_UNAVAILABLE,
+                FinalReason.EVIDENCE_UNAVAILABLE);
+    }
+
+    private static FinalReason finalReason(Violation violation) {
+        return switch (violation) {
+            case KNOWN_IMAGE -> FinalReason.KNOWN_IMAGE;
+            case IMPERSONATION -> FinalReason.IMPERSONATION;
+            case OFF_TOPIC, NOT_INVESTMENT -> FinalReason.OFF_TOPIC;
+            case FINANCIAL_PRIVACY -> FinalReason.FINANCIAL_PRIVACY;
+            case FINANCIAL_RISK -> FinalReason.FINANCIAL_RISK;
+            case EVIDENCE_UNAVAILABLE -> FinalReason.EVIDENCE_UNAVAILABLE;
+            case ANALYZER_ERROR -> FinalReason.ANALYZER_ERROR;
+            case NONE -> FinalReason.NONE;
+            default -> FinalReason.SAFETY;
+        };
     }
 
     public static boolean requiresAdjudication(Map<String, Object> media) {
@@ -209,50 +387,73 @@ public final class DecisionPolicy {
     private static Result adjudicatedResult(
             Map<String, Object> adjudication,
             Map<String, Object> media,
-            boolean classifierProposedBlock) {
+            boolean classifierPolicyBlock) {
         if (!"ok".equals(adjudication.get("status"))) {
-            return new Result(Decision.UNKNOWN, Violation.EVIDENCE_UNAVAILABLE);
+            return evidenceUnavailable();
         }
-        String action = String.valueOf(adjudication.get("action"));
+        Decision action;
+        FinalReason finalReason;
+        PolicySignals signals;
+        try {
+            action = Decision.valueOf(
+                    String.valueOf(adjudication.get("action"))
+                            .toUpperCase(java.util.Locale.ROOT));
+            finalReason = FinalReason.valueOf(
+                    String.valueOf(adjudication.get("finalReason"))
+                            .toUpperCase(java.util.Locale.ROOT));
+            signals = PolicySignals.adjudicated(adjudication);
+        } catch (IllegalArgumentException exception) {
+            return analyzerError();
+        }
+        Result signalResult = reduceSignals(signals);
+        if (action != signalResult.decision()
+                || (finalReason == FinalReason.EVIDENCE_UNAVAILABLE
+                        ? action != Decision.UNKNOWN
+                        : finalReason != signalResult.reason())) {
+            return analyzerError();
+        }
         String disposition = String.valueOf(adjudication.get("candidateDisposition"));
         String evidenceBasis = String.valueOf(adjudication.get("evidenceBasis"));
         String reasonCode = String.valueOf(adjudication.get("reasonCode"));
-        Violation violation = Violation.fromProvider(adjudication.get("category"));
-        if (!validAdjudicationBinding(adjudication, media, classifierProposedBlock)) {
-            return new Result(Decision.UNKNOWN, Violation.ANALYZER_ERROR);
+        if (!validAdjudicationBinding(adjudication, media, classifierPolicyBlock)) {
+            return analyzerError();
         }
-        if ("block".equals(action)
+        if (action == Decision.BLOCK
                 && "confirmed".equals(disposition)
                 && !"insufficient".equals(evidenceBasis)
                 && "current_policy_violation".equals(reasonCode)
-                && violation != Violation.NONE) {
-            return new Result(Decision.BLOCK, violation);
+                && finalReason != FinalReason.NONE
+                && finalReason != FinalReason.EVIDENCE_UNAVAILABLE
+                && finalReason != FinalReason.ANALYZER_ERROR) {
+            return resultForAdjudicatedReason(action, finalReason, signals);
         }
-        if ("allow".equals(action)
+        if (action == Decision.ALLOW
                 && "rejected".equals(disposition)
                 && !"insufficient".equals(evidenceBasis)
                 && ("current_content_safe".equals(reasonCode)
-                        || (!classifierProposedBlock
+                        || (!classifierPolicyBlock
                                 && "reference_only_similarity".equals(reasonCode)))
-                && violation == Violation.NONE) {
-            return new Result(Decision.ALLOW, Violation.NONE);
+                && finalReason == FinalReason.NONE
+                && signals.safety() == Safety.NONE) {
+            return resultForAdjudicatedReason(action, finalReason, signals);
         }
-        if ("unknown".equals(action)
+        if (action == Decision.UNKNOWN
                 && "inconclusive".equals(disposition)
                 && "insufficient".equals(evidenceBasis)
                 && ("evidence_conflict".equals(reasonCode)
                         || "insufficient_evidence".equals(reasonCode))) {
-            return new Result(
-                    Decision.UNKNOWN,
-                    violation == Violation.NONE ? Violation.EVIDENCE_UNAVAILABLE : violation);
+            if (finalReason == FinalReason.EVIDENCE_UNAVAILABLE) {
+                return evidenceUnavailable();
+            }
+            return resultForAdjudicatedReason(action, finalReason, signals);
         }
-        return new Result(Decision.UNKNOWN, Violation.ANALYZER_ERROR);
+        return analyzerError();
     }
 
     private static boolean validAdjudicationBinding(
             Map<String, Object> adjudication,
             Map<String, Object> media,
-            boolean classifierProposedBlock) {
+            boolean classifierPolicyBlock) {
         Object value = adjudication.get("candidateIds");
         if (!(value instanceof List<?> ids)
                 || ids.size() > 10
@@ -273,7 +474,7 @@ public final class DecisionPolicy {
                 .collect(java.util.stream.Collectors.toSet());
         boolean candidateTrigger = !allowed.isEmpty();
         String expectedMode = candidateTrigger
-                ? (classifierProposedBlock ? "both" : "candidate_recheck")
+                ? (classifierPolicyBlock ? "both" : "candidate_recheck")
                 : "classifier_block_recheck";
         boolean idsValid = candidateTrigger
                 ? java.util.Set.copyOf(stringIds).equals(allowed)
@@ -302,7 +503,7 @@ public final class DecisionPolicy {
                 && Boolean.TRUE.equals(candidate.get("exactSha256"))
                 && "EXACT_ASSET".equals(candidate.get("decisionBasis"))
                 && "ACTIVE".equals(candidate.get("status"))
-                && POLICY_VERSION.equals(candidate.get("policyVersion"));
+                && REFERENCE_ASSET_POLICY_VERSION.equals(candidate.get("policyVersion"));
     }
 
     private static Violation resolveFlaggedCategory(
@@ -314,7 +515,7 @@ public final class DecisionPolicy {
                 .orElse(Violation.OTHER);
         Violation classifierCategory = Violation.fromProvider(classification.get("category"));
         if ("ok".equals(classification.get("status"))
-                && "block".equals(classification.get("action"))
+                && "block".equals(classification.get("safetyAction"))
                 && isStrictClassifierRefinement(providerCategory, classifierCategory)) {
             return classifierCategory;
         }
@@ -360,7 +561,11 @@ public final class DecisionPolicy {
         return (Map<String, Object>) value;
     }
 
-    public record Result(Decision decision, Violation violation) {}
+    public record Result(Decision decision, Violation violation, FinalReason reason) {
+        public Result(Decision decision, Violation violation) {
+            this(decision, violation, finalReason(violation));
+        }
+    }
 
     private record ScoreCategory(String category, double score) {}
 }
