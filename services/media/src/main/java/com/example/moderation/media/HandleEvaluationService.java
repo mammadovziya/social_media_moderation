@@ -44,7 +44,7 @@ public class HandleEvaluationService {
         evidence.put("registryDigest", protectedNames.digest());
         evidence.put("registryActiveCount", protectedNames.activeCount());
 
-        protectedNames.match(skeleton).ifPresent(match -> evidence.put(
+        protectedNames.match(request.handle()).ifPresent(match -> evidence.put(
                 "protectedMatch",
                 Map.of(
                         "protectedNameId", match.name().id(),

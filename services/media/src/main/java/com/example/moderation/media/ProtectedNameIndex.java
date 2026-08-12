@@ -36,6 +36,18 @@ public class ProtectedNameIndex {
      */
     private static final int MIN_NEAR_LENGTH = 8;
 
+    /**
+     * Shortest skeleton that may be compared as a skeleton at all.
+     *
+     * <p>Folding is what makes {@code kapltalbank} and {@code kapitalbank} compare equal, and at
+     * that length the collision is unambiguously an attack. At three or four characters the fold
+     * has no signal left: {@code ABB} folds to {@code ab}, which would also capture {@code a.b},
+     * {@code aab}, and {@code a4b}. Below this length the entry is matched against the handle with
+     * separators removed and nothing else folded, so {@code abb} and {@code a_b_b} are refused
+     * while ordinary short handles are not.
+     */
+    private static final int MIN_SKELETON_MATCH_LENGTH = 5;
+
     /** Shortest institution skeleton that may match by containment. */
     private static final int MIN_INSTITUTION_CONTAINMENT_LENGTH = 5;
 
@@ -71,17 +83,24 @@ public class ProtectedNameIndex {
     }
 
     /**
-     * Returns the strongest deterministic match for a handle skeleton.
+     * Returns the strongest deterministic match for a handle.
      *
-     * @param skeleton folded handle produced by {@link HandleSkeleton}
+     * @param handle normalized handle, not a skeleton
      */
-    public Optional<Match> match(String skeleton) {
-        if (skeleton == null || skeleton.isBlank()) {
+    public Optional<Match> match(String handle) {
+        if (handle == null || handle.isBlank()) {
             return Optional.empty();
         }
         Snapshot current = snapshot;
+        String skeleton = HandleSkeleton.of(handle);
+        if (skeleton.isEmpty()) {
+            return Optional.empty();
+        }
 
         ProtectedName exact = current.bySkeleton().get(skeleton);
+        if (exact == null) {
+            exact = current.byCompactForm().get(compact(handle));
+        }
         if (exact != null) {
             return Optional.of(new Match(exact, Kind.EXACT, exact.severity()));
         }
@@ -134,6 +153,27 @@ public class ProtectedNameIndex {
             }
         }
         return null;
+    }
+
+    /**
+     * Removes case and separators without folding anything else.
+     *
+     * <p>This is the comparison form for names too short to fold. It still defeats separator
+     * evasion, so {@code a_b_b} is refused, but it keeps letters and digits distinct, so
+     * {@code aab} and {@code a4b} remain ordinary handles.
+     */
+    static String compact(String value) {
+        if (value == null) {
+            return "";
+        }
+        StringBuilder compacted = new StringBuilder(value.length());
+        String normalized = java.text.Normalizer
+                .normalize(value, java.text.Normalizer.Form.NFKC)
+                .toLowerCase(Locale.ROOT);
+        normalized.codePoints()
+                .filter(Character::isLetterOrDigit)
+                .forEach(compacted::appendCodePoint);
+        return compacted.toString();
     }
 
     /** Returns true when at most one insertion, deletion, or substitution separates the values. */
@@ -242,21 +282,31 @@ public class ProtectedNameIndex {
 
     private record Snapshot(
             Map<String, ProtectedName> bySkeleton,
+            Map<String, ProtectedName> byCompactForm,
             List<ProtectedName> entries,
             String digest,
             int activeCount) {
 
         private static Snapshot empty() {
-            return new Snapshot(Map.of(), List.of(), digestOf(List.of()), 0);
+            return new Snapshot(Map.of(), Map.of(), List.of(), digestOf(List.of()), 0);
         }
 
         private static Snapshot of(List<ProtectedName> active) {
             Map<String, ProtectedName> bySkeleton = new HashMap<>();
+            Map<String, ProtectedName> byCompactForm = new HashMap<>();
             for (ProtectedName entry : active) {
-                bySkeleton.putIfAbsent(entry.skeleton(), entry);
+                // A name long enough to fold is compared as a skeleton; a shorter one is compared
+                // only with separators removed. An entry never sits in both maps, so the matching
+                // rule for a given name cannot depend on lookup order.
+                if (entry.skeleton().length() >= MIN_SKELETON_MATCH_LENGTH) {
+                    bySkeleton.putIfAbsent(entry.skeleton(), entry);
+                } else {
+                    byCompactForm.putIfAbsent(compact(entry.value()), entry);
+                }
             }
             return new Snapshot(
                     Map.copyOf(bySkeleton),
+                    Map.copyOf(byCompactForm),
                     List.copyOf(active),
                     digestOf(active),
                     active.size());
@@ -264,6 +314,15 @@ public class ProtectedNameIndex {
 
         private static String digestOf(List<ProtectedName> active) {
             StringBuilder canonical = new StringBuilder(REGISTRY_VERSION).append('\n');
+            canonical.append("minSkeletonMatchLength=")
+                    .append(MIN_SKELETON_MATCH_LENGTH)
+                    .append(";minNearLength=")
+                    .append(MIN_NEAR_LENGTH)
+                    .append(";minInstitutionContainmentLength=")
+                    .append(MIN_INSTITUTION_CONTAINMENT_LENGTH)
+                    .append(";minRoleContainmentLength=")
+                    .append(MIN_ROLE_CONTAINMENT_LENGTH)
+                    .append('\n');
             canonical.append("skeletonProfile=")
                     .append(HandleSkeleton.PROFILE_VERSION)
                     .append(':')

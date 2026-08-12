@@ -40,7 +40,7 @@ class ProtectedNameIndexTest {
         ProtectedNameIndex index = indexOf(KAPITAL_BANK, ADMIN);
 
         Optional<ProtectedNameIndex.Match> match =
-                index.match(HandleSkeleton.of("kapital_bank"));
+                index.match("kapital_bank");
 
         assertThat(match).isPresent();
         assertThat(match.get().kind()).isEqualTo(ProtectedNameIndex.Kind.EXACT);
@@ -52,7 +52,7 @@ class ProtectedNameIndexTest {
     void obfuscatedRoleWordStillMatchesExactly() {
         ProtectedNameIndex index = indexOf(ADMIN);
 
-        assertThat(index.match(HandleSkeleton.of("a.d.m.1.n")))
+        assertThat(index.match("a.d.m.1.n"))
                 .get()
                 .extracting(ProtectedNameIndex.Match::kind)
                 .isEqualTo(ProtectedNameIndex.Kind.EXACT);
@@ -62,7 +62,7 @@ class ProtectedNameIndexTest {
     void oneEditFromALongInstitutionNameIsNear() {
         ProtectedNameIndex index = indexOf(KAPITAL_BANK);
 
-        assertThat(index.match(HandleSkeleton.of("kapitalbanc")))
+        assertThat(index.match("kapitalbanc"))
                 .get()
                 .extracting(ProtectedNameIndex.Match::kind)
                 .isEqualTo(ProtectedNameIndex.Kind.NEAR);
@@ -76,7 +76,7 @@ class ProtectedNameIndexTest {
     void aShortNameNeverMatchesByNearDistance() {
         ProtectedNameIndex index = indexOf(ADMIN);
 
-        assertThat(index.match(HandleSkeleton.of("admit"))).isEmpty();
+        assertThat(index.match("admit")).isEmpty();
     }
 
     @Test
@@ -84,7 +84,7 @@ class ProtectedNameIndexTest {
         ProtectedNameIndex index = indexOf(BIRBANK, OFFICIAL);
 
         Optional<ProtectedNameIndex.Match> match =
-                index.match(HandleSkeleton.of("birbank_official"));
+                index.match("birbank_official");
 
         assertThat(match).isPresent();
         assertThat(match.get().kind()).isEqualTo(ProtectedNameIndex.Kind.BRAND_ROLE);
@@ -95,7 +95,7 @@ class ProtectedNameIndexTest {
     void anotherInstitutionNameAloneIsUnresolvedRatherThanTerminal() {
         ProtectedNameIndex index = indexOf(BIRBANK);
 
-        Optional<ProtectedNameIndex.Match> match = index.match(HandleSkeleton.of("birbank_fan"));
+        Optional<ProtectedNameIndex.Match> match = index.match("birbank_fan");
 
         assertThat(match).isPresent();
         assertThat(match.get().kind()).isEqualTo(ProtectedNameIndex.Kind.BRAND);
@@ -107,7 +107,7 @@ class ProtectedNameIndexTest {
         ProtectedNameIndex index = indexOf(OWN_BRAND);
 
         Optional<ProtectedNameIndex.Match> match =
-                index.match(HandleSkeleton.of("examplebank_fanclub"));
+                index.match("examplebank_fanclub");
 
         assertThat(match).isPresent();
         assertThat(match.get().kind()).isEqualTo(ProtectedNameIndex.Kind.BRAND);
@@ -122,16 +122,63 @@ class ProtectedNameIndexTest {
     void aBareRoleWordInsideALongerHandleIsNotADeterministicMatch() {
         ProtectedNameIndex index = indexOf(ADMIN, OFFICIAL);
 
-        assertThat(index.match(HandleSkeleton.of("notrealadmin"))).isEmpty();
-        assertThat(index.match(HandleSkeleton.of("adminfan"))).isEmpty();
+        assertThat(index.match("notrealadmin")).isEmpty();
+        assertThat(index.match("adminfan")).isEmpty();
+    }
+
+    /**
+     * A three-letter brand folds to a two-character skeleton, which carries no signal. Such an
+     * entry is compared with separators removed and nothing else folded, so brand squatting and
+     * separator evasion are still refused while ordinary short handles survive.
+     */
+    @Test
+    void aShortBrandRefusesTheNameAndSeparatorEvasionOnly() {
+        ProtectedNameIndex index = indexOf(
+                entry(10, "ABB", ProtectedName.NameType.OWN_BRAND, ProtectedName.Severity.CLEAR));
+
+        assertThat(index.match("abb")).isPresent();
+        assertThat(index.match("a_b_b")).isPresent();
+        assertThat(index.match("a.b.b")).isPresent();
+        assertThat(index.match("ABB")).isPresent();
+    }
+
+    @Test
+    void aShortBrandDoesNotCaptureOrdinaryShortHandles() {
+        ProtectedNameIndex index = indexOf(
+                entry(10, "ABB", ProtectedName.NameType.OWN_BRAND, ProtectedName.Severity.CLEAR));
+
+        assertThat(index.match("a.b")).isEmpty();
+        assertThat(index.match("aab")).isEmpty();
+        assertThat(index.match("a4b")).isEmpty();
+        assertThat(index.match("abbasov")).isEmpty();
+        assertThat(index.match("abbas_mammadov")).isEmpty();
+    }
+
+    /**
+     * The short-name rule must not weaken the long-name rule. A folded collision on a long brand
+     * is the attack the skeleton exists to catch.
+     */
+    @Test
+    void aLongBrandStillMatchesThroughFolding() {
+        ProtectedNameIndex index = indexOf(KAPITAL_BANK);
+
+        assertThat(index.match("kapltalbank")).isPresent();
+        assertThat(index.match("kap1tal.bank")).isPresent();
+    }
+
+    @Test
+    void compactFormRemovesSeparatorsButFoldsNothingElse() {
+        assertThat(ProtectedNameIndex.compact("A_B.B")).isEqualTo("abb");
+        assertThat(ProtectedNameIndex.compact("a4b")).isEqualTo("a4b");
+        assertThat(ProtectedNameIndex.compact("aab")).isEqualTo("aab");
     }
 
     @Test
     void anOrdinaryHandleDoesNotMatch() {
         ProtectedNameIndex index = indexOf(KAPITAL_BANK, BIRBANK, ADMIN, OFFICIAL, OWN_BRAND);
 
-        assertThat(index.match(HandleSkeleton.of("value.investor"))).isEmpty();
-        assertThat(index.match(HandleSkeleton.of("normal_name"))).isEmpty();
+        assertThat(index.match("value.investor")).isEmpty();
+        assertThat(index.match("normal_name")).isEmpty();
         assertThat(index.match("")).isEmpty();
     }
 
