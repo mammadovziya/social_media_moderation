@@ -173,6 +173,44 @@ class ProtectedNameIndexTest {
         assertThat(ProtectedNameIndex.compact("aab")).isEqualTo("aab");
     }
 
+    /**
+     * Following an issuer or a party is commentary, not an identity claim. Only the whole name is
+     * refused, so ordinary handles that merely carry it survive.
+     */
+    @Test
+    void anIssuerOrPartyMatchesOnlyAsAWholeName() {
+        ProtectedNameIndex index = indexOf(
+                entry(20, "Tesla", ProtectedName.NameType.ISSUER, ProtectedName.Severity.CLEAR),
+                entry(21, "Musavat", ProtectedName.NameType.POLITICAL_PARTY,
+                        ProtectedName.Severity.CLEAR));
+
+        assertThat(index.match("tesla")).isPresent();
+        assertThat(index.match("musavat")).isPresent();
+        assertThat(index.match("tesla_investor")).isEmpty();
+        assertThat(index.match("musavat_reader")).isEmpty();
+    }
+
+    /**
+     * A state entity is an institution, so a handle carrying its name alongside a staff role is
+     * refused outright while the name alone stays unresolved for review.
+     */
+    @Test
+    void aStateEntityMatchesInsideALongerHandle() {
+        ProtectedNameIndex index = indexOf(
+                entry(22, "SOCAR", ProtectedName.NameType.STATE_ENTITY,
+                        ProtectedName.Severity.CLEAR),
+                OFFICIAL);
+
+        assertThat(index.match("socar_official"))
+                .get()
+                .extracting(ProtectedNameIndex.Match::kind)
+                .isEqualTo(ProtectedNameIndex.Kind.BRAND_ROLE);
+        assertThat(index.match("socar_watch"))
+                .get()
+                .extracting(ProtectedNameIndex.Match::severity)
+                .isEqualTo(ProtectedName.Severity.POSSIBLE);
+    }
+
     @Test
     void anOrdinaryHandleDoesNotMatch() {
         ProtectedNameIndex index = indexOf(KAPITAL_BANK, BIRBANK, ADMIN, OFFICIAL, OWN_BRAND);

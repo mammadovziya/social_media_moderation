@@ -1,7 +1,13 @@
 # Protected-name registry seed. Tab-separated: value<TAB>type<TAB>severity
 #
-# type:     OWN_BRAND | OWN_PRODUCT | BANK | BROKER | REGULATOR | STAFF_ROLE | RESERVED
+# type:     OWN_BRAND | OWN_PRODUCT | BANK | BROKER | REGULATOR | STATE_ENTITY
+#           | PAYMENT_NETWORK | ISSUER | POLITICAL_PARTY | STAFF_ROLE | RESERVED
 # severity: CLEAR | POSSIBLE
+#
+# Institution types (OWN_*, REGULATOR, STATE_ENTITY, PAYMENT_NETWORK, BANK, BROKER) also match
+# inside a longer handle, so a name carried alongside a staff role is refused. ISSUER and
+# POLITICAL_PARTY match only as a whole name: following or discussing an issuer or a party is not
+# a claim to be one, so "tesla_investor" and "musavat_reader" stay ordinary handles.
 #
 # The seed is versioned data, not code. Skeletons are computed by HandleSkeleton at load time so
 # the registry can never drift from the folding the gateway applies to an incoming handle.
@@ -149,3 +155,119 @@ register	RESERVED	CLEAR
 password	RESERVED	CLEAR
 system	RESERVED	CLEAR
 undefined	RESERVED	CLEAR
+
+# --- Azerbaijani state bodies, state holdings, and state-owned companies ---
+#
+# Impersonating a state issuer on an investment platform is a market-integrity risk, not only an
+# identity one: a fake announcement from one of these names moves prices. Institution type, so a
+# handle carrying the name alongside a staff role is refused.
+AZCON Holding	STATE_ENTITY	CLEAR
+AZCON	STATE_ENTITY	CLEAR
+Azerbaijan Transport and Communication Holding	STATE_ENTITY	CLEAR
+Azerbaijan Investment Holding	STATE_ENTITY	CLEAR
+SOCAR	STATE_ENTITY	CLEAR
+State Oil Company of Azerbaijan	STATE_ENTITY	CLEAR
+SOFAZ	STATE_ENTITY	CLEAR
+Dovlet Neft Fondu	STATE_ENTITY	CLEAR
+AzerEnerji	STATE_ENTITY	CLEAR
+Azerishiq	STATE_ENTITY	CLEAR
+Azeriqaz	STATE_ENTITY	CLEAR
+Azersu	STATE_ENTITY	CLEAR
+AzerGold	STATE_ENTITY	CLEAR
+Azerpost	STATE_ENTITY	CLEAR
+Azerbaijan Railways	STATE_ENTITY	CLEAR
+Azerbaycan Demir Yollari	STATE_ENTITY	CLEAR
+Azerbaijan Airlines	STATE_ENTITY	CLEAR
+Azerbaijan Caspian Shipping	STATE_ENTITY	CLEAR
+Azercell	STATE_ENTITY	CLEAR
+Bakcell	STATE_ENTITY	CLEAR
+Azerbaijan Stock Exchange	STATE_ENTITY	CLEAR
+Baku Metropoliten	STATE_ENTITY	CLEAR
+Azeravtoyol	STATE_ENTITY	CLEAR
+
+# --- Government ministries and public services ---
+Ministry of Finance	REGULATOR	CLEAR
+Maliyye Nazirliyi	REGULATOR	CLEAR
+Ministry of Economy	REGULATOR	CLEAR
+Iqtisadiyyat Nazirliyi	REGULATOR	CLEAR
+State Tax Service	REGULATOR	CLEAR
+Dovlet Vergi Xidmeti	REGULATOR	CLEAR
+ASAN Xidmet	REGULATOR	CLEAR
+Milli Meclis	REGULATOR	CLEAR
+
+# --- Card schemes, payment networks, and transfer operators ---
+#
+# Credential-collection handles are the common abuse here, so these are institution type.
+Visa	PAYMENT_NETWORK	CLEAR
+Mastercard	PAYMENT_NETWORK	CLEAR
+American Express	PAYMENT_NETWORK	CLEAR
+UnionPay	PAYMENT_NETWORK	CLEAR
+PayPal	PAYMENT_NETWORK	CLEAR
+Western Union	PAYMENT_NETWORK	CLEAR
+MoneyGram	PAYMENT_NETWORK	CLEAR
+Wise	PAYMENT_NETWORK	CLEAR
+Revolut	PAYMENT_NETWORK	CLEAR
+Milli Kart	PAYMENT_NETWORK	CLEAR
+
+# --- Crypto exchanges and custodians ---
+#
+# Treated as brokers rather than issuers: support-desk impersonation is the dominant phishing
+# vector in this category.
+Binance	BROKER	CLEAR
+Coinbase	BROKER	CLEAR
+Kraken	BROKER	CLEAR
+Bybit	BROKER	CLEAR
+OKX	BROKER	CLEAR
+KuCoin	BROKER	CLEAR
+Bitfinex	BROKER	CLEAR
+Tether	BROKER	CLEAR
+Ledger	BROKER	CLEAR
+Trezor	BROKER	CLEAR
+MetaMask	BROKER	CLEAR
+TradingView	BROKER	CLEAR
+Interactive Brokers	BROKER	CLEAR
+eToro	BROKER	CLEAR
+Robinhood	BROKER	CLEAR
+
+# --- Listed issuers and index providers ---
+#
+# NOT institution type. Members legitimately follow and discuss these names, so only the whole
+# name is refused; "tesla_investor" and "apple_fan" stay ordinary handles.
+Apple	ISSUER	CLEAR
+Microsoft	ISSUER	CLEAR
+Alphabet	ISSUER	CLEAR
+Amazon	ISSUER	CLEAR
+Meta Platforms	ISSUER	CLEAR
+Tesla	ISSUER	CLEAR
+NVIDIA	ISSUER	CLEAR
+Netflix	ISSUER	CLEAR
+Intel	ISSUER	CLEAR
+Berkshire Hathaway	ISSUER	CLEAR
+JPMorgan	ISSUER	CLEAR
+Goldman Sachs	ISSUER	CLEAR
+Morgan Stanley	ISSUER	CLEAR
+BlackRock	ISSUER	CLEAR
+Vanguard	ISSUER	CLEAR
+Fidelity	ISSUER	CLEAR
+Bloomberg	ISSUER	CLEAR
+Nasdaq	ISSUER	CLEAR
+MSCI	ISSUER	CLEAR
+
+# --- Registered political parties ---
+#
+# POLICY INPUT: listed uniformly, never selectively. Protecting one party's name while leaving
+# another claimable is itself a political act. NOT institution type: commentary about a party is
+# not a claim to be it, so only the whole name is refused. Remove this whole block, or extend it
+# with every registered party, but do not curate it partially.
+YAP	POLITICAL_PARTY	CLEAR
+Yeni Azerbaycan Partiyasi	POLITICAL_PARTY	CLEAR
+New Azerbaijan Party	POLITICAL_PARTY	CLEAR
+AXCP	POLITICAL_PARTY	CLEAR
+Azerbaycan Xalq Cebhesi Partiyasi	POLITICAL_PARTY	CLEAR
+Musavat	POLITICAL_PARTY	CLEAR
+REAL Partiyasi	POLITICAL_PARTY	CLEAR
+Vehdet Partiyasi	POLITICAL_PARTY	CLEAR
+Ana Veten Partiyasi	POLITICAL_PARTY	CLEAR
+Azerbaycan Demokrat Partiyasi	POLITICAL_PARTY	CLEAR
+Umid Partiyasi	POLITICAL_PARTY	CLEAR
+Vetendas Hemreyliyi Partiyasi	POLITICAL_PARTY	CLEAR
