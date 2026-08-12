@@ -1,9 +1,5 @@
 # Social Media Moderation
 
-Moderation API for an investment community inside a banking app. Posts,
-comments, and usernames in Azerbaijani, English, Russian, and Turkish, plus
-images on posts.
-
 ## Start
 
 ```bash
