@@ -1,9 +1,11 @@
 # Social Media Moderation
 
-Policy-aware moderation API for an investment community. Supports Azerbaijani,
-English, Russian, and Turkish text, plus JPEG, PNG, and GIF images for posts.
-The local stack is Spring Boot services, OCR and visual matching, PostgreSQL
-evidence storage, and OpenAI moderation/classification.
+Policy-aware moderation API for an investment community inside a banking app.
+Handles posts, comments, and usernames in Azerbaijani, English, Russian, and
+Turkish, plus JPEG, PNG, and GIF images on posts.
+
+Spring Boot gateway, media service (OCR, PDQ, and ORB visual retrieval),
+PostgreSQL evidence storage, and an OpenAI adapter.
 
 ## Start
 
@@ -15,98 +17,55 @@ docker compose up --build -d
 curl -fsS http://localhost:8080/readyz
 ```
 
-Swagger UI: <http://localhost:8080/swagger-ui.html>
+API reference: <http://localhost:8080/swagger-ui.html>
 
-## Moderate content
+## Moderate
 
-`POST /v1/moderate` accepts `multipart/form-data`. `contentType` is `POST`,
-`COMMENT`, or `USERNAME`.
+`POST /v1/moderate`, `multipart/form-data`:
 
 ```bash
-# post, optionally with an image (JPEG, PNG, or GIF; posts only)
 curl -sS http://localhost:8080/v1/moderate \
   -F 'contentId=post-1001' \
   -F 'contentType=POST' \
   -F 'text=ETF market update' \
   -F 'image=@/absolute/path/image.png;type=image/png'
-
-# comment, with conversation context
-curl -sS http://localhost:8080/v1/moderate \
-  -F 'contentId=comment-1002' \
-  -F 'contentType=COMMENT' \
-  -F 'text=I disagree; its valuation is too high.' \
-  -F 'parentPostText=What do you think about NVIDIA after earnings?' \
-  -F 'authorUsername=investor_az' \
-  -F 'quotedText=This stock cannot lose money.'
-
-# username, with the account it belongs to
-curl -sS http://localhost:8080/v1/moderate \
-  -F 'contentId=user-1001' \
-  -F 'contentType=USERNAME' \
-  -F 'text=value_investor' \
-  -F 'subjectId=account-77'
 ```
 
-Limits: `parentPostText` 20,000 characters, `quotedText` 10,000,
-`authorUsername` and `subjectId` 128.
+| Field | Applies to | Limit |
+|---|---|---|
+| `contentId` | all | 128 |
+| `contentType` | all | `POST`, `COMMENT`, `USERNAME` |
+| `text` | all | 20,000 |
+| `image` | `POST` | 8 MiB, JPEG/PNG/GIF |
+| `parentPostText` | `COMMENT` | 20,000 |
+| `quotedText` | `COMMENT` | 10,000 |
+| `authorUsername` | `COMMENT` | 128 |
+| `subjectId` | `USERNAME` | 128 |
 
-The public response contains only:
+The response carries `decision` (`ALLOW`, `BLOCK`, `UNKNOWN`) and `violation`.
+**Never treat `UNKNOWN` as allow.** Detailed policy signals stay internal and
+are returned only to holders of `MODERATION_INTERNAL_RESPONSE_TOKEN`.
 
-- `decision`: `ALLOW`, `BLOCK`, or `UNKNOWN` — **never treat `UNKNOWN` as allow**
-- `violation`: the selected violation category, or `NONE`
-
-Policy signals, image evidence, and model-usage provenance stay internal. They
-are returned only to holders of `MODERATION_INTERNAL_RESPONSE_TOKEN`, which is a
-high-value bearer secret because the internal shape includes content-derived
-evidence.
-
-Calling `/v1/moderate` can consume paid API quota. Health and readiness
-endpoints never invoke a model.
-
-## Usernames
-
-A username is a machine identity and runs its own pipeline: structural contract,
-then local blocklist and privacy scanner, then protected-name registry, then
-collision against allocated handles, and only then the model. Deterministic
-layers decide first and cost nothing.
-
-Handles are `a-z0-9._`, 3 to 30 characters, with no leading, trailing, or
-repeated separator. Anything else is a `400`, not a moderation decision.
-
-Allocation is separate from moderation: after accepting an `ALLOW`, bind the
+Usernames run a separate pipeline: structural contract, blocklist and privacy
+scanner, protected-name registry, collision check, then the model. Handles are
+`a-z0-9._`, 3 to 30 characters; anything else is a `400`. Bind an accepted
 handle with `POST /internal/v1/handles/allocate`, which owns uniqueness and the
-change-rate limit. Decisions are audited and appealable through
-`/internal/v1/appeals/username`.
+change-rate limit.
 
-## Local blocklist
-
-[`config/blocked_terms.txt`](config/blocked_terms.txt) is required but may hold
-only comments. One UTF-8 term or phrase per line, matched as whole tokens and
-never as substrings. Replace the file atomically; a valid version hot-reloads
-into the next request with no restart. A hit returns
-`{"decision":"BLOCK","violation":"OTHER"}` without calling the AI service.
+Calling `/v1/moderate` consumes paid API quota. Health and readiness endpoints
+never invoke a model.
 
 ## Test
 
 ```bash
-mvn test                                    # requires Java 21
-VALIDATE_ONLY=1 ./tests/run-accuracy-tests.sh   # needs jq, makes no API calls
-```
-
-The live accuracy suite consumes paid quota and requires explicit approval:
-
-```bash
-CONFIRM_LIVE_API=1 MODERATION_BASE_URL=http://localhost:8080 \
-  ./tests/run-accuracy-tests.sh
+mvn test                                        # Java 21
+VALIDATE_ONLY=1 ./tests/run-accuracy-tests.sh   # needs jq, no API calls
 ```
 
 ## Before production
 
 - Replace the `OWN_BRAND` and `OWN_PRODUCT` placeholders in
-  `services/media/src/main/resources/handle/protected_names.tsv` with the
-  operating bank's own brand and products.
-- Disable unauthenticated visual retrieval and set the same strong internal
+  `services/media/src/main/resources/handle/protected_names.tsv`.
+- Disable unauthenticated visual retrieval and set a strong shared internal
   token on the media and visual-retrieval services.
-
-See [Image moderation architecture](docs/image-moderation-architecture.md) for
-policy precedence, image matching, audit evidence, and deployment details.
+- Authenticate the gateway; it ships with no authentication.
