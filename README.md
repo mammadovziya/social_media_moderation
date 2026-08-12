@@ -34,7 +34,7 @@ curl http://localhost:8080/v1/moderate \
 `contentType`: `POST`, `COMMENT` or `USERNAME`.
 Images: JPEG, PNG or GIF, only for posts.
 
-Comments can carry bounded conversation context:
+Comments:
 ```bash
 curl http://localhost:8080/v1/moderate \
   -F 'contentId=comment-1002' \
