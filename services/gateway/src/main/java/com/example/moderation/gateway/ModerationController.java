@@ -23,7 +23,9 @@ import io.swagger.v3.oas.annotations.Hidden;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.enums.ParameterIn;
+import io.swagger.v3.oas.annotations.headers.Header;
 import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.ExampleObject;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
@@ -136,8 +138,10 @@ public class ModerationController {
     @Operation(
             summary = "Moderate content",
             description =
-                    "Posts accept text, an image, or both. "
-                            + "Comments and usernames accept text only.")
+                    "Moderates exactly one POST, COMMENT, or USERNAME multipart request. "
+                            + "Posts require text, an image, or both. Comments and usernames "
+                            + "require text and never accept images. Comment context fields are "
+                            + "COMMENT-only.")
     @io.swagger.v3.oas.annotations.parameters.RequestBody(
             required = true,
             description = "Content to check",
@@ -148,53 +152,205 @@ public class ModerationController {
     @ApiResponses({
         @ApiResponse(
                 responseCode = "200",
-                description = "Decision",
+                description = "Moderation decision",
+                headers = {
+                    @Header(
+                            name = "X-Request-ID",
+                            description = "Stable request ID used for support and logs",
+                            schema =
+                                    @Schema(
+                                            type = "string",
+                                            pattern = RequestIdentifiers.SAFE_PATTERN,
+                                            minLength = 1,
+                                            maxLength = 128,
+                                            example =
+                                                    "f3d85d2d-e2c8-44a4-9341-80f8b342fef5")),
+                    @Header(
+                            name = "Cache-Control",
+                            description = "Prevents caching of moderation evidence",
+                            schema = @Schema(type = "string", example = "no-store, private")),
+                    @Header(
+                            name = "Vary",
+                            description = "Separates public and authorized internal representations",
+                            schema =
+                                    @Schema(
+                                            type = "string",
+                                            example = "X-Moderation-Internal-Token"))
+                },
                 content =
                         @Content(
                                 mediaType = MediaType.APPLICATION_JSON_VALUE,
-                                schema = @Schema(implementation = ModerationResponse.class))),
+                                schema = @Schema(implementation = ModerationResponse.class),
+                                examples =
+                                        @ExampleObject(
+                                                name = "allow",
+                                                value =
+                                                        "{\"decision\":\"ALLOW\","
+                                                                + "\"violation\":\"NONE\"}"))),
         @ApiResponse(
                 responseCode = "400",
                 description = "Invalid input",
+                headers =
+                        @Header(
+                                name = "X-Request-ID",
+                                description = "Request ID used in logs",
+                                schema =
+                                        @Schema(
+                                                type = "string",
+                                                pattern = RequestIdentifiers.SAFE_PATTERN,
+                                                minLength = 1,
+                                                maxLength = 128)),
                 content =
                         @Content(
                                 mediaType = MediaType.APPLICATION_JSON_VALUE,
-                                schema = @Schema(implementation = ApiError.class))),
+                                schema = @Schema(implementation = ApiError.class),
+                                examples =
+                                        @ExampleObject(
+                                                value =
+                                                        "{\"error\":\"INVALID_INPUT\","
+                                                                + "\"message\":\"contentType must be POST, "
+                                                                + "COMMENT, or USERNAME.\","
+                                                                + "\"requestId\":\"request-123\"}"))),
+        @ApiResponse(
+                responseCode = "406",
+                description = "Requested response media type is unsupported",
+                headers =
+                        @Header(
+                                name = "X-Request-ID",
+                                description = "Request ID used in logs",
+                                schema =
+                                        @Schema(
+                                                type = "string",
+                                                pattern = RequestIdentifiers.SAFE_PATTERN,
+                                                minLength = 1,
+                                                maxLength = 128)),
+                content =
+                        @Content(
+                                mediaType = MediaType.APPLICATION_JSON_VALUE,
+                                schema = @Schema(implementation = ApiError.class),
+                                examples =
+                                        @ExampleObject(
+                                                value =
+                                                        "{\"error\":\"NOT_ACCEPTABLE\","
+                                                                + "\"message\":\"Requested response type is "
+                                                                + "not supported.\","
+                                                                + "\"requestId\":\"request-123\"}"))),
         @ApiResponse(
                 responseCode = "413",
                 description = "Image is too large",
+                headers =
+                        @Header(
+                                name = "X-Request-ID",
+                                description = "Request ID used in logs",
+                                schema =
+                                        @Schema(
+                                                type = "string",
+                                                pattern = RequestIdentifiers.SAFE_PATTERN,
+                                                minLength = 1,
+                                                maxLength = 128)),
                 content =
                         @Content(
                                 mediaType = MediaType.APPLICATION_JSON_VALUE,
-                                schema = @Schema(implementation = ApiError.class))),
+                                schema = @Schema(implementation = ApiError.class),
+                                examples =
+                                        @ExampleObject(
+                                                value =
+                                                        "{\"error\":\"PAYLOAD_TOO_LARGE\","
+                                                                + "\"message\":\"image exceeds size limit.\","
+                                                                + "\"requestId\":\"request-123\"}"))),
         @ApiResponse(
                 responseCode = "415",
-                description = "Unsupported image type",
+                description = "Unsupported request or image media type",
+                headers =
+                        @Header(
+                                name = "X-Request-ID",
+                                description = "Request ID used in logs",
+                                schema =
+                                        @Schema(
+                                                type = "string",
+                                                pattern = RequestIdentifiers.SAFE_PATTERN,
+                                                minLength = 1,
+                                                maxLength = 128)),
                 content =
                         @Content(
                                 mediaType = MediaType.APPLICATION_JSON_VALUE,
-                                schema = @Schema(implementation = ApiError.class))),
+                                schema = @Schema(implementation = ApiError.class),
+                                examples =
+                                        @ExampleObject(
+                                                value =
+                                                        "{\"error\":\"UNSUPPORTED_MEDIA_TYPE\","
+                                                                + "\"message\":\"unsupported image content "
+                                                                + "type.\","
+                                                                + "\"requestId\":\"request-123\"}"))),
         @ApiResponse(
                 responseCode = "422",
                 description = "Invalid image",
+                headers =
+                        @Header(
+                                name = "X-Request-ID",
+                                description = "Request ID used in logs",
+                                schema =
+                                        @Schema(
+                                                type = "string",
+                                                pattern = RequestIdentifiers.SAFE_PATTERN,
+                                                minLength = 1,
+                                                maxLength = 128)),
                 content =
                         @Content(
                                 mediaType = MediaType.APPLICATION_JSON_VALUE,
-                                schema = @Schema(implementation = ApiError.class))),
+                                schema = @Schema(implementation = ApiError.class),
+                                examples =
+                                        @ExampleObject(
+                                                value =
+                                                        "{\"error\":\"UNPROCESSABLE_IMAGE\","
+                                                                + "\"message\":\"image failed media validation.\","
+                                                                + "\"requestId\":\"request-123\"}"))),
         @ApiResponse(
                 responseCode = "500",
                 description = "Server error",
+                headers =
+                        @Header(
+                                name = "X-Request-ID",
+                                description = "Request ID used in logs",
+                                schema =
+                                        @Schema(
+                                                type = "string",
+                                                pattern = RequestIdentifiers.SAFE_PATTERN,
+                                                minLength = 1,
+                                                maxLength = 128)),
                 content =
                         @Content(
                                 mediaType = MediaType.APPLICATION_JSON_VALUE,
-                                schema = @Schema(implementation = ApiError.class))),
+                                schema = @Schema(implementation = ApiError.class),
+                                examples =
+                                        @ExampleObject(
+                                                value =
+                                                        "{\"error\":\"INTERNAL_ERROR\","
+                                                                + "\"message\":\"Internal server error.\","
+                                                                + "\"requestId\":\"request-123\"}"))),
         @ApiResponse(
                 responseCode = "503",
                 description = "Required analyzer or decision audit is unavailable",
+                headers =
+                        @Header(
+                                name = "X-Request-ID",
+                                description = "Request ID used in logs",
+                                schema =
+                                        @Schema(
+                                                type = "string",
+                                                pattern = RequestIdentifiers.SAFE_PATTERN,
+                                                minLength = 1,
+                                                maxLength = 128)),
                 content =
                         @Content(
                                 mediaType = MediaType.APPLICATION_JSON_VALUE,
-                                schema = @Schema(implementation = ApiError.class)))
+                                schema = @Schema(implementation = ApiError.class),
+                                examples =
+                                        @ExampleObject(
+                                                value =
+                                                        "{\"error\":\"SERVICE_UNAVAILABLE\","
+                                                                + "\"message\":\"Service is not available.\","
+                                                                + "\"requestId\":\"request-123\"}")))
     })
     @PostMapping(
             value = "/v1/moderate",
@@ -230,13 +386,6 @@ public class ModerationController {
                     @Size(max = 10_000)
                     String quotedText,
             @Parameter(hidden = true)
-                    @RequestParam(defaultValue = "")
-                    @Size(max = 128)
-                    @Pattern(
-                            regexp = "|" + RequestIdentifiers.SAFE_PATTERN,
-                            message = "must use 1 to 128 URL-safe ID characters")
-                    String subjectId,
-            @Parameter(hidden = true)
                     @RequestParam(required = false)
                     MultipartFile image,
             @Parameter(
@@ -247,7 +396,7 @@ public class ModerationController {
                                             + "The response returns it.",
                             example = "f3d85d2d-e2c8-44a4-9341-80f8b342fef5")
                     @RequestHeader(value = "X-Request-ID", required = false)
-                    @Size(max = 128)
+                    @Size(min = 1, max = 128)
                     @Pattern(
                             regexp = RequestIdentifiers.SAFE_PATTERN,
                             message = "must use 1 to 128 URL-safe ID characters")
@@ -260,7 +409,7 @@ public class ModerationController {
         ContentType type = parseContentType(contentType);
         validateInputs(type, text, parentPostText, authorUsername, quotedText, image);
         if (type == ContentType.USERNAME) {
-            return moderateHandle(contentId, text, subjectId, requestId, startedAt);
+            return moderateHandle(contentId, text, requestId, startedAt);
         }
         ReloadingBlockedTerms.Snapshot blockedTermsSnapshot = blockedTerms.snapshot();
         Violation localViolation =
@@ -428,31 +577,6 @@ public class ModerationController {
                 DecisionPolicy.POLICY_VERSION);
     }
 
-    /** Backward-compatible overload for callers that do not bind a subject ID. */
-    public ModerationResponse moderate(
-            String contentId,
-            String contentType,
-            String text,
-            String parentPostText,
-            String authorUsername,
-            String quotedText,
-            MultipartFile image,
-            String suppliedRequestId,
-            HttpServletResponse servletResponse)
-            throws IOException {
-        return moderate(
-                contentId,
-                contentType,
-                text,
-                parentPostText,
-                authorUsername,
-                quotedText,
-                "",
-                image,
-                suppliedRequestId,
-                servletResponse);
-    }
-
     /** Backward-compatible direct-call overload used by existing Java clients and tests. */
     public ModerationResponse moderate(
             String contentId,
@@ -469,7 +593,6 @@ public class ModerationController {
                 "",
                 "",
                 "",
-                "",
                 image,
                 suppliedRequestId,
                 servletResponse);
@@ -479,21 +602,20 @@ public class ModerationController {
      * Handle pipeline.
      *
      * <p>A handle is a machine identity, so the cheap deterministic layers decide first and in a
-     * fixed order: structural contract, protected-name registry, skeleton collision, local
-     * blocklist, financial privacy. Each one that fires is terminal before any paid model call.
+     * fixed order: structural contract, protected-name registry, local blocklist, and financial
+     * privacy. Each one that fires is terminal before any paid model call.
      * The model only sees handles that survive, and it answers the question lists cannot: what the
      * string means.
      */
     private ModerationResponse moderateHandle(
             String contentId,
             String handle,
-            String subjectId,
             String requestId,
             long startedAt) {
         HandlePolicy.Result structure = HandlePolicy.evaluate(handle);
         if (!structure.valid()) {
             // A structurally impossible handle is a rejected input rather than a judgement about a
-            // member, so it never becomes a moderation decision or an appealable record.
+            // member, so it never becomes a moderation decision or audit record.
             throw new ResponseStatusException(
                     HttpStatus.BAD_REQUEST, structure.reason().message());
         }
@@ -507,7 +629,6 @@ public class ModerationController {
                     contentId,
                     requestId,
                     normalized,
-                    subjectId,
                     localEvidence,
                     new DecisionPolicy.Result(Decision.BLOCK, Violation.OTHER),
                     UsernameDecisionAuditPayload.DecidingLayer.BLOCKED_TERM,
@@ -524,7 +645,6 @@ public class ModerationController {
                     contentId,
                     requestId,
                     normalized,
-                    subjectId,
                     localEvidence,
                     new DecisionPolicy.Result(
                             Decision.BLOCK,
@@ -538,13 +658,12 @@ public class ModerationController {
                     startedAt);
         }
 
-        Map<String, Object> evidence = handleEvidence(normalized, subjectId, requestId);
+        Map<String, Object> evidence = handleEvidence(normalized, requestId);
         if (!"ok".equals(evidence.get("status"))) {
             return finishHandle(
                     contentId,
                     requestId,
                     normalized,
-                    subjectId,
                     evidence,
                     new DecisionPolicy.Result(
                             Decision.UNKNOWN,
@@ -564,38 +683,17 @@ public class ModerationController {
                 "CLEAR".equals(protectedMatch.get("severity")) && !protectedMatch.isEmpty();
         boolean protectedPossible =
                 "POSSIBLE".equals(protectedMatch.get("severity"));
-        String collisionSubjectId = stringOrNull(evidence.get("collisionSubjectId"));
-
         if (protectedClear) {
             return finishHandle(
                     contentId,
                     requestId,
                     normalized,
-                    subjectId,
                     evidence,
                     new DecisionPolicy.Result(
                             Decision.BLOCK,
                             Violation.IMPERSONATION,
                             FinalReason.IMPERSONATION),
                     UsernameDecisionAuditPayload.DecidingLayer.PROTECTED_NAME,
-                    null,
-                    localFinancialPrivacy,
-                    null,
-                    UsernameDecisionAuditPayload.VerdictSource.NOT_INVOKED,
-                    startedAt);
-        }
-        if (collisionSubjectId != null) {
-            return finishHandle(
-                    contentId,
-                    requestId,
-                    normalized,
-                    subjectId,
-                    evidence,
-                    new DecisionPolicy.Result(
-                            Decision.BLOCK,
-                            Violation.IMPERSONATION,
-                            FinalReason.IMPERSONATION),
-                    UsernameDecisionAuditPayload.DecidingLayer.COLLISION,
                     null,
                     localFinancialPrivacy,
                     null,
@@ -642,7 +740,6 @@ public class ModerationController {
                 contentId,
                 requestId,
                 normalized,
-                subjectId,
                 evidence,
                 result,
                 layer,
@@ -655,12 +752,10 @@ public class ModerationController {
                 startedAt);
     }
 
-    private Map<String, Object> handleEvidence(
-            String handle, String subjectId, String requestId) {
+    private Map<String, Object> handleEvidence(String handle, String requestId) {
         try {
             Map<String, Object> evidence = clients.evaluateHandle(
                     handle,
-                    subjectId,
                     properties.expectedClassificationModel(),
                     properties.expectedClassificationPromptBundleSha256(),
                     properties.expectedClassificationProfileSha256());
@@ -719,7 +814,6 @@ public class ModerationController {
             String contentId,
             String requestId,
             String handle,
-            String subjectId,
             Map<String, Object> evidence,
             DecisionPolicy.Result result,
             UsernameDecisionAuditPayload.DecidingLayer layer,
@@ -740,7 +834,6 @@ public class ModerationController {
         persistUsernameDecisionAudit(
                 requestId,
                 contentId,
-                subjectId,
                 handle,
                 evidence,
                 result,
@@ -798,7 +891,6 @@ public class ModerationController {
     private void persistUsernameDecisionAudit(
             String requestId,
             String contentId,
-            String subjectId,
             String handle,
             Map<String, Object> evidence,
             DecisionPolicy.Result result,
@@ -818,7 +910,6 @@ public class ModerationController {
         UsernameDecisionAuditPayload payload = new UsernameDecisionAuditPayload(
                 requestId,
                 contentId,
-                subjectId == null || subjectId.isBlank() ? null : subjectId,
                 handle,
                 stringOrNull(evidence.get("skeleton")),
                 result.decision().name(),
@@ -829,10 +920,6 @@ public class ModerationController {
                 protectedLayer ? longOrNull(protectedMatch.get("protectedNameId")) : null,
                 protectedLayer ? stringOrNull(protectedMatch.get("nameType")) : null,
                 protectedLayer ? stringOrNull(protectedMatch.get("matchKind")) : null,
-                layer == UsernameDecisionAuditPayload.DecidingLayer.COLLISION
-                        ? stringOrNull(evidence.get("collisionSubjectId"))
-                        : null,
-                integerOrNull(evidence.get("handleChangesInWindow")),
                 nameOrNull(effectiveSafetyAction(result, signals)),
                 nameOrNull(signals == null ? safetyFor(result) : effectiveSafety(result, signals)),
                 nameOrNull(signals == null

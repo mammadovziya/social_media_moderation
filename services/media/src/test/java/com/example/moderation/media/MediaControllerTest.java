@@ -28,9 +28,7 @@ class MediaControllerTest {
             20_000,
             512,
             45.0,
-            2,
-            2,
-            14);
+            2);
     private final ImageDecoder decoder = mock(ImageDecoder.class);
     private final PdqHashService pdq = mock(PdqHashService.class);
     private final PdqHashRepository repository = mock(PdqHashRepository.class);

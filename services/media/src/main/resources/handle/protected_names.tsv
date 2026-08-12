@@ -15,7 +15,7 @@
 # Operator: ABB Invest (abbinvest.az), a product of ABB / Azerbaijan International Bank
 # (abb-bank.az). OWN_BRAND and OWN_PRODUCT are exclusive: no member handle may contain them, even
 # inside a longer handle. Official ABB accounts are therefore provisioned through
-# /internal/v1/handles/allocate rather than through moderation.
+# Current member handles are managed outside this moderation service.
 #
 # DEPLOYMENT INPUT: extend OWN_PRODUCT with any further ABB product, campaign, or sub-brand name
 # before launch. A missing product name leaves that identity open to impersonation.

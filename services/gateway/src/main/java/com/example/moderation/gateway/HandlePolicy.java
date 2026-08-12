@@ -10,9 +10,8 @@ import java.util.Locale;
  * Deterministic structural contract for a handle.
  *
  * <p>A handle is a machine identity, not a display name. Restricting it to a small ASCII alphabet
- * removes the confusable, bidirectional, and zero-width attacks at the input boundary instead of
- * asking a model to reason about them later. Human names belong in the separate display-name
- * field, which accepts the full Unicode range.
+ * removes confusable, bidirectional, and zero-width attacks at the input boundary instead of
+ * asking a model to reason about them later. This policy applies only to machine handles.
  */
 public final class HandlePolicy {
     public static final String PROFILE_VERSION = "handle-structure-v1";

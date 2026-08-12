@@ -8,8 +8,19 @@ import io.swagger.v3.oas.annotations.media.Schema;
 public record ModerationResponse(
         @JsonView(Internal.class) @Schema(hidden = true) String contentId,
         @JsonView(Internal.class) @Schema(hidden = true) ContentType contentType,
-        @JsonView(Public.class) Decision decision,
-        @JsonView(Public.class) Violation violation,
+        @JsonView(Public.class)
+                @Schema(
+                        description =
+                                "Final action. UNKNOWN is fail-closed and must never be treated as ALLOW.",
+                        example = "ALLOW",
+                        requiredMode = Schema.RequiredMode.REQUIRED)
+                Decision decision,
+        @JsonView(Public.class)
+                @Schema(
+                        description = "Selected violation category, or NONE when no violation won.",
+                        example = "NONE",
+                        requiredMode = Schema.RequiredMode.REQUIRED)
+                Violation violation,
         @JsonView(Internal.class) @Schema(hidden = true) Investment investment,
         @JsonView(Internal.class) @Schema(hidden = true) Politics politics,
         @JsonView(Internal.class) @Schema(hidden = true) FinalReason reason,

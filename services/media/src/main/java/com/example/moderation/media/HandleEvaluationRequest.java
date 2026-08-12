@@ -13,13 +13,11 @@ import jakarta.validation.constraints.Size;
  */
 public record HandleEvaluationRequest(
         @NotBlank @Size(max = 64) String handle,
-        @Size(max = 128) String subjectId,
         @Size(max = 128) String classificationModel,
         @Pattern(regexp = "^$|^[0-9a-f]{64}$") String promptBundleSha256,
         @Pattern(regexp = "^$|^[0-9a-f]{64}$") String classificationProfileSha256) {
 
     public HandleEvaluationRequest {
-        subjectId = subjectId == null ? "" : subjectId;
         classificationModel = classificationModel == null ? "" : classificationModel;
         promptBundleSha256 = promptBundleSha256 == null ? "" : promptBundleSha256;
         classificationProfileSha256 =

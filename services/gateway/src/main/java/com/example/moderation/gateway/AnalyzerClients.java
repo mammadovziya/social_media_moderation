@@ -116,13 +116,12 @@ public class AnalyzerClients {
     }
 
     /**
-     * Returns the deterministic handle evidence held by the media service: protected-name match,
-     * skeleton collision, change-rate state, and any cached model verdict.
+     * Returns deterministic handle evidence held by the media service: protected-name match and
+     * any cached model verdict.
      */
     @SuppressWarnings("unchecked")
     public Map<String, Object> evaluateHandle(
             String handle,
-            String subjectId,
             String classificationModel,
             String promptBundleSha256,
             String classificationProfileSha256) {
@@ -131,7 +130,6 @@ public class AnalyzerClients {
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of(
                         "handle", handle,
-                        "subjectId", subjectId == null ? "" : subjectId,
                         "classificationModel", classificationModel,
                         "promptBundleSha256", promptBundleSha256,
                         "classificationProfileSha256", classificationProfileSha256))

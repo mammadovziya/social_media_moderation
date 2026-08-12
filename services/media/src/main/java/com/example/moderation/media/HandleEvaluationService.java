@@ -1,7 +1,5 @@
 package com.example.moderation.media;
 
-import java.time.Duration;
-import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -10,26 +8,20 @@ import org.springframework.stereotype.Service;
 /**
  * Deterministic handle checks that need stored state.
  *
- * <p>This service answers with evidence, not with a decision. It reports what the registry, the
- * allocated handles, and the change history say about a candidate handle; the gateway reduces
- * those signals together with the safety axis into the terminal decision.
+ * <p>This service answers with evidence, not with a decision. It reports what the protected-name
+ * registry and cached verdicts say about a candidate handle; the gateway reduces those signals
+ * together with the safety axis into the terminal decision.
  */
 @Service
 public class HandleEvaluationService {
     private final ProtectedNameIndex protectedNames;
-    private final HandleRegistryRepository registry;
     private final UsernameVerdictCacheRepository verdictCache;
-    private final MediaProperties properties;
 
     HandleEvaluationService(
             ProtectedNameIndex protectedNames,
-            HandleRegistryRepository registry,
-            UsernameVerdictCacheRepository verdictCache,
-            MediaProperties properties) {
+            UsernameVerdictCacheRepository verdictCache) {
         this.protectedNames = protectedNames;
-        this.registry = registry;
         this.verdictCache = verdictCache;
-        this.properties = properties;
     }
 
     public Map<String, Object> evaluate(HandleEvaluationRequest request) {
@@ -52,22 +44,6 @@ public class HandleEvaluationService {
                         "matchKind", match.kind().name(),
                         "severity", match.severity().name())));
 
-        String subjectId = blankToNull(request.subjectId());
-        registry.subjectHoldingSkeleton(skeleton, subjectId)
-                .ifPresent(holder -> evidence.put("collisionSubjectId", holder));
-
-        if (subjectId != null) {
-            Instant since = Instant.now()
-                    .minus(Duration.ofDays(properties.handleChangeWindowDays()));
-            int changes = registry.changesSince(subjectId, since);
-            evidence.put("handleChangesInWindow", changes);
-            evidence.put("handleChangeLimit", properties.handleChangeLimit());
-            evidence.put("handleChangeWindowDays", properties.handleChangeWindowDays());
-            evidence.put("rateLimited", changes >= properties.handleChangeLimit());
-        } else {
-            evidence.put("rateLimited", false);
-        }
-
         cacheKey(request, skeleton)
                 .flatMap(verdictCache::find)
                 .ifPresent(verdict -> evidence.put("cachedVerdict", verdict));
@@ -86,17 +62,6 @@ public class HandleEvaluationService {
                         request.classificationProfileSha256(),
                         HandleSkeleton.PROFILE_SHA256),
                 request.verdict());
-    }
-
-    /** Binds a handle to a subject after the caller has accepted the moderation decision. */
-    public Map<String, Object> allocate(HandleAllocationRequest request) {
-        String skeleton = HandleSkeleton.of(request.handle());
-        registry.allocate(request.subjectId(), request.handle(), skeleton);
-        return Map.of(
-                "status", "allocated",
-                "subjectId", request.subjectId(),
-                "handle", request.handle(),
-                "skeleton", skeleton);
     }
 
     private Optional<UsernameVerdictCacheRepository.CacheKey> cacheKey(

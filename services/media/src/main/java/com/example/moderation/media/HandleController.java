@@ -35,12 +35,4 @@ public class HandleController {
         return Map.of("status", "cached");
     }
 
-    @PostMapping(
-            value = "/internal/v1/handles/allocate",
-            consumes = MediaType.APPLICATION_JSON_VALUE,
-            produces = MediaType.APPLICATION_JSON_VALUE)
-    @ResponseStatus(HttpStatus.CREATED)
-    public Map<String, Object> allocate(@Valid @RequestBody HandleAllocationRequest request) {
-        return service.allocate(request);
-    }
 }

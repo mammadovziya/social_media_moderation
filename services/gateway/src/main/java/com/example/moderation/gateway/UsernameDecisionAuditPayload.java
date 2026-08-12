@@ -3,14 +3,12 @@ package com.example.moderation.gateway;
 /**
  * One audited handle decision sent to the media service.
  *
- * <p>Field names and value domains mirror {@code username-decision-provenance-v1}. The record
- * carries the handle because the handle is the subject of the decision and an appeal cannot be
- * reviewed without it.
+ * <p>Field names and value domains mirror {@code username-decision-provenance-v2}. The handle is
+ * the complete subject of this moderation decision; no account identifier is carried.
  */
 record UsernameDecisionAuditPayload(
         String requestId,
         String contentId,
-        String subjectId,
         String handle,
         String skeleton,
         String finalDecision,
@@ -21,8 +19,6 @@ record UsernameDecisionAuditPayload(
         Long protectedNameId,
         String protectedNameType,
         String protectedMatchKind,
-        String collisionSubjectId,
-        Integer handleChangesInWindow,
         String safetyAction,
         String safety,
         String financialRisk,
@@ -47,8 +43,6 @@ record UsernameDecisionAuditPayload(
     enum DecidingLayer {
         STRUCTURE,
         PROTECTED_NAME,
-        COLLISION,
-        RATE_LIMIT,
         BLOCKED_TERM,
         FINANCIAL_PRIVACY,
         CLASSIFIER,

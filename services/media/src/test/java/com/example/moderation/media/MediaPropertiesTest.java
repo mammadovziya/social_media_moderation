@@ -42,8 +42,6 @@ class MediaPropertiesTest {
                 20_000,
                 512,
                 45.0,
-                2,
-                2,
-                14);
+                2);
     }
 }

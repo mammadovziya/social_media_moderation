@@ -89,11 +89,9 @@ public class PdqHashRepository {
 
     public long referenceAssetsRevision() {
         return jdbc.sql("""
-                        SELECT reference_revision.revision + legacy_revision.revision
+                        SELECT reference_revision.revision
                         FROM moderation_reference_assets_revision reference_revision
-                        CROSS JOIN blocked_pdq_hashes_revision legacy_revision
                         WHERE reference_revision.singleton = TRUE
-                          AND legacy_revision.singleton = TRUE
                         """)
                 .query(Long.class)
                 .single();
@@ -101,13 +99,7 @@ public class PdqHashRepository {
 
     public ReferenceAssetsSnapshot loadReferenceAssetsSnapshot() {
         List<ReferenceAssetRow> rows = jdbc.sql("""
-                        WITH combined_revision AS (
-                            SELECT reference_revision.revision + legacy_revision.revision AS revision
-                            FROM moderation_reference_assets_revision reference_revision
-                            CROSS JOIN blocked_pdq_hashes_revision legacy_revision
-                            WHERE reference_revision.singleton = TRUE
-                              AND legacy_revision.singleton = TRUE
-                        ), active_assets AS (
+                        WITH active_assets AS (
                             SELECT
                                 id,
                                 external_id,
@@ -122,24 +114,11 @@ public class PdqHashRepository {
                                 FALSE AS legacy
                             FROM moderation_reference_assets
                             WHERE status = 'ACTIVE'
-                            UNION ALL
-                            SELECT
-                                NULL::BIGINT AS id,
-                                'legacy-pdq:' || hash_value AS external_id,
-                                'COMPOSITION_DEPENDENT' AS decision_basis,
-                                reason AS violation_category,
-                                'HIGH' AS severity,
-                                'legacy-v1' AS policy_version,
-                                NULL::CHAR(64) AS sha256,
-                                hash_value AS pdq_hash,
-                                NULL::CHAR(64) AS masked_pdq_hash,
-                                NULL::CHAR(64) AS ocr_digest,
-                                TRUE AS legacy
-                            FROM blocked_pdq_hashes
                         )
                         SELECT revision.revision, assets.*
-                        FROM combined_revision revision
+                        FROM moderation_reference_assets_revision revision
                         LEFT JOIN active_assets assets ON TRUE
+                        WHERE revision.singleton = TRUE
                         """)
                 .query((resultSet, rowNumber) -> new ReferenceAssetRow(
                         resultSet.getLong("revision"),
@@ -175,13 +154,7 @@ public class PdqHashRepository {
 
     public VisualReferenceSnapshot loadVisualReferenceSnapshot(String descriptorVersion) {
         List<VisualReferenceRow> rows = jdbc.sql("""
-                        WITH combined_revision AS (
-                            SELECT reference_revision.revision + legacy_revision.revision AS revision
-                            FROM moderation_reference_assets_revision reference_revision
-                            CROSS JOIN blocked_pdq_hashes_revision legacy_revision
-                            WHERE reference_revision.singleton = TRUE
-                              AND legacy_revision.singleton = TRUE
-                        ), active_descriptors AS (
+                        WITH active_descriptors AS (
                             SELECT
                                 asset.id,
                                 asset.external_id,
@@ -221,8 +194,9 @@ public class PdqHashRepository {
                               AND asset.sha256 = descriptor.source_sha256
                         )
                         SELECT revision.revision, descriptors.*
-                        FROM combined_revision revision
+                        FROM moderation_reference_assets_revision revision
                         LEFT JOIN active_descriptors descriptors ON TRUE
+                        WHERE revision.singleton = TRUE
                         """)
                 .param("descriptorVersion", descriptorVersion)
                 .query((resultSet, rowNumber) -> new VisualReferenceRow(

@@ -8,13 +8,12 @@ import jakarta.validation.constraints.Size;
 /**
  * One audited handle decision.
  *
- * <p>The record stores the handle itself because the handle is the subject of the decision and an
- * appeal cannot be reviewed without it. It stores no other member data.
+ * <p>The record stores the handle because it is the complete subject of the decision. It stores no
+ * account identifier or other member data.
  */
 public record UsernameDecisionAuditRequest(
         @NotBlank @Size(max = 128) String requestId,
         @NotBlank @Size(max = 128) String contentId,
-        @Size(max = 128) String subjectId,
         @NotBlank @Size(max = 64) String handle,
         @Size(max = 64) String skeleton,
         @NotBlank @Pattern(regexp = "ALLOW|BLOCK|UNKNOWN") String finalDecision,
@@ -22,15 +21,13 @@ public record UsernameDecisionAuditRequest(
         @NotBlank @Size(max = 32) String finalReason,
         @NotBlank
                 @Pattern(
-                        regexp = "STRUCTURE|PROTECTED_NAME|COLLISION|RATE_LIMIT|BLOCKED_TERM"
+                        regexp = "STRUCTURE|PROTECTED_NAME|BLOCKED_TERM"
                                 + "|FINANCIAL_PRIVACY|CLASSIFIER|ANALYZER_UNAVAILABLE")
                 String decidingLayer,
         @Size(max = 32) String structureReason,
         Long protectedNameId,
         @Size(max = 32) String protectedNameType,
         @Size(max = 16) String protectedMatchKind,
-        @Size(max = 128) String collisionSubjectId,
-        @Min(0) Integer handleChangesInWindow,
         @Size(max = 16) String safetyAction,
         @Size(max = 32) String safety,
         @Size(max = 32) String financialRisk,
@@ -53,15 +50,13 @@ public record UsernameDecisionAuditRequest(
         @NotBlank @Pattern(regexp = "LIVE|CACHE|NOT_INVOKED") String verdictSource,
         @Min(0) int latencyMs) {
 
-    static final String PROVENANCE_SCHEMA_VERSION = "username-decision-provenance-v1";
+    static final String PROVENANCE_SCHEMA_VERSION = "username-decision-provenance-v2";
 
     public UsernameDecisionAuditRequest {
-        subjectId = blankToNull(subjectId);
         skeleton = blankToNull(skeleton);
         structureReason = blankToNull(structureReason);
         protectedNameType = blankToNull(protectedNameType);
         protectedMatchKind = blankToNull(protectedMatchKind);
-        collisionSubjectId = blankToNull(collisionSubjectId);
         safetyAction = blankToNull(safetyAction);
         safety = blankToNull(safety);
         financialRisk = blankToNull(financialRisk);

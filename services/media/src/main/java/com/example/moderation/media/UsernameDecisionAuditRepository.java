@@ -21,7 +21,6 @@ class UsernameDecisionAuditRepository {
                         INSERT INTO moderation_username_decision_audit_events (
                             request_id,
                             content_id,
-                            subject_id,
                             handle,
                             skeleton,
                             final_decision,
@@ -32,8 +31,6 @@ class UsernameDecisionAuditRepository {
                             protected_name_id,
                             protected_name_type,
                             protected_match_kind,
-                            collision_subject_id,
-                            handle_changes_in_window,
                             safety_action,
                             safety,
                             financial_risk,
@@ -57,7 +54,6 @@ class UsernameDecisionAuditRepository {
                         ) VALUES (
                             :requestId,
                             :contentId,
-                            :subjectId,
                             :handle,
                             :skeleton,
                             :finalDecision,
@@ -68,8 +64,6 @@ class UsernameDecisionAuditRepository {
                             :protectedNameId,
                             :protectedNameType,
                             :protectedMatchKind,
-                            :collisionSubjectId,
-                            :handleChangesInWindow,
                             :safetyAction,
                             :safety,
                             :financialRisk,
@@ -94,7 +88,6 @@ class UsernameDecisionAuditRepository {
                         """)
                 .param("requestId", event.requestId())
                 .param("contentId", event.contentId())
-                .param("subjectId", event.subjectId(), Types.VARCHAR)
                 .param("handle", event.handle())
                 .param("skeleton", event.skeleton(), Types.VARCHAR)
                 .param("finalDecision", event.finalDecision())
@@ -105,8 +98,6 @@ class UsernameDecisionAuditRepository {
                 .param("protectedNameId", event.protectedNameId(), Types.BIGINT)
                 .param("protectedNameType", event.protectedNameType(), Types.VARCHAR)
                 .param("protectedMatchKind", event.protectedMatchKind(), Types.VARCHAR)
-                .param("collisionSubjectId", event.collisionSubjectId(), Types.VARCHAR)
-                .param("handleChangesInWindow", event.handleChangesInWindow(), Types.INTEGER)
                 .param("safetyAction", event.safetyAction(), Types.VARCHAR)
                 .param("safety", event.safety(), Types.VARCHAR)
                 .param("financialRisk", event.financialRisk(), Types.VARCHAR)

@@ -389,8 +389,8 @@ class ModerationControllerTest {
         assertThat(result.impersonation()).isEqualTo(Impersonation.NONE);
         assertThat(result.safetyAction()).isNull();
         // A local terminal block still costs nothing: no handle round trip and no model call.
-        // It is audited, because a rejected handle must remain appealable.
-        verify(clients, never()).evaluateHandle(any(), any(), any(), any(), any());
+        // It is audited so the terminal local decision retains provenance.
+        verify(clients, never()).evaluateHandle(any(), any(), any(), any());
         verify(clients, never()).analyzeText(any(), any(), any());
         verify(clients).persistUsernameDecisionAudit(any());
     }
@@ -1423,7 +1423,7 @@ class ModerationControllerTest {
     @Test
     void usernameReturnsOnlySafetyFields() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
-        when(clients.evaluateHandle(eq("normal_name"), any(), any(), any(), any()))
+        when(clients.evaluateHandle(eq("normal_name"), any(), any(), any()))
                 .thenReturn(cleanHandleEvidence());
         when(clients.analyzeText("user-1", ContentType.USERNAME, "normal_name"))
                 .thenReturn(successfulUsernameAi());
@@ -1446,7 +1446,7 @@ class ModerationControllerTest {
     @Test
     void usernameWordsAreEvaluatedByAiWithoutALocalBlock() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
-        when(clients.evaluateHandle(eq("notrealadmin"), any(), any(), any(), any()))
+        when(clients.evaluateHandle(eq("notrealadmin"), any(), any(), any()))
                 .thenReturn(cleanHandleEvidence());
         when(clients.analyzeText("user-2", ContentType.USERNAME, "notrealadmin"))
                 .thenReturn(successfulUsernameAi());
@@ -1489,7 +1489,7 @@ class ModerationControllerTest {
     @Test
     void aProtectedNameMatchBlocksWithoutCallingTheModel() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
-        when(clients.evaluateHandle(eq("kapital_bank"), any(), any(), any(), any()))
+        when(clients.evaluateHandle(eq("kapital_bank"), any(), any(), any()))
                 .thenReturn(handleEvidenceWith(
                         "protectedMatch",
                         Map.of(
@@ -1516,26 +1516,6 @@ class ModerationControllerTest {
         verify(clients).persistUsernameDecisionAudit(any());
     }
 
-    @Test
-    void aSkeletonCollisionWithAnExistingMemberBlocksWithoutCallingTheModel() throws Exception {
-        AnalyzerClients clients = mock(AnalyzerClients.class);
-        when(clients.evaluateHandle(eq("va1ue_inve5tor"), any(), any(), any(), any()))
-                .thenReturn(handleEvidenceWith("collisionSubjectId", "subject-42"));
-
-        ModerationResponse result = controller(clients)
-                .moderate(
-                        "user-collision",
-                        "username",
-                        "va1ue_inve5tor",
-                        null,
-                        null,
-                        new MockHttpServletResponse());
-
-        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
-        assertThat(result.violation()).isEqualTo(Violation.IMPERSONATION);
-        verify(clients, never()).analyzeText(any(), any(), any());
-    }
-
     /**
      * An unresolved registry similarity cannot allow, and it must not override a stronger
      * current-content conclusion either. It only applies when nothing else remains.
@@ -1543,7 +1523,7 @@ class ModerationControllerTest {
     @Test
     void anUnresolvedRegistrySimilarityBecomesUnknownOnlyWhenNothingElseDecides() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
-        when(clients.evaluateHandle(eq("birbank_fan"), any(), any(), any(), any()))
+        when(clients.evaluateHandle(eq("birbank_fan"), any(), any(), any()))
                 .thenReturn(handleEvidenceWith(
                         "protectedMatch",
                         Map.of(
@@ -1571,7 +1551,7 @@ class ModerationControllerTest {
     @Test
     void aCachedVerdictDecidesWithoutCallingTheModelOrReportingSpend() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
-        when(clients.evaluateHandle(eq("cached_name"), any(), any(), any(), any()))
+        when(clients.evaluateHandle(eq("cached_name"), any(), any(), any()))
                 .thenReturn(handleEvidenceWith("cachedVerdict", successfulUsernameAi()));
 
         ModerationResponse result = controller(clients)
@@ -1592,7 +1572,7 @@ class ModerationControllerTest {
     @Test
     void aFreshVerdictIsCachedForTheNextRequest() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
-        when(clients.evaluateHandle(eq("fresh_name"), any(), any(), any(), any()))
+        when(clients.evaluateHandle(eq("fresh_name"), any(), any(), any()))
                 .thenReturn(cleanHandleEvidence());
         when(clients.analyzeText("user-fresh", ContentType.USERNAME, "fresh_name"))
                 .thenReturn(successfulUsernameAi());
@@ -1612,7 +1592,7 @@ class ModerationControllerTest {
     @Test
     void unavailableHandleEvidenceIsUnknownAndNeverAllow() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
-        when(clients.evaluateHandle(eq("some_name"), any(), any(), any(), any()))
+        when(clients.evaluateHandle(eq("some_name"), any(), any(), any()))
                 .thenThrow(new RuntimeException("media unavailable"));
 
         ModerationResponse result = controller(clients)
@@ -1632,7 +1612,7 @@ class ModerationControllerTest {
     @Test
     void anUnauditedHandleDecisionIsNeverReturned() {
         AnalyzerClients clients = mock(AnalyzerClients.class);
-        when(clients.evaluateHandle(eq("audit_name"), any(), any(), any(), any()))
+        when(clients.evaluateHandle(eq("audit_name"), any(), any(), any()))
                 .thenReturn(cleanHandleEvidence());
         when(clients.analyzeText("user-audit", ContentType.USERNAME, "audit_name"))
                 .thenReturn(successfulUsernameAi());
@@ -1758,8 +1738,7 @@ class ModerationControllerTest {
     @Test
     void usernameWordsDoNotBlockBeforeAi() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
-        when(clients.evaluateHandle(
-                        eq("policy_marker_beta_user"), any(), any(), any(), any()))
+        when(clients.evaluateHandle(eq("policy_marker_beta_user"), any(), any(), any()))
                 .thenReturn(cleanHandleEvidence());
         when(clients.analyzeText(
                         "user-local", ContentType.USERNAME, "policy_marker_beta_user"))

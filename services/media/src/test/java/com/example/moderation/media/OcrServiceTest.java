@@ -267,8 +267,6 @@ class OcrServiceTest {
                 maxTextChars,
                 maxSpans,
                 45.0,
-                maxConcurrent,
-                2,
-                14);
+                maxConcurrent);
     }
 }
