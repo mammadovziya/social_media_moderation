@@ -6,14 +6,44 @@
 # The seed is versioned data, not code. Skeletons are computed by HandleSkeleton at load time so
 # the registry can never drift from the folding the gateway applies to an incoming handle.
 #
-# DEPLOYMENT INPUT: replace the OWN_BRAND and OWN_PRODUCT placeholders with the operating bank's
-# own brand, products, and campaign names before production. A registry without them protects
-# every competitor and leaves the operator's own identity open.
+# Operator: ABB Invest (abbinvest.az), a product of ABB / Azerbaijan International Bank
+# (abb-bank.az). OWN_BRAND and OWN_PRODUCT are exclusive: no member handle may contain them, even
+# inside a longer handle. Official ABB accounts are therefore provisioned through
+# /internal/v1/handles/allocate rather than through moderation.
+#
+# DEPLOYMENT INPUT: extend OWN_PRODUCT with any further ABB product, campaign, or sub-brand name
+# before launch. A missing product name leaves that identity open to impersonation.
 
-# --- Operator identity (placeholders, replace before production) ---
-ExampleBank	OWN_BRAND	CLEAR
-ExampleBank Invest	OWN_PRODUCT	CLEAR
-ExampleInvest	OWN_PRODUCT	CLEAR
+# --- Operator identity: ABB ---
+ABB	OWN_BRAND	CLEAR
+ABB Bank	OWN_BRAND	CLEAR
+Azerbaijan International Bank	OWN_BRAND	CLEAR
+Azərbaycan Beynəlxalq Bankı	OWN_BRAND	CLEAR
+Международный Банк Азербайджана	OWN_BRAND	CLEAR
+
+# --- Operator products ---
+ABB Invest	OWN_PRODUCT	CLEAR
+ABB Mobile	OWN_PRODUCT	CLEAR
+ABB Business	OWN_PRODUCT	CLEAR
+Bolkart	OWN_PRODUCT	CLEAR
+
+# --- Operator brand combined with a staff role ---
+#
+# These are listed explicitly because the bare "ABB" skeleton folds to two characters, which is
+# below the length a containment match is allowed to use. Without these rows, "abb_destek" and
+# "abb_support" would reach the model instead of being refused deterministically. Each entry also
+# covers one-edit variants through near matching.
+ABB Support	OWN_BRAND	CLEAR
+ABB Destek	OWN_BRAND	CLEAR
+ABB Komek	OWN_BRAND	CLEAR
+ABB Official	OWN_BRAND	CLEAR
+ABB Resmi	OWN_BRAND	CLEAR
+ABB Security	OWN_BRAND	CLEAR
+ABB Tehlukesizlik	OWN_BRAND	CLEAR
+ABB Admin	OWN_BRAND	CLEAR
+ABB Musteri Xidmeti	OWN_BRAND	CLEAR
+ABB Invest Support	OWN_BRAND	CLEAR
+ABB Invest Official	OWN_BRAND	CLEAR
 
 # --- Regulator and public authority ---
 Central Bank of Azerbaijan	REGULATOR	CLEAR
@@ -24,11 +54,9 @@ Mərkəzi Bank	REGULATOR	CLEAR
 Financial Market Supervision	REGULATOR	CLEAR
 Maliyye Bazarlarina Nezaret	REGULATOR	CLEAR
 
-# --- Banks operating in Azerbaijan ---
+# --- Other banks operating in Azerbaijan (ABB is OWN_BRAND above, not listed here) ---
 Kapital Bank	BANK	CLEAR
 PASHA Bank	BANK	CLEAR
-ABB Bank	BANK	CLEAR
-Azerbaijan International Bank	BANK	CLEAR
 Birbank	BANK	CLEAR
 Unibank	BANK	CLEAR
 Xalq Bank	BANK	CLEAR

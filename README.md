@@ -36,7 +36,8 @@ VALIDATE_ONLY=1 ./tests/run-accuracy-tests.sh
 
 ## Before production
 
-- Replace the `OWN_BRAND` and `OWN_PRODUCT` placeholders in
-  `services/media/src/main/resources/handle/protected_names.tsv`.
+- Extend `OWN_PRODUCT` in
+  `services/media/src/main/resources/handle/protected_names.tsv` with any
+  further ABB product, campaign, or sub-brand name.
 - Disable unauthenticated visual retrieval and set a shared internal token.
 - Authenticate the gateway; it ships with none.
