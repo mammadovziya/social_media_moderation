@@ -5,7 +5,11 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 
 @SpringBootApplication
-@EnableConfigurationProperties({AiProperties.class, OpenAiProperties.class})
+@EnableConfigurationProperties({
+    AiProperties.class,
+    OpenAiProperties.class,
+    OpenAiTransportProperties.class
+})
 public class AiApplication {
     public static void main(String[] args) {
         SpringApplication.run(AiApplication.class, args);

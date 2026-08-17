@@ -63,10 +63,10 @@ class OpenAiRestClientTest {
                         "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073")
                 .containsEntry(
                         "classificationPromptBundleSha256",
-                        "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba")
+                        "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8")
                 .containsEntry(
                         "classificationProfileSha256",
-                        "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216")
+                        "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d")
                 .containsEntry("adjudicationModel", "gpt-5.6-terra")
                 .containsEntry("adjudicationReasoningEffort", "medium")
                 .containsEntry(
@@ -74,7 +74,7 @@ class OpenAiRestClientTest {
                         "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505")
                 .containsEntry(
                         "adjudicationProfileSha256",
-                        "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa")
+                        "9efc6b244bba4ab2cd0ab0747e7a9fbf8f83d4479cf1310cdbbdeb5c0e3e3eef")
                 .containsEntry("openAiTimeoutSeconds", 30L);
     }
 
@@ -230,7 +230,10 @@ class OpenAiRestClientTest {
                         "financialPrivacy",
                         "impersonation",
                         "restrictedPoliticalEntity",
-                        "ordinary lowercase Turkish verb")
+                        "ordinary lowercase Turkish verb",
+                        "strongest meaningful component",
+                        "not neutralize its meaning",
+                        "separable component")
                 .doesNotContain(
                         "\"decision\"",
                         "\"confidence\"",
@@ -537,8 +540,43 @@ class OpenAiRestClientTest {
         assertStrictSchemaPayload(
                 classificationPayload, "content_analysis", input);
         assertThat(classificationPayload).doesNotContainKey("reasoning");
+        assertThat(classificationPayload)
+                .hasEntrySatisfying("prompt_cache_key", key -> assertThat(key)
+                        .asString()
+                        .startsWith("moderation-")
+                        .hasSize(59));
         assertStrictSchemaPayload(
                 adjudicationPayload, "image_candidate_adjudication", input);
+        assertThat(adjudicationPayload)
+                .containsKey("prompt_cache_key")
+                .doesNotContainKey("prompt_cache_retention");
+        assertThat(adjudicationPayload.get("prompt_cache_key"))
+                .isNotEqualTo(classificationPayload.get("prompt_cache_key"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void promptCacheKeyIsStablePerGovernedProfileAndContentType() throws Exception {
+        OpenAiRestClient client = client("test-key");
+        List<Map<String, Object>> input = List.of(Map.of(
+                "role", "user", "content", "different untrusted content each time"));
+        var method = OpenAiRestClient.class.getDeclaredMethod(
+                "classificationPayload", ContentType.class, List.class);
+        method.setAccessible(true);
+
+        Map<String, Object> first = (Map<String, Object>)
+                method.invoke(client, ContentType.POST, input);
+        Map<String, Object> second = (Map<String, Object>)
+                method.invoke(
+                        client,
+                        ContentType.POST,
+                        List.of(Map.of("role", "user", "content", "new text")));
+        Map<String, Object> comment = (Map<String, Object>)
+                method.invoke(client, ContentType.COMMENT, input);
+
+        assertThat(first.get("prompt_cache_key"))
+                .isEqualTo(second.get("prompt_cache_key"))
+                .isNotEqualTo(comment.get("prompt_cache_key"));
     }
 
     @Test

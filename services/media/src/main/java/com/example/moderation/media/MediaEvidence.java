@@ -21,4 +21,30 @@ record MediaEvidence(
         String pdqImplementationCommit,
         String authoritativeReferenceId,
         String authoritativePolicyVersion,
-        Long referenceAssetRevision) {}
+        Long referenceAssetRevision) {
+
+    MediaEvidence withContentId(String value) {
+        return new MediaEvidence(
+                value,
+                sha256,
+                byteLength,
+                detectedFormat,
+                processingPath,
+                pdqHash,
+                pdqQuality,
+                maskedPdqHash,
+                maskedPdqQuality,
+                maskedRegionCount,
+                ocrStatus,
+                ocrDigest,
+                ocrConfidence,
+                ocrConfidenceAccepted,
+                ocrTruncated,
+                ocrEngine,
+                candidateCount,
+                pdqImplementationCommit,
+                authoritativeReferenceId,
+                authoritativePolicyVersion,
+                referenceAssetRevision);
+    }
+}

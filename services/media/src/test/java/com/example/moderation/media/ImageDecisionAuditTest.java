@@ -38,8 +38,8 @@ class ImageDecisionAuditTest {
             "moderation.model=omni-moderation-2024-09-26",
             "moderation.profileSha256=25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
             "classification.model=gpt-5.6-terra",
-            "classification.promptBundleSha256=92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba",
-            "classification.profileSha256=4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216",
+            "classification.promptBundleSha256=89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8",
+            "classification.profileSha256=d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d",
             "adjudication.model=gpt-5.6-terra",
             "adjudication.reasoningEffort=medium",
             "adjudication.promptVersion=image-adjudication-v5",
@@ -633,10 +633,10 @@ class ImageDecisionAuditTest {
                 "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073");
         verify(statement).param(
                 "configuredClassificationPromptBundleSha256",
-                "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba");
+                "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8");
         verify(statement).param(
                 "configuredClassificationProfileSha256",
-                "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216");
+                "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d");
         verify(statement).param("configuredAdjudicationModel", "gpt-5.6-terra");
         verify(statement).param("configuredAdjudicationReasoningEffort", "medium");
         verify(statement).param(
@@ -1096,8 +1096,8 @@ class ImageDecisionAuditTest {
                 "omni-moderation-2024-09-26",
                 "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                 "gpt-5.6-terra",
-                "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba",
-                "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216",
+                "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8",
+                "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d",
                 "gpt-5.6-terra",
                 "medium",
                 "image-adjudication-v5",

@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -21,15 +22,28 @@ class OcrService {
     private final MediaProperties properties;
     private final OcrEngine engine;
     private final Duration timeout;
+    private final Duration admissionTimeout;
     private final Semaphore slots;
     private final boolean available;
+    private final String runtimeProfile;
 
-    OcrService(MediaProperties properties, OcrEngine engine) {
+    OcrService(
+            MediaProperties properties,
+            MediaPerformanceProperties performance,
+            OcrEngine engine) {
         this.properties = properties;
         this.engine = engine;
         this.timeout = Duration.ofSeconds(properties.ocrTimeoutSeconds());
+        this.admissionTimeout = performance.acquireTimeout();
         this.slots = new Semaphore(properties.ocrMaxConcurrent(), true);
-        this.available = !properties.ocrEnabled() || checkReady();
+        if (!properties.ocrEnabled()) {
+            this.available = true;
+            this.runtimeProfile = "ocr-disabled-v1";
+        } else {
+            String detectedProfile = readyRuntimeProfile();
+            this.available = detectedProfile != null;
+            this.runtimeProfile = available ? detectedProfile : "ocr-unavailable-v1";
+        }
     }
 
     boolean ready() {
@@ -43,25 +57,50 @@ class OcrService {
         return available ? "ready" : "unavailable";
     }
 
+    /** Stable cache-key input captured together with OCR readiness. */
+    String runtimeProfile() {
+        return runtimeProfile;
+    }
+
     OcrResult analyze(BufferedImage image) {
+        return analyze(image, ModerationDeadline.none());
+    }
+
+    OcrResult analyze(BufferedImage image, ModerationDeadline deadline) {
         if (!properties.ocrEnabled()) {
             return OcrResult.disabled();
         }
         if (!available) {
             return OcrResult.error();
         }
-        if (!slots.tryAcquire()) {
-            return OcrResult.busy();
+        deadline.check();
+        try {
+            Duration wait = deadline.boundedBy(admissionTimeout);
+            if (!slots.tryAcquire(Math.max(1, wait.toMillis()), TimeUnit.MILLISECONDS)) {
+                deadline.check();
+                return OcrResult.busy();
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            log.warn("OCR admission wait was interrupted");
+            return OcrResult.error();
         }
 
         try {
+            deadline.check();
             OcrDocument extracted = engine.extract(
                     image,
                     properties.ocrLanguages(),
                     timeout,
                     properties.ocrMaxTextChars(),
                     properties.ocrMaxSpans());
+            if (!runtimeProfile.equals(extracted.engine())) {
+                log.warn("OCR runtime profile changed after readiness");
+                return OcrResult.error();
+            }
             return normalize(extracted, image);
+        } catch (MediaDeadlineExceededException exception) {
+            throw exception;
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             log.warn("OCR request was interrupted");
@@ -189,12 +228,21 @@ class OcrService {
         }
     }
 
-    private boolean checkReady() {
+    private String readyRuntimeProfile() {
         try {
-            return engine.ready(properties.ocrLanguages(), timeout);
+            if (!engine.ready(properties.ocrLanguages(), timeout)) {
+                return null;
+            }
+            String profile = engine.runtimeProfile();
+            if (profile == null
+                    || !profile.matches("[A-Za-z0-9][A-Za-z0-9._+@~-]{0,255}")) {
+                log.warn("OCR runtime profile is unavailable or unsafe");
+                return null;
+            }
+            return profile;
         } catch (RuntimeException exception) {
             log.warn("OCR is not available");
-            return false;
+            return null;
         }
     }
 }

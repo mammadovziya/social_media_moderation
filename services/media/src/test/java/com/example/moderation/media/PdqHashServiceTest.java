@@ -2,17 +2,24 @@ package com.example.moderation.media;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.example.moderation.media.ModerationReferenceAsset.DecisionBasis;
 import com.example.moderation.media.ModerationReferenceAsset.Severity;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.awt.image.BufferedImage;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
@@ -25,7 +32,14 @@ class PdqHashServiceTest {
     private final VisualReferenceIndex visualReferenceIndex = mock(VisualReferenceIndex.class);
     private final TextMasker textMasker = new TextMasker();
     private final PdqHashService service = new PdqHashService(
-            properties(), repository, referenceAssetIndex, visualReferenceIndex, textMasker);
+            properties(),
+            repository,
+            referenceAssetIndex,
+            visualReferenceIndex,
+            textMasker,
+            new BoundedPdqHasher(
+                    new MediaPerformanceProperties(4, 2, 30_000, 512, 3_600),
+                    new MediaStageMetrics(new SimpleMeterRegistry())));
 
     @BeforeEach
     void setUp() {
@@ -35,6 +49,12 @@ class PdqHashServiceTest {
         when(visualReferenceIndex.maxReferences()).thenReturn(256);
         when(visualReferenceIndex.maxSnapshotBytes()).thenReturn(64 * 1024 * 1024);
         when(referenceAssetIndex.findCandidates(anyString(), anyString(), anyString()))
+                .thenReturn(ReferenceAssetIndex.SearchResult.empty());
+        when(referenceAssetIndex.findCandidates(
+                        any(ReferenceAssetIndex.ExactSearchResult.class),
+                        anyString(),
+                        anyString(),
+                        anyString()))
                 .thenReturn(ReferenceAssetIndex.SearchResult.empty());
         when(visualReferenceIndex.findCandidates(
                         org.mockito.ArgumentMatchers.any(byte[].class),
@@ -52,6 +72,21 @@ class PdqHashServiceTest {
 
         assertThat(first.hash()).hasSize(64).isEqualTo(second.hash());
         assertThat(first.quality()).isEqualTo(second.quality()).isBetween(0, 100);
+    }
+
+    @Test
+    void performanceTextImageFixtureDecodesAndExceedsTheDefaultPdqQualityThreshold()
+            throws Exception {
+        Path fixture = findRepositoryFile("tests/performance/text-image.png.b64");
+        byte[] bytes = Base64.getMimeDecoder().decode(Files.readString(fixture));
+        ImageDecoder.DecodedImage decoded = new ImageDecoder(properties()).decode(bytes);
+
+        PdqHashService.PdqHash hash = service.compute(decoded.image());
+
+        assertThat(decoded.format()).isEqualTo("png");
+        assertThat(decoded.image().getWidth()).isEqualTo(800);
+        assertThat(decoded.image().getHeight()).isEqualTo(600);
+        assertThat(hash.quality()).isGreaterThan(properties().pdqQualityThreshold());
     }
 
     @Test
@@ -497,13 +532,12 @@ class PdqHashServiceTest {
         PdqHashService.Analysis analysis = analyze(patternedImage(), OcrResult.noText());
 
         assertThat(analysis.pdq().get("hash")).asString().hasSize(64);
-        verify(repository).save(anyString(), anyString(), anyInt());
-        verify(repository).save(
-                "post-100",
-                String.valueOf(analysis.pdq().get("hash")),
-                ((Number) analysis.pdq().get("quality")).intValue());
         ArgumentCaptor<MediaEvidence> evidence = ArgumentCaptor.forClass(MediaEvidence.class);
-        verify(repository).saveEvidence(evidence.capture());
+        verify(repository).saveCompletedAnalysis(
+                eq("post-100"),
+                eq(String.valueOf(analysis.pdq().get("hash"))),
+                eq(((Number) analysis.pdq().get("quality")).intValue()),
+                evidence.capture());
         assertThat(evidence.getValue())
                 .extracting(
                         MediaEvidence::contentId,
@@ -512,6 +546,41 @@ class PdqHashServiceTest {
                         MediaEvidence::ocrStatus,
                         MediaEvidence::candidateCount)
                 .containsExactly("post-100", 3, "png", "no_text", 0);
+    }
+
+    @Test
+    void completedResultHasNoContentIdAndCanPersistFreshEvidencePerRequest() {
+        ReferenceAssetIndex.ExactSearchResult exactSearch =
+                new ReferenceAssetIndex.ExactSearchResult(11L, false, List.of());
+        PdqHashService.Preflight preflight =
+                new PdqHashService.Preflight("a".repeat(64), exactSearch);
+        PdqHashService.PdqHash full =
+                new PdqHashService.PdqHash("0".repeat(64), 80);
+
+        PdqHashService.CompletedAnalysis completed = service.complete(
+                patternedImage(),
+                3,
+                "png",
+                OcrResult.noText(),
+                preflight,
+                full,
+                new VisualReferenceIndex.SearchResult(false, 11L, List.of()),
+                ModerationDeadline.none());
+
+        assertThat(completed.analysis().identity())
+                .containsEntry("sha256", preflight.sha256());
+        assertThat(completed.evidence().contentId()).isNull();
+        service.persist("post-first", completed);
+        service.persist("post-second", completed);
+
+        ArgumentCaptor<MediaEvidence> evidence = ArgumentCaptor.forClass(MediaEvidence.class);
+        verify(repository, times(2)).saveCompletedAnalysis(
+                anyString(), anyString(), anyInt(), evidence.capture());
+        assertThat(evidence.getAllValues())
+                .extracting(MediaEvidence::contentId)
+                .containsExactly("post-first", "post-second");
+        verify(referenceAssetIndex).findCandidates(
+                exactSearch, preflight.sha256(), full.hash(), full.hash());
     }
 
     private PdqHashService.Analysis analyze(BufferedImage image, OcrResult ocr) {
@@ -537,6 +606,18 @@ class PdqHashServiceTest {
                 null,
                 null,
                 false);
+    }
+
+    private static Path findRepositoryFile(String relativePath) {
+        Path directory = Path.of("").toAbsolutePath();
+        while (directory != null) {
+            Path candidate = directory.resolve(relativePath);
+            if (Files.isRegularFile(candidate)) {
+                return candidate;
+            }
+            directory = directory.getParent();
+        }
+        throw new AssertionError("repository fixture is missing: " + relativePath);
     }
 
     private BufferedImage patternedImage() {

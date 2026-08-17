@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: moderation-gateway
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["gateway:8000"]
+
+  - job_name: moderation-media
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["media-service:8000"]
+
+  - job_name: moderation-ai
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["ai-service:8000"]

@@ -7,6 +7,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 @SpringBootApplication
 @EnableConfigurationProperties({
     ModerationProperties.class,
+    GatewayTransportProperties.class,
     AiWorkIdempotencySecurityProperties.class
 })
 public class GatewayApplication {

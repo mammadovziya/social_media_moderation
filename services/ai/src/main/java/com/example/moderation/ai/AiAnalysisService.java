@@ -1,7 +1,10 @@
 package com.example.moderation.ai;
 
 import com.example.moderation.ai.api.ContentType;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import jakarta.annotation.PreDestroy;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -9,6 +12,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Supplier;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -31,11 +35,21 @@ public class AiAnalysisService {
 
     private final AiProvider provider;
     private final AiProperties properties;
+    private final MeterRegistry meterRegistry;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 
     public AiAnalysisService(AiProvider provider, AiProperties properties) {
+        this(provider, properties, null);
+    }
+
+    @Autowired
+    public AiAnalysisService(
+            AiProvider provider,
+            AiProperties properties,
+            MeterRegistry meterRegistry) {
         this.provider = provider;
         this.properties = properties;
+        this.meterRegistry = meterRegistry;
     }
 
     public Map<String, Object> analyzeText(
@@ -44,11 +58,31 @@ public class AiAnalysisService {
             String parentPostText,
             String authorUsername,
             String quotedText) {
+        return analyzeText(
+                contentType,
+                text,
+                parentPostText,
+                authorUsername,
+                quotedText,
+                AiRequestDeadline.NONE);
+    }
+
+    public Map<String, Object> analyzeText(
+            ContentType contentType,
+            String text,
+            String parentPostText,
+            String authorUsername,
+            String quotedText,
+            long deadlineEpochMillis) {
         CompletableFuture<Map<String, Object>> moderation =
-                capture("moderation", () -> provider.moderateText(text));
+                capture(
+                        "text_moderation",
+                        deadlineEpochMillis,
+                        () -> provider.moderateText(text));
         CompletableFuture<Map<String, Object>> classification =
                 capture(
-                        "classification",
+                        "text_classification",
+                        deadlineEpochMillis,
                         () -> provider.classifyText(
                                 contentType,
                                 text,
@@ -70,16 +104,51 @@ public class AiAnalysisService {
             String referenceEvidence,
             boolean requiresAdjudication,
             boolean adjudicationAllowed) {
+        return analyzeImage(
+                contentType,
+                bytes,
+                imageContentType,
+                text,
+                ocrText,
+                ocrStatus,
+                ocrConfidenceAccepted,
+                ocrTruncated,
+                referenceEvidence,
+                requiresAdjudication,
+                adjudicationAllowed,
+                AiRequestDeadline.NONE);
+    }
+
+    public Map<String, Object> analyzeImage(
+            ContentType contentType,
+            byte[] bytes,
+            String imageContentType,
+            String text,
+            String ocrText,
+            String ocrStatus,
+            boolean ocrConfidenceAccepted,
+            boolean ocrTruncated,
+            String referenceEvidence,
+            boolean requiresAdjudication,
+            boolean adjudicationAllowed,
+            long deadlineEpochMillis) {
+        long preparationStarted = System.nanoTime();
+        AiProvider.PreparedImage image = provider.prepareImage(bytes, imageContentType);
+        recordStage(
+                "image_prepare",
+                "success",
+                System.nanoTime() - preparationStarted);
         CompletableFuture<Map<String, Object>> moderation = capture(
-                "moderation",
+                "image_moderation",
+                deadlineEpochMillis,
                 () -> provider.moderateImage(
-                        bytes, imageContentType, text, ocrText));
+                        image, text, ocrText));
         CompletableFuture<Map<String, Object>> classification = capture(
-                "classification",
+                "image_classification",
+                deadlineEpochMillis,
                 () -> provider.classifyImage(
                         contentType,
-                        bytes,
-                        imageContentType,
+                        image,
                         text,
                         ocrText,
                         ocrStatus,
@@ -103,10 +172,10 @@ public class AiAnalysisService {
                                 && !terminalOffTopicBlock));
         Map<String, Object> adjudication = shouldAdjudicate
                 ? capture(
-                                "adjudication",
+                                "image_adjudication",
+                                deadlineEpochMillis,
                                 () -> provider.adjudicateImage(
-                                        bytes,
-                                        imageContentType,
+                                        image,
                                         text,
                                         ocrText,
                                         referenceEvidence,
@@ -245,12 +314,17 @@ public class AiAnalysisService {
     }
 
     private CompletableFuture<Map<String, Object>> capture(
-            String name, Supplier<Map<String, Object>> operation) {
+            String name,
+            long deadlineEpochMillis,
+            Supplier<Map<String, Object>> operation) {
         return CompletableFuture.supplyAsync(
                 () -> {
+                    long started = System.nanoTime();
+                    String outcome = "success";
                     try {
-                        return operation.get();
+                        return AiRequestDeadline.call(deadlineEpochMillis, operation);
                     } catch (RuntimeException exception) {
+                        outcome = "error";
                         log.error(
                                 "{} {} provider call failed failureType={}",
                                 name,
@@ -281,9 +355,22 @@ public class AiAnalysisService {
                                 "failureCode",
                                 OpenAiRestClient.OpenAiFailureCode.PROVIDER_RESPONSE_INVALID
                                         .name());
+                    } finally {
+                        recordStage(name, outcome, System.nanoTime() - started);
                     }
                 },
                 executor);
+    }
+
+    private void recordStage(String stage, String outcome, long nanos) {
+        if (meterRegistry != null) {
+            Timer.builder("moderation.ai.stage.duration")
+                    .description("AI analysis stage duration")
+                    .tag("stage", stage)
+                    .tag("outcome", outcome)
+                    .register(meterRegistry)
+                    .record(Duration.ofNanos(nanos));
+        }
     }
 
     @PreDestroy

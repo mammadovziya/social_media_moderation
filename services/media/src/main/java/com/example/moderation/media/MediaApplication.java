@@ -9,6 +9,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableScheduling
 @EnableConfigurationProperties({
     MediaProperties.class,
+    MediaPerformanceProperties.class,
     VisualRetrievalProperties.class,
     AiWorkIdempotencyCleanupProperties.class,
     AiWorkIdempotencySecurityProperties.class

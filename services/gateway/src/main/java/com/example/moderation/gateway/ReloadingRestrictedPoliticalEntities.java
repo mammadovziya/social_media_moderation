@@ -13,16 +13,20 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.text.Normalizer;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
@@ -45,16 +49,34 @@ public final class ReloadingRestrictedPoliticalEntities {
 
     private final Path file;
     private final AtomicReference<Snapshot> current;
+    private final AtomicBoolean reloadInProgress = new AtomicBoolean();
+    private final AtomicLong nextReloadCheckNanos = new AtomicLong(Long.MIN_VALUE);
+    private final long reloadIntervalNanos;
     private volatile String lastFailure;
 
-    @Autowired
     public ReloadingRestrictedPoliticalEntities(ModerationProperties properties) {
-        this(Path.of(properties.restrictedPoliticalEntitiesFile()));
+        this(Path.of(properties.restrictedPoliticalEntitiesFile()), Duration.ZERO);
+    }
+
+    @Autowired
+    ReloadingRestrictedPoliticalEntities(
+            ModerationProperties properties,
+            @Value("${moderation.policy-reload-interval-ms:250}") long reloadIntervalMillis) {
+        this(
+                Path.of(properties.restrictedPoliticalEntitiesFile()),
+                validatedReloadInterval(reloadIntervalMillis));
     }
 
     ReloadingRestrictedPoliticalEntities(Path file) {
+        this(file, Duration.ZERO);
+    }
+
+    ReloadingRestrictedPoliticalEntities(Path file, Duration reloadInterval) {
         this.file = file.toAbsolutePath().normalize();
+        this.reloadIntervalNanos = reloadInterval.toNanos();
         this.current = new AtomicReference<>(loadStable(null));
+        this.nextReloadCheckNanos.set(saturatedAdd(
+                System.nanoTime(), reloadIntervalNanos));
         log.info(
                 "loaded restricted political entities aliases={} digest={}",
                 current.get().aliasCount(),
@@ -62,8 +84,13 @@ public final class ReloadingRestrictedPoliticalEntities {
     }
 
     /** Returns one immutable registry snapshot for the complete lifetime of a request. */
-    synchronized Snapshot snapshot() {
+    Snapshot snapshot() {
         Snapshot previous = current.get();
+        long now = System.nanoTime();
+        if (now < nextReloadCheckNanos.get()
+                || !reloadInProgress.compareAndSet(false, true)) {
+            return previous;
+        }
         try {
             Snapshot loaded = loadStable(previous);
             current.set(loaded);
@@ -86,11 +113,31 @@ public final class ReloadingRestrictedPoliticalEntities {
                 lastFailure = failure;
             }
             return previous;
+        } finally {
+            nextReloadCheckNanos.set(saturatedAdd(
+                    System.nanoTime(), reloadIntervalNanos));
+            reloadInProgress.set(false);
         }
     }
 
     boolean reloadHealthy() {
         return lastFailure == null;
+    }
+
+    private static Duration validatedReloadInterval(long millis) {
+        if (millis < 10 || millis > 60_000) {
+            throw new IllegalArgumentException(
+                    "POLICY_RELOAD_INTERVAL_MS must be between 10 and 60000");
+        }
+        return Duration.ofMillis(millis);
+    }
+
+    private static long saturatedAdd(long left, long right) {
+        try {
+            return Math.addExact(left, right);
+        } catch (ArithmeticException ignored) {
+            return Long.MAX_VALUE;
+        }
     }
 
     private Snapshot loadStable(Snapshot cached) {

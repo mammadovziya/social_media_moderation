@@ -4,19 +4,24 @@ import com.example.moderation.media.ModerationReferenceAsset.DecisionBasis;
 import com.example.moderation.media.ModerationReferenceAsset.Severity;
 import java.util.Base64;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicLong;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Repository
 public class PdqHashRepository {
     private final JdbcClient jdbc;
+    private final AtomicLong cachedObservedHashCount = new AtomicLong();
 
     public PdqHashRepository(JdbcClient jdbc) {
         this.jdbc = jdbc;
     }
 
     public void save(String contentId, String hash, int quality) {
-        jdbc.sql("""
+        int inserted = jdbc.sql("""
                         INSERT INTO pdq_hashes (content_id, hash_value, quality)
                         VALUES (:contentId, :hash, :quality)
                         ON CONFLICT (content_id, hash_value) DO NOTHING
@@ -25,6 +30,9 @@ public class PdqHashRepository {
                 .param("hash", hash)
                 .param("quality", quality)
                 .update();
+        if (inserted == 1) {
+            incrementObservedHashCountAfterCommit();
+        }
     }
 
     public void saveEvidence(MediaEvidence evidence) {
@@ -97,6 +105,27 @@ public class PdqHashRepository {
                 .param("authoritativePolicyVersion", evidence.authoritativePolicyVersion())
                 .param("referenceAssetRevision", evidence.referenceAssetRevision())
                 .update();
+    }
+
+    /** Persists the observed hash and its request evidence in one database transaction. */
+    @Transactional
+    public void saveCompletedAnalysis(
+            String contentId,
+            String hash,
+            int quality,
+            MediaEvidence evidence) {
+        if (contentId == null
+                || hash == null
+                || evidence == null
+                || !contentId.equals(evidence.contentId())
+                || !hash.equals(evidence.pdqHash())
+                || evidence.pdqQuality() == null
+                || quality != evidence.pdqQuality()) {
+            throw new IllegalArgumentException(
+                    "Completed media evidence must match its observed PDQ hash row");
+        }
+        save(contentId, hash, quality);
+        saveEvidence(evidence);
     }
 
     public long referenceAssetsRevision() {
@@ -261,10 +290,41 @@ public class PdqHashRepository {
         return new VisualReferenceSnapshot(revision, descriptors);
     }
 
-    public long observedHashCount() {
-        return jdbc.sql("SELECT COUNT(*) FROM pdq_hashes")
+    public void prewarmObservedHashCount() {
+        long observed = jdbc.sql("SELECT COUNT(*) FROM pdq_hashes")
                 .query(Long.class)
                 .single();
+        cachedObservedHashCount.accumulateAndGet(observed, Math::max);
+    }
+
+    /** Cheap live dependency probe for readiness; the cached count is informational only. */
+    public boolean databaseReady() {
+        try {
+            return jdbc.sql("SELECT 1")
+                            .query(Integer.class)
+                            .single()
+                    == 1;
+        } catch (RuntimeException exception) {
+            return false;
+        }
+    }
+
+    public long cachedObservedHashCount() {
+        return cachedObservedHashCount.get();
+    }
+
+    private void incrementObservedHashCountAfterCommit() {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            cachedObservedHashCount.incrementAndGet();
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(
+                new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        cachedObservedHashCount.incrementAndGet();
+                    }
+                });
     }
 
     public record ReferenceAssetsSnapshot(

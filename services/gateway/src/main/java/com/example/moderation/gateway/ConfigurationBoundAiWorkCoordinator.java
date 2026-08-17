@@ -8,6 +8,7 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -30,11 +31,16 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
             LoggerFactory.getLogger(ConfigurationBoundAiWorkCoordinator.class);
     private static final int COMPLETED_TTL_SECONDS = 86_400;
     private static final int FAILED_COOLDOWN_SECONDS = 5;
-    private static final long MAX_POLL_MILLIS = 250;
+    private static final long INITIAL_POLL_MILLIS = 25;
+    private static final long MAX_POLL_MILLIS = 1_000;
 
     private final AnalyzerClients clients;
     private final Duration waitTimeout;
+    private final Duration finalizationReserve;
+    private final Duration providerBudget;
     private final int leaseSeconds;
+    private final long heartbeatIntervalMillis;
+    private final CompletedAiEnvelopeCache completedCache;
     private final ConcurrentHashMap<String, CompletableFuture<Map<String, Object>>> flights =
             new ConcurrentHashMap<>();
 
@@ -44,17 +50,77 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
         this(
                 clients,
                 properties.upstreamTimeout(),
-                (int) Math.min(
-                        300,
-                        Math.max(
-                                60,
-                                Math.max(
-                                        properties.upstreamTimeoutSeconds(),
-                                        properties.expectedOpenAiTimeoutSeconds() * 2 + 15))));
+                leaseSeconds(properties),
+                completedCache(),
+                Math.max(
+                        1_000,
+                        TimeUnit.SECONDS.toMillis(leaseSeconds(properties))
+                                / 3),
+                properties.finalizationReserve(),
+                providerBudget(properties));
     }
 
     ConfigurationBoundAiWorkCoordinator(
             AnalyzerClients clients, Duration waitTimeout, int leaseSeconds) {
+        this(clients, waitTimeout, leaseSeconds, completedCache());
+    }
+
+    ConfigurationBoundAiWorkCoordinator(
+            AnalyzerClients clients,
+            Duration waitTimeout,
+            int leaseSeconds,
+            CompletedAiEnvelopeCache completedCache) {
+        this(
+                clients,
+                waitTimeout,
+                leaseSeconds,
+                completedCache,
+                Math.max(1_000, TimeUnit.SECONDS.toMillis(leaseSeconds) / 3),
+                Duration.ZERO,
+                defaultProviderBudget(waitTimeout, Duration.ZERO));
+    }
+
+    ConfigurationBoundAiWorkCoordinator(
+            AnalyzerClients clients,
+            Duration waitTimeout,
+            int leaseSeconds,
+            CompletedAiEnvelopeCache completedCache,
+            long heartbeatIntervalMillis) {
+        this(
+                clients,
+                waitTimeout,
+                leaseSeconds,
+                completedCache,
+                heartbeatIntervalMillis,
+                Duration.ZERO,
+                defaultProviderBudget(waitTimeout, Duration.ZERO));
+    }
+
+    ConfigurationBoundAiWorkCoordinator(
+            AnalyzerClients clients,
+            Duration waitTimeout,
+            int leaseSeconds,
+            CompletedAiEnvelopeCache completedCache,
+            long heartbeatIntervalMillis,
+            Duration finalizationReserve) {
+        this(
+                clients,
+                waitTimeout,
+                leaseSeconds,
+                completedCache,
+                heartbeatIntervalMillis,
+                finalizationReserve,
+                defaultProviderBudget(waitTimeout, finalizationReserve));
+    }
+
+    ConfigurationBoundAiWorkCoordinator(
+            AnalyzerClients clients,
+            Duration waitTimeout,
+            int leaseSeconds,
+            CompletedAiEnvelopeCache completedCache,
+            long heartbeatIntervalMillis,
+            Duration finalizationReserve,
+            Duration providerBudget) {
         this.clients = clients;
         if (waitTimeout == null || waitTimeout.isZero() || waitTimeout.isNegative()) {
             throw new IllegalArgumentException("AI work wait timeout must be positive");
@@ -62,24 +128,58 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
         if (leaseSeconds < 60 || leaseSeconds > 300) {
             throw new IllegalArgumentException("AI work lease must be between 60 and 300 seconds");
         }
+        if (heartbeatIntervalMillis < 1) {
+            throw new IllegalArgumentException("AI work heartbeat interval must be positive");
+        }
+        if (finalizationReserve == null
+                || finalizationReserve.isNegative()
+                || finalizationReserve.compareTo(waitTimeout) >= 0) {
+            throw new IllegalArgumentException(
+                    "AI work finalization reserve must be non-negative and less than wait timeout");
+        }
+        Duration analysisWindow = waitTimeout.minus(finalizationReserve);
+        if (providerBudget == null
+                || providerBudget.isZero()
+                || providerBudget.isNegative()
+                || providerBudget.compareTo(analysisWindow) > 0) {
+            throw new IllegalArgumentException(
+                    "AI work provider budget must be positive and no greater than analysis time");
+        }
         this.waitTimeout = waitTimeout;
+        this.finalizationReserve = finalizationReserve;
+        this.providerBudget = providerBudget;
         this.leaseSeconds = leaseSeconds;
+        this.heartbeatIntervalMillis = heartbeatIntervalMillis;
+        this.completedCache = completedCache;
     }
 
     @Override
     public Map<String, Object> execute(
             AiWorkIdentity identity, Supplier<Map<String, Object>> liveAnalysis) {
+        Map<String, Object> localHit = completedCache.get(identity.keySha256());
+        GatewayMetrics.cacheEntries(completedCache.size());
+        GatewayMetrics.recordAiWorkCacheLookup(localHit != null);
+        if (localHit != null) {
+            return cached(localHit);
+        }
+        requireAnalysisBudget();
         CompletableFuture<Map<String, Object>> owned = new CompletableFuture<>();
         CompletableFuture<Map<String, Object>> existing =
                 flights.putIfAbsent(identity.keySha256(), owned);
         if (existing != null) {
+            GatewayMetrics.recordLocalFlight("follower");
             return cached(awaitLocal(existing));
         }
+        GatewayMetrics.recordLocalFlight("owner");
+        GatewayMetrics.localFlightStarted();
 
         try {
-            return executeAsLocalOwner(identity, liveAnalysis, owned);
+            return GatewayMetrics.timed(
+                    "ai_work.coordinate",
+                    () -> executeAsLocalOwner(identity, liveAnalysis, owned));
         } finally {
             flights.remove(identity.keySha256(), owned);
+            GatewayMetrics.localFlightFinished();
         }
     }
 
@@ -88,22 +188,44 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
             Supplier<Map<String, Object>> liveAnalysis,
             CompletableFuture<Map<String, Object>> localResult) {
         String ownerToken = UUID.randomUUID().toString();
-        long deadline = System.nanoTime() + waitTimeout.toNanos();
+        long deadline = saturatedAdd(
+                System.nanoTime(),
+                remainingCoordinationNanos());
+        long pollBackoffMillis = INITIAL_POLL_MILLIS;
         try {
             while (true) {
+                requireAnalysisBudget();
+                long remainingCoordination = deadline - System.nanoTime();
+                if (remainingCoordination <= 0) {
+                    return analyzeWithoutDurableCoordination(
+                            identity,
+                            liveAnalysis,
+                            localResult,
+                            "wait_timeout",
+                            "timed out waiting for durable AI coordination",
+                            null);
+                }
                 AnalyzerClients.AiWorkClaim claim;
-                try {
+                try (InternalRequestDeadline.Scope ignored =
+                        InternalRequestDeadline.openCoordination(
+                                coordinationDuration(remainingCoordination),
+                                waitTimeout,
+                                finalizationReserve)) {
                     claim = clients.claimAiWork(
                             identity,
                             ownerToken,
                             leaseSeconds,
                             COMPLETED_TTL_SECONDS,
                             FAILED_COOLDOWN_SECONDS);
+                    GatewayMetrics.recordDurableClaim(
+                            claim.status().name().toLowerCase(java.util.Locale.ROOT));
                 } catch (RuntimeException exception) {
+                    GatewayMetrics.recordDurableClaim("error");
                     return analyzeWithoutDurableCoordination(
                             identity,
                             liveAnalysis,
                             localResult,
+                            "claim_error",
                             "could not acquire durable AI work ownership",
                             exception);
                 }
@@ -117,6 +239,7 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
                                     identity,
                                     liveAnalysis,
                                     localResult,
+                                    "invalid_completed",
                                     "completed AI work contained no reusable result",
                                     exception);
                         }
@@ -128,6 +251,7 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
                                 identity,
                                 liveAnalysis,
                                 localResult,
+                                "failed_cooldown",
                                 "identical AI work is in failed cooldown",
                                 null);
                     }
@@ -138,25 +262,32 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
                                     identity,
                                     liveAnalysis,
                                     localResult,
+                                    "wait_timeout",
                                     "timed out waiting for identical AI work",
                                     null);
                         }
-                        long requested = claim.retryAfterMillis() <= 0
-                                ? MAX_POLL_MILLIS
-                                : claim.retryAfterMillis();
+                        long serverDelay = Math.min(
+                                MAX_POLL_MILLIS,
+                                Math.max(0, claim.retryAfterMillis()));
+                        long requested = Math.max(
+                                serverDelay, jittered(pollBackoffMillis));
                         sleep(Math.min(
                                 Math.min(MAX_POLL_MILLIS, requested),
                                 Math.max(1, TimeUnit.NANOSECONDS.toMillis(remaining))));
+                        pollBackoffMillis = Math.min(
+                                MAX_POLL_MILLIS, pollBackoffMillis * 2);
                     }
                     case OWNER -> {
                         Map<String, Object> live;
                         LeaseHeartbeat heartbeat = new LeaseHeartbeat(identity, ownerToken);
                         try (heartbeat) {
+                            requireAnalysisBudget();
                             live = liveAnalysis.get();
                             if (!heartbeat.leaseHeld()) {
                                 log.warn(
                                         "lost durable AI work ownership after live analysis; preserving live result key={}",
                                         identity.keySha256());
+                                GatewayMetrics.recordFailOpen("lost_lease");
                                 Map<String, Object> reusable = withoutUsage(live);
                                 localResult.complete(reusable);
                                 return live;
@@ -167,9 +298,15 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
                         }
                         Map<String, Object> reusable = withoutUsage(live);
                         if (cacheable(live)) {
+                            long completionStartedAtNanos = System.nanoTime();
                             try {
                                 clients.completeAiWork(
                                         identity.keySha256(), ownerToken, reusable);
+                                completedCache.put(
+                                        identity.keySha256(),
+                                        reusable,
+                                        completionStartedAtNanos);
+                                GatewayMetrics.cacheEntries(completedCache.size());
                             } catch (RuntimeException exception) {
                                 // The provider may already have charged this call. Preserve its
                                 // result and accounting for the owner. Keep the durable lease in
@@ -179,6 +316,7 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
                                         "could not persist completed AI idempotency evidence key={} failureType={}",
                                         identity.keySha256(),
                                         exception.getClass().getSimpleName());
+                                GatewayMetrics.recordCompletionFailure();
                             }
                         } else {
                             bestEffortFail(identity.keySha256(), ownerToken, null);
@@ -198,8 +336,10 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
             AiWorkIdentity identity,
             Supplier<Map<String, Object>> liveAnalysis,
             CompletableFuture<Map<String, Object>> localResult,
+            String metricReason,
             String reason,
             RuntimeException coordinationFailure) {
+        GatewayMetrics.recordFailOpen(metricReason);
         log.warn(
                 "AI idempotency unavailable; continuing with live analysis key={} reason={} failureType={}",
                 identity.keySha256(),
@@ -208,8 +348,10 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
                         ? "none"
                         : coordinationFailure.getClass().getSimpleName());
         try {
+            requireAnalysisBudget();
             Map<String, Object> live = liveAnalysis.get();
-            localResult.complete(withoutUsage(live));
+            Map<String, Object> reusable = withoutUsage(live);
+            localResult.complete(reusable);
             return live;
         } catch (RuntimeException providerFailure) {
             localResult.completeExceptionally(providerFailure);
@@ -223,22 +365,26 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
         private final Thread thread;
 
         private LeaseHeartbeat(AiWorkIdentity identity, String ownerToken) {
-            long intervalMillis = Math.max(1_000, TimeUnit.SECONDS.toMillis(leaseSeconds) / 3);
             this.thread = Thread.ofVirtual()
                     .name("ai-work-lease-heartbeat")
                     .start(() -> {
                         while (running.get()) {
                             try {
-                                Thread.sleep(intervalMillis);
+                                Thread.sleep(heartbeatIntervalMillis);
                                 if (!running.get()) {
                                     return;
                                 }
-                                AnalyzerClients.AiWorkClaim refreshed = clients.claimAiWork(
+                                AnalyzerClients.AiWorkClaim refreshed =
+                                        clients.refreshAiWorkLease(
                                         identity,
                                         ownerToken,
                                         leaseSeconds,
                                         COMPLETED_TTL_SECONDS,
                                         FAILED_COOLDOWN_SECONDS);
+                                GatewayMetrics.recordDurableClaim(
+                                        refreshed.status()
+                                                .name()
+                                                .toLowerCase(java.util.Locale.ROOT));
                                 if (refreshed.status()
                                         != AnalyzerClients.AiWorkClaimStatus.OWNER) {
                                     leaseHeld.set(false);
@@ -252,6 +398,7 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
                                 Thread.currentThread().interrupt();
                                 return;
                             } catch (RuntimeException exception) {
+                                GatewayMetrics.recordDurableClaim("error");
                                 leaseHeld.set(false);
                                 log.error(
                                         "AI idempotency lease heartbeat failed key={} failureType={}",
@@ -289,8 +436,15 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
 
     private Map<String, Object> awaitLocal(
             CompletableFuture<Map<String, Object>> result) {
+        long remainingMillis = TimeUnit.NANOSECONDS.toMillis(remainingCoordinationNanos());
+        if (remainingMillis <= 0) {
+            throw new CoordinationUnavailableException(
+                    "analysis deadline expired while waiting for identical AI work");
+        }
         try {
-            return result.get(waitTimeout.toMillis(), TimeUnit.MILLISECONDS);
+            return result.get(
+                    remainingMillis,
+                    TimeUnit.MILLISECONDS);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             throw new CoordinationUnavailableException(
@@ -312,14 +466,81 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
     }
 
     private static Map<String, Object> requireStoredResult(Map<String, Object> result) {
-        if (result == null || result.isEmpty()) {
+        if (result == null || result.isEmpty() || !cacheable(result)) {
             throw new CoordinationUnavailableException(
-                    "completed AI work has no stored result");
+                    "completed AI work has no valid reusable result");
         }
         return Map.copyOf(result);
     }
 
-    private static boolean cacheable(Map<String, Object> ai) {
+    private static long jittered(long baseMillis) {
+        long spread = Math.max(1, baseMillis / 4);
+        return Math.max(
+                1,
+                baseMillis + ThreadLocalRandom.current().nextLong(-spread, spread + 1));
+    }
+
+    private static long saturatedAdd(long left, long right) {
+        try {
+            return Math.addExact(left, right);
+        } catch (ArithmeticException ignored) {
+            return Long.MAX_VALUE;
+        }
+    }
+
+    private static Duration coordinationDuration(long remainingNanos) {
+        return Duration.ofMillis(Math.max(
+                1, TimeUnit.NANOSECONDS.toMillis(remainingNanos)));
+    }
+
+    private void requireAnalysisBudget() {
+        if (!InternalRequestDeadline.hasAnalysisBudget(
+                waitTimeout, finalizationReserve)) {
+            throw new CoordinationUnavailableException(
+                    "analysis deadline expired before new AI work");
+        }
+    }
+
+    private long remainingCoordinationNanos() {
+        long remainingAnalysis = InternalRequestDeadline.remainingAnalysisNanos(
+                waitTimeout, finalizationReserve);
+        return Math.max(0, remainingAnalysis - providerBudget.toNanos());
+    }
+
+    private static int leaseSeconds(ModerationProperties properties) {
+        return (int) Math.min(
+                300,
+                Math.max(
+                        60,
+                        Math.max(
+                                properties.upstreamTimeoutSeconds(),
+                                properties.expectedOpenAiTimeoutSeconds() * 2 + 15)));
+    }
+
+    private static Duration providerBudget(ModerationProperties properties) {
+        long analysisWindowMillis = properties.upstreamTimeout().toMillis()
+                - properties.finalizationReserve().toMillis();
+        long desiredMillis = TimeUnit.SECONDS.toMillis(
+                properties.expectedOpenAiTimeoutSeconds());
+        long reservedMillis = desiredMillis < analysisWindowMillis
+                ? desiredMillis
+                : Math.max(1, analysisWindowMillis / 2);
+        return Duration.ofMillis(Math.max(1, reservedMillis));
+    }
+
+    private static Duration defaultProviderBudget(
+            Duration waitTimeout, Duration finalizationReserve) {
+        long analysisNanos = waitTimeout.minus(finalizationReserve).toNanos();
+        return Duration.ofNanos(Math.max(1, analysisNanos / 2));
+    }
+
+    private static CompletedAiEnvelopeCache completedCache() {
+        return new CompletedAiEnvelopeCache(
+                CompletedAiEnvelopeCache.DEFAULT_MAXIMUM_SIZE,
+                Duration.ofSeconds(COMPLETED_TTL_SECONDS));
+    }
+
+    static boolean cacheable(Map<String, Object> ai) {
         if (ai == null
                 || ai.isEmpty()
                 || ai.containsKey("gatewayAiConfigurationStatus")) {

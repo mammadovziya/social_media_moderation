@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import time
 from collections.abc import Callable
 from typing import Annotated, Any, TypeVar
 
@@ -49,14 +50,26 @@ IMAGE_CONTENT_TYPES = frozenset(
 MAX_EXCLUSION_BOX_JSON_BYTES = 32 * 1024
 REVISION_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]*$"
 T = TypeVar("T")
+DEADLINE_HEADER = "X-Moderation-Deadline-Epoch-Ms"
 
 
 class CpuJobRunner:
     def __init__(self) -> None:
         self._semaphore = asyncio.Semaphore(MAX_CONCURRENT_CPU_JOBS)
 
-    async def run(self, work: Callable[[Deadline], T], timeout: float) -> T:
-        deadline = Deadline.after(timeout)
+    async def run(
+        self,
+        work: Callable[[Deadline], T],
+        timeout: float,
+        deadline_epoch_ms: int | None = None,
+    ) -> T:
+        effective_timeout = timeout
+        if deadline_epoch_ms is not None:
+            remaining = (deadline_epoch_ms / 1000.0) - time.time()
+            if remaining <= 0:
+                raise ProcessingTimeoutError()
+            effective_timeout = min(timeout, remaining)
+        deadline = Deadline.after(effective_timeout)
         try:
             await asyncio.wait_for(
                 self._semaphore.acquire(), timeout=max(0.001, deadline.remaining)
@@ -142,6 +155,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def enforce_request_envelope(
         request: Request, call_next: Callable[[Request], Any]
     ) -> Any:
+        raw_deadline = request.headers.get(DEADLINE_HEADER)
+        if raw_deadline is not None:
+            try:
+                deadline_epoch_ms = int(raw_deadline)
+            except ValueError:
+                return _json_error(400, "invalid_deadline", "moderation deadline is invalid")
+            if deadline_epoch_ms < 1:
+                return _json_error(400, "invalid_deadline", "moderation deadline is invalid")
+            if deadline_epoch_ms <= int(time.time() * 1000):
+                return _json_error(504, "processing_timeout", "bounded processing time expired")
         limits = {
             "/internal/v1/descriptors/compile": MAX_IMAGE_REQUEST_BYTES,
             "/internal/v1/query": MAX_IMAGE_REQUEST_BYTES,
@@ -268,6 +291,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         exclusion_boxes_json: Annotated[
             str, Form(alias="exclusionBoxes")
         ] = "[]",
+        deadline_epoch_ms: Annotated[
+            int | None, Header(alias=DEADLINE_HEADER, gt=0)
+        ] = None,
     ) -> DescriptorPayload:
         if descriptor_version != ALGORITHM_VERSION:
             raise ServiceError(
@@ -281,6 +307,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return await cpu_jobs.run(
                 lambda deadline: engine.compile(bytes(raw), channel, boxes, deadline),
                 COMPILE_TIMEOUT_SECONDS,
+                deadline_epoch_ms,
             )
         finally:
             raw.clear()
@@ -290,10 +317,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response_model=RefreshResponse,
         dependencies=[Depends(require_operational)],
     )
-    async def refresh_index(request: RefreshRequest) -> RefreshResponse:
+    async def refresh_index(
+        request: RefreshRequest,
+        deadline_epoch_ms: Annotated[
+            int | None, Header(alias=DEADLINE_HEADER, gt=0)
+        ] = None,
+    ) -> RefreshResponse:
         return await cpu_jobs.run(
             lambda deadline: engine.refresh(request, deadline),
             REFRESH_TIMEOUT_SECONDS,
+            deadline_epoch_ms,
         )
 
     @application.post(
@@ -317,6 +350,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         exclusion_boxes_json: Annotated[
             str, Form(alias="exclusionBoxes")
         ] = "[]",
+        deadline_epoch_ms: Annotated[
+            int | None, Header(alias=DEADLINE_HEADER, gt=0)
+        ] = None,
     ) -> QueryResponse:
         if descriptor_version != ALGORITHM_VERSION:
             raise ServiceError(
@@ -332,6 +368,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     bytes(raw), revision, top_k, channel, boxes, deadline
                 ),
                 QUERY_TIMEOUT_SECONDS,
+                deadline_epoch_ms,
             )
         finally:
             raw.clear()

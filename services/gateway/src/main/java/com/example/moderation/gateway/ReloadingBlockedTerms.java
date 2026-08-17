@@ -13,16 +13,20 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.text.Normalizer;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 /**
@@ -40,16 +44,34 @@ public final class ReloadingBlockedTerms {
 
     private final Path file;
     private final AtomicReference<Snapshot> current;
+    private final AtomicBoolean reloadInProgress = new AtomicBoolean();
+    private final AtomicLong nextReloadCheckNanos = new AtomicLong(Long.MIN_VALUE);
+    private final long reloadIntervalNanos;
     private volatile String lastFailure;
 
-    @Autowired
     public ReloadingBlockedTerms(ModerationProperties properties) {
-        this(Path.of(properties.blockedTermsFile()));
+        this(Path.of(properties.blockedTermsFile()), Duration.ZERO);
+    }
+
+    @Autowired
+    ReloadingBlockedTerms(
+            ModerationProperties properties,
+            @Value("${moderation.policy-reload-interval-ms:250}") long reloadIntervalMillis) {
+        this(
+                Path.of(properties.blockedTermsFile()),
+                validatedReloadInterval(reloadIntervalMillis));
     }
 
     ReloadingBlockedTerms(Path file) {
+        this(file, Duration.ZERO);
+    }
+
+    ReloadingBlockedTerms(Path file, Duration reloadInterval) {
         this.file = file.toAbsolutePath().normalize();
+        this.reloadIntervalNanos = reloadInterval.toNanos();
         this.current = new AtomicReference<>(loadStable(null));
+        this.nextReloadCheckNanos.set(saturatedAdd(
+                System.nanoTime(), reloadIntervalNanos));
         log.info(
                 "loaded local blocked terms count={} vulgarCount={} digest={}",
                 current.get().termCount(),
@@ -58,8 +80,13 @@ public final class ReloadingBlockedTerms {
     }
 
     /** Returns one immutable policy snapshot for the complete lifetime of a request. */
-    synchronized Snapshot snapshot() {
+    Snapshot snapshot() {
         Snapshot previous = current.get();
+        long now = System.nanoTime();
+        if (now < nextReloadCheckNanos.get()
+                || !reloadInProgress.compareAndSet(false, true)) {
+            return previous;
+        }
         try {
             Snapshot loaded = loadStable(previous);
             current.set(loaded);
@@ -82,11 +109,31 @@ public final class ReloadingBlockedTerms {
                 lastFailure = failure;
             }
             return previous;
+        } finally {
+            nextReloadCheckNanos.set(saturatedAdd(
+                    System.nanoTime(), reloadIntervalNanos));
+            reloadInProgress.set(false);
         }
     }
 
     boolean reloadHealthy() {
         return lastFailure == null;
+    }
+
+    private static Duration validatedReloadInterval(long millis) {
+        if (millis < 10 || millis > 60_000) {
+            throw new IllegalArgumentException(
+                    "POLICY_RELOAD_INTERVAL_MS must be between 10 and 60000");
+        }
+        return Duration.ofMillis(millis);
+    }
+
+    private static long saturatedAdd(long left, long right) {
+        try {
+            return Math.addExact(left, right);
+        } catch (ArithmeticException ignored) {
+            return Long.MAX_VALUE;
+        }
     }
 
     private Snapshot loadStable(Snapshot cached) {
@@ -180,14 +227,21 @@ public final class ReloadingBlockedTerms {
         }
 
         MutableTrieNode trie = new MutableTrieNode();
+        MutableHandleNode handleTrie = new MutableHandleNode();
         for (Map.Entry<String, TermCategory> term : terms.entrySet()) {
             trie.add(term.getKey(), term.getValue().violation());
+            String folded = HandleVulgarSkeleton.ofTerm(term.getKey());
+            if (term.getValue() == TermCategory.VULGAR
+                    && folded.length() >= HandleVulgarSkeleton.MIN_PREFIX_MATCH_LENGTH) {
+                handleTrie.add(folded, term.getValue().violation());
+            }
         }
         int vulgarTermCount = Math.toIntExact(terms.values().stream()
                 .filter(category -> category == TermCategory.VULGAR)
                 .count());
         return new Snapshot(
                 trie.freeze(),
+                handleTrie.freeze(),
                 semanticDigest(terms),
                 terms.size(),
                 vulgarTermCount,
@@ -330,7 +384,16 @@ public final class ReloadingBlockedTerms {
     private static String semanticDigest(Map<String, TermCategory> terms) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            updateDigest(digest, "blocked-terms/v2");
+            updateDigest(digest, "blocked-terms/v3");
+            updateDigest(digest, HandleVulgarSkeleton.PROFILE_VERSION);
+            updateDigest(digest, HandleVulgarSkeleton.PROFILE_SHA256);
+            updateDigest(digest, "folded-handle-category=VULGAR");
+            updateDigest(
+                    digest,
+                    "handle-fragments:start-anchored;prefix-min="
+                            + HandleVulgarSkeleton.MIN_PREFIX_MATCH_LENGTH
+                            + ";interior-min="
+                            + HandleVulgarSkeleton.MIN_INTERIOR_MATCH_LENGTH);
             for (Map.Entry<String, TermCategory> term : terms.entrySet()) {
                 updateDigest(digest, term.getValue().name());
                 updateDigest(digest, term.getKey());
@@ -419,10 +482,63 @@ public final class ReloadingBlockedTerms {
         }
     }
 
+    /** Matches one folded handle reading against the VULGAR-only folded-term index. */
+    private static Violation handleViolationFrom(
+            HandleNode root, String candidate, boolean handlePrefix) {
+        Violation strongest = Violation.NONE;
+        for (int start = 0; start < candidate.length(); start++) {
+            HandleNode node = root;
+            for (int offset = start; offset < candidate.length(); offset++) {
+                node = node.children().get(candidate.charAt(offset));
+                if (node == null) {
+                    break;
+                }
+                if (node.terminalViolation() == Violation.NONE) {
+                    continue;
+                }
+                int length = offset - start + 1;
+                boolean accepted = (handlePrefix && start == 0)
+                        || length >= HandleVulgarSkeleton.MIN_INTERIOR_MATCH_LENGTH;
+                if (accepted) {
+                    strongest = strongestViolation(strongest, node.terminalViolation());
+                    if (strongest == Violation.VULGAR) {
+                        return strongest;
+                    }
+                }
+            }
+        }
+        return strongest;
+    }
+
     private record TrieNode(
             Map<Integer, TrieNode> literals,
             TrieNode separator,
             Violation terminalViolation) {}
+
+    private record HandleNode(
+            Map<Character, HandleNode> children, Violation terminalViolation) {}
+
+    private static final class MutableHandleNode {
+        private final Map<Character, MutableHandleNode> children = new HashMap<>();
+        private Violation terminalViolation = Violation.NONE;
+
+        private void add(String foldedTerm, Violation violation) {
+            MutableHandleNode node = this;
+            for (int index = 0; index < foldedTerm.length(); index++) {
+                node = node.children.computeIfAbsent(
+                        foldedTerm.charAt(index), ignored -> new MutableHandleNode());
+            }
+            node.terminalViolation = strongestViolation(node.terminalViolation, violation);
+        }
+
+        private HandleNode freeze() {
+            Map<Character, HandleNode> immutable = new HashMap<>(children.size());
+            for (Map.Entry<Character, MutableHandleNode> entry : children.entrySet()) {
+                immutable.put(entry.getKey(), entry.getValue().freeze());
+            }
+            return new HandleNode(Map.copyOf(immutable), terminalViolation);
+        }
+    }
 
     private static final class MutableTrieNode {
         private final Map<Integer, MutableTrieNode> literals = new HashMap<>();
@@ -461,6 +577,7 @@ public final class ReloadingBlockedTerms {
 
     static final class Snapshot {
         private final TrieNode trie;
+        private final HandleNode handleTrie;
         private final String semanticSha256;
         private final int termCount;
         private final int vulgarTermCount;
@@ -469,12 +586,14 @@ public final class ReloadingBlockedTerms {
 
         private Snapshot(
                 TrieNode trie,
+                HandleNode handleTrie,
                 String semanticSha256,
                 int termCount,
                 int vulgarTermCount,
                 String sourceSha256,
                 SourceVersion sourceVersion) {
             this.trie = trie;
+            this.handleTrie = handleTrie;
             this.semanticSha256 = semanticSha256;
             this.termCount = termCount;
             this.vulgarTermCount = vulgarTermCount;
@@ -487,11 +606,32 @@ public final class ReloadingBlockedTerms {
                     ? this
                     : new Snapshot(
                             trie,
+                            handleTrie,
                             semanticSha256,
                             termCount,
                             vulgarTermCount,
                             sourceSha256,
                             replacement);
+        }
+
+        /** Returns the strongest VULGAR violation found in any bounded folded handle reading. */
+        Violation handleViolation(String handle) {
+            if (handle == null || handle.isBlank()) {
+                return Violation.NONE;
+            }
+            Violation strongest = Violation.NONE;
+            for (HandleVulgarSkeleton.HandleFoldCandidates suffix :
+                    HandleVulgarSkeleton.suffixCandidates(handle)) {
+                for (String candidate : suffix.candidates()) {
+                    strongest = strongestViolation(
+                            strongest,
+                            handleViolationFrom(handleTrie, candidate, suffix.handlePrefix()));
+                    if (strongest == Violation.VULGAR) {
+                        return strongest;
+                    }
+                }
+            }
+            return strongest;
         }
 
         boolean matches(String text) {

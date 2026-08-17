@@ -46,13 +46,16 @@ to `OTHER`. Exact political entries return `BLOCK/POLITICAL_CONTENT`; exact
 vulgar entries return `BLOCK/VULGAR`. Changes hot-reload between requests.
 Matching is whole-term and NFKC/case normalized, so this file is only a reviewed
 high-precision supplement, not an exhaustive slang dictionary or a substitute
-for semantic classification. The shipped vulgar policy has 7,689 distinct
-canonical rules: 38 manually curated rules plus 7,651 deterministic forms from
+for semantic classification. The shipped vulgar policy has 7,419 distinct
+canonical rules: 32 manually curated rules plus 7,387 deterministic forms from
 five reviewed Azerbaijani phrase families. Generated coverage includes both
 word orders, Azerbaijani and full-ASCII spellings, explicit noun inflections,
-compact phrases, and contextual letter spacing. Ambiguous standalone homographs
-remain excluded; fuzzy spellings, mixed-script forms, and unseen morphology go
-through semantic classification.
+compact phrases, and contextual letter spacing. The exact rules are deliberately
+context-blind; bare `peysər` and `sikim` are strict terminal product-policy
+choices even in neutral or quoted usage. Usernames additionally use a bounded,
+versioned vulgar-fold profile for reviewed separator, transliteration, and digit
+obfuscations. Other fuzzy spellings, mixed-script forms, and unseen morphology
+go through semantic classification.
 Validate or regenerate the checked-in block with:
 
 ```bash
@@ -71,6 +74,33 @@ ministers, and the ordinary lowercase Turkish verb `yap` are excluded.
 mvn test
 VALIDATE_ONLY=1 ./tests/run-accuracy-tests.sh
 ```
+
+## Measure performance
+
+Prometheus metrics are available through the optional observability profile:
+
+```bash
+docker compose --profile observability up -d prometheus
+open http://localhost:9090
+```
+
+The deterministic performance profile provides a fake OpenAI-compatible
+endpoint plus k6 workloads for unique content, repeat-cache hits, cold-key
+stampedes, and images. It does not spend OpenAI credits:
+
+```bash
+docker compose -f compose.yaml -f tests/performance/compose.yaml \
+  --profile performance up --build -d
+
+docker compose -f compose.yaml -f tests/performance/compose.yaml \
+  --profile performance --profile load run --rm \
+  -e WORKLOAD=mixed -e RATE=10 -e DURATION=2m k6
+```
+
+See [`tests/performance/README.md`](tests/performance/README.md) for workload,
+capacity, and deterministic fault-injection controls. Compare model, prompt,
+reasoning, or image-detail changes against the accuracy suite before changing
+production defaults.
 
 ## Before production
 

@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -18,6 +19,14 @@ import java.net.URI;
 import java.security.MessageDigest;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -120,6 +129,127 @@ class VisualReferenceIndexTest {
         index.findCandidates(new byte[] {2}, "png", OcrResult.noText(), 10, 10);
 
         verify(client, times(1)).refresh(anyLong(), anyString(), any());
+    }
+
+    @Test
+    void concurrentMissingRevisionResponsesTriggerOneGenerationRefresh() throws Exception {
+        index.prewarm();
+        clearInvocations(client, repository);
+        int requestCount = 4;
+        CyclicBarrier staleQueries = new CyclicBarrier(requestCount);
+        AtomicInteger queryCalls = new AtomicInteger();
+        when(client.query(
+                        any(), anyString(), anyString(), anyLong(), anyString(),
+                        anyString(), any(), anyInt()))
+                .thenAnswer(invocation -> {
+                    if (queryCalls.incrementAndGet() <= requestCount) {
+                        staleQueries.await(2, TimeUnit.SECONDS);
+                        throw new VisualRetrievalHttpClient.MissingRevisionException(7L, null);
+                    }
+                    return noCandidates();
+                });
+
+        try (ExecutorService callers = Executors.newVirtualThreadPerTaskExecutor()) {
+            List<Future<VisualReferenceIndex.SearchResult>> results =
+                    java.util.stream.IntStream.range(0, requestCount)
+                            .mapToObj(index -> callers.submit(() ->
+                                    this.index.findCandidates(
+                                            new byte[] {(byte) index},
+                                            "png",
+                                            OcrResult.noText(),
+                                            10,
+                                            10)))
+                            .toList();
+            for (Future<VisualReferenceIndex.SearchResult> result : results) {
+                assertThat(result.get(2, TimeUnit.SECONDS).candidates()).isEmpty();
+            }
+        }
+
+        assertThat(queryCalls).hasValue(requestCount * 2);
+        verify(client, times(1)).refresh(anyLong(), anyString(), any());
+        verify(repository, times(1)).loadVisualReferenceSnapshot(VERSION);
+    }
+
+    @Test
+    void capturedRequestRevisionAvoidsRedundantRevisionQueries() {
+        when(client.query(
+                        any(), anyString(), anyString(), anyLong(), anyString(),
+                        anyString(), any(), anyInt()))
+                .thenReturn(new VisualRetrievalHttpClient.QueryResponse(
+                        "NO_GEOMETRIC_CANDIDATES",
+                        true,
+                        true,
+                        false,
+                        "UNMASKED",
+                        "7",
+                        SNAPSHOT_DIGEST,
+                        VERSION,
+                        SELECTION_VERSION,
+                        100,
+                        false,
+                        0,
+                        List.of()));
+
+        index.findCandidates(
+                new byte[] {1},
+                "png",
+                10,
+                10,
+                7L,
+                ModerationDeadline.none());
+
+        verify(repository, never()).referenceAssetsRevision();
+        verify(repository).loadVisualReferenceSnapshot(VERSION);
+    }
+
+    @Test
+    void snapshotRefreshWaitStopsAtTheFollowerDeadline() throws Exception {
+        CountDownLatch refreshEntered = new CountDownLatch(1);
+        CountDownLatch releaseRefresh = new CountDownLatch(1);
+        AtomicReference<Throwable> ownerFailure = new AtomicReference<>();
+        when(client.refresh(anyLong(), anyString(), any(), any()))
+                .thenAnswer(invocation -> {
+                    refreshEntered.countDown();
+                    if (!releaseRefresh.await(2, TimeUnit.SECONDS)) {
+                        throw new AssertionError("visual refresh was not released");
+                    }
+                    return SNAPSHOT_DIGEST;
+                });
+        when(client.query(
+                        any(), anyString(), anyString(), anyLong(), anyString(),
+                        anyString(), any(), anyInt(), any()))
+                .thenReturn(noCandidates());
+        Thread owner = Thread.ofVirtual().start(() -> {
+            try {
+                index.findCandidates(
+                        new byte[] {1},
+                        "png",
+                        10,
+                        10,
+                        7L,
+                        new ModerationDeadline(System.currentTimeMillis() + 5_000));
+            } catch (Throwable failure) {
+                ownerFailure.set(failure);
+            }
+        });
+
+        assertThat(refreshEntered.await(1, TimeUnit.SECONDS)).isTrue();
+        try {
+            assertThatThrownBy(() -> index.findCandidates(
+                            new byte[] {2},
+                            "png",
+                            10,
+                            10,
+                            7L,
+                            new ModerationDeadline(System.currentTimeMillis() + 100)))
+                    .isInstanceOf(MediaDeadlineExceededException.class);
+        } finally {
+            releaseRefresh.countDown();
+        }
+        owner.join(2_000);
+
+        assertThat(ownerFailure.get()).isNull();
+        verify(repository, times(1)).loadVisualReferenceSnapshot(VERSION);
     }
 
     @Test
@@ -302,6 +432,23 @@ class VisualReferenceIndexTest {
                         ? "normalized-box-padding-64px/v1"
                         : null,
                 "BACKGROUND".equals(channel) ? "e".repeat(64) : null);
+    }
+
+    private static VisualRetrievalHttpClient.QueryResponse noCandidates() {
+        return new VisualRetrievalHttpClient.QueryResponse(
+                "NO_GEOMETRIC_CANDIDATES",
+                true,
+                true,
+                false,
+                "UNMASKED",
+                "7",
+                SNAPSHOT_DIGEST,
+                VERSION,
+                SELECTION_VERSION,
+                100,
+                false,
+                0,
+                List.of());
     }
 
     private static ModerationReferenceAsset asset() {

@@ -17,7 +17,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
   endpoint:
     health:
       probes:
@@ -34,3 +34,17 @@ openai:
   adjudication-model: ${OPENAI_ADJUDICATION_MODEL:gpt-5.6-terra}
   adjudication-reasoning-effort: ${OPENAI_ADJUDICATION_REASONING_EFFORT:medium}
   timeout-seconds: ${OPENAI_TIMEOUT_SECONDS:30}
+  transport:
+    base-url: ${OPENAI_BASE_URL:https://api.openai.com/v1}
+    service-tier: ${OPENAI_SERVICE_TIER:default}
+    classification-image-detail: ${OPENAI_CLASSIFICATION_IMAGE_DETAIL:high}
+    adjudication-image-detail: ${OPENAI_ADJUDICATION_IMAGE_DETAIL:original}
+    prompt-cache-key-enabled: ${OPENAI_PROMPT_CACHE_KEY_ENABLED:true}
+    max-connections: ${OPENAI_MAX_CONNECTIONS:32}
+    max-connections-per-route: ${OPENAI_MAX_CONNECTIONS_PER_ROUTE:32}
+    connection-request-timeout-millis: ${OPENAI_CONNECTION_REQUEST_TIMEOUT_MILLIS:500}
+    idle-connection-evict-seconds: ${OPENAI_IDLE_CONNECTION_EVICT_SECONDS:30}
+    max-concurrent-requests: ${OPENAI_MAX_CONCURRENT_REQUESTS:32}
+    max-concurrent-requests-per-model: ${OPENAI_MAX_CONCURRENT_REQUESTS_PER_MODEL:16}
+    max-queued-requests: ${OPENAI_MAX_QUEUED_REQUESTS:64}
+    admission-timeout-millis: ${OPENAI_ADMISSION_TIMEOUT_MILLIS:250}

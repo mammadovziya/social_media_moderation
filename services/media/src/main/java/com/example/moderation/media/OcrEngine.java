@@ -8,6 +8,12 @@ import java.util.concurrent.TimeoutException;
 interface OcrEngine {
     boolean ready(String languages, Duration timeout);
 
+    /**
+     * Returns the immutable engine/runtime profile captured by the most recent successful
+     * readiness check. The profile must change whenever the runtime can change OCR output.
+     */
+    String runtimeProfile();
+
     OcrDocument extract(
             BufferedImage image,
             String languages,

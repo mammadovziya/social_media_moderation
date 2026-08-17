@@ -68,6 +68,11 @@ class TesseractOcrEngine implements OcrEngine {
     }
 
     @Override
+    public String runtimeProfile() {
+        return runtimeProfile;
+    }
+
+    @Override
     public OcrDocument extract(
             BufferedImage image,
             String languages,

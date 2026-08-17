@@ -11,6 +11,7 @@ public record ModerationProperties(
         long maxImageBytes,
         long maxImageRequestBytes,
         long upstreamTimeoutSeconds,
+        long finalizationReserveMs,
         double moderationScoreBlockThreshold,
         String expectedModerationModel,
         String expectedModerationProfileSha256,
@@ -45,6 +46,12 @@ public record ModerationProperties(
         if (upstreamTimeoutSeconds < 1 || upstreamTimeoutSeconds > 300) {
             throw new IllegalArgumentException(
                     "UPSTREAM_TIMEOUT_SECONDS must be between 1 and 300");
+        }
+        if (finalizationReserveMs < 1
+                || finalizationReserveMs >= Duration.ofSeconds(upstreamTimeoutSeconds).toMillis()) {
+            throw new IllegalArgumentException(
+                    "MODERATION_FINALIZATION_RESERVE_MS must be positive and less than "
+                            + "UPSTREAM_TIMEOUT_SECONDS");
         }
         if (!Double.isFinite(moderationScoreBlockThreshold)
                 || moderationScoreBlockThreshold < 0
@@ -107,6 +114,10 @@ public record ModerationProperties(
 
     public Duration upstreamTimeout() {
         return Duration.ofSeconds(upstreamTimeoutSeconds);
+    }
+
+    public Duration finalizationReserve() {
+        return Duration.ofMillis(finalizationReserveMs);
     }
 
     private static String validatedHttpUrl(String value, String name) {

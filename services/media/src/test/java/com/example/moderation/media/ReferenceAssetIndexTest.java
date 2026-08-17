@@ -89,6 +89,22 @@ class ReferenceAssetIndexTest {
     }
 
     @Test
+    void perceptualLookupReusesTheExactPreflightSnapshotWithoutAnotherRevisionRead() {
+        when(repository.referenceAssetsRevision()).thenReturn(3L);
+        when(repository.loadReferenceAssetsSnapshot())
+                .thenReturn(new PdqHashRepository.ReferenceAssetsSnapshot(3L, List.of()));
+
+        ReferenceAssetIndex.ExactSearchResult preflight =
+                index.findExactSha256(ZERO_HASH);
+        ReferenceAssetIndex.SearchResult result = index.findCandidates(
+                preflight, ZERO_HASH, ZERO_HASH, ZERO_HASH);
+
+        assertThat(result.hasReferences()).isFalse();
+        verify(repository, times(1)).referenceAssetsRevision();
+        verify(repository, times(1)).loadReferenceAssetsSnapshot();
+    }
+
+    @Test
     void returnsExactIdentityAndPerceptualCandidatesWithPolicyMetadata() {
         ModerationReferenceAsset exact = asset(
                 1L,

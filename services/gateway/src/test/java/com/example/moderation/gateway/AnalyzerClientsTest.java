@@ -22,6 +22,21 @@ class AnalyzerClientsTest {
     }
 
     @Test
+    void poolAcquisitionConnectAndResponseTimeoutsRespectTheRemainingDeadline() {
+        GatewayTransportProperties transport = new GatewayTransportProperties(
+                128, 64, 1_000, 3_000, 30, 30);
+
+        org.apache.hc.client5.http.config.RequestConfig request =
+                AnalyzerClients.requestConfig(250, transport);
+
+        assertThat(request.getConnectionRequestTimeout().toMilliseconds()).isEqualTo(250);
+        assertThat(request.getConnectTimeout().toMilliseconds()).isEqualTo(250);
+        assertThat(request.getResponseTimeout().toMilliseconds()).isEqualTo(250);
+        assertThat(request.getConnectionKeepAlive().toSeconds()).isEqualTo(30);
+        assertThat(request.isRedirectsEnabled()).isFalse();
+    }
+
+    @Test
     void forwardsOnlyBoundedCandidateAndVisualVerificationEvidence() {
         Map<String, Object> candidate = new LinkedHashMap<>();
         candidate.put("referenceId", "reference-1");
@@ -85,5 +100,22 @@ class AnalyzerClientsTest {
 
         assertThat(reordered).isEqualTo(first);
         assertThat(changed).isNotEqualTo(first);
+    }
+
+    @Test
+    void preparedReferenceEvidenceReusesItsCanonicalDigestAndSnapshotsTopLevelValues() {
+        Map<String, Object> source = new LinkedHashMap<>();
+        source.put("pdq", Map.of("quality", 92));
+
+        Map<String, Object> prepared = AnalyzerClients.prepareReferenceEvidence(source);
+        String digest = AnalyzerClients.referenceEvidenceSha256(prepared);
+        source.put("unexpected", "later mutation");
+
+        assertThat(prepared).doesNotContainKey("unexpected");
+        assertThat(AnalyzerClients.prepareReferenceEvidence(prepared)).isSameAs(prepared);
+        assertThat(AnalyzerClients.referenceEvidenceSha256(prepared)).isEqualTo(digest);
+        assertThat(digest)
+                .isEqualTo(AnalyzerClients.referenceEvidenceSha256(
+                        Map.of("pdq", Map.of("quality", 92))));
     }
 }

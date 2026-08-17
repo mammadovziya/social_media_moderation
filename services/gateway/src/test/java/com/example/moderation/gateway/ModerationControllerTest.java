@@ -273,6 +273,30 @@ class ModerationControllerTest {
     }
 
     @Test
+    void aFoldedVulgarUsernameBlocksWithoutCallingAi() throws Exception {
+        Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
+        Files.writeString(blocklist, "VULGAR|qəhbə\n", StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+
+        ModerationResponse result = controller(clients, blocklist).moderate(
+                "username-folded-vulgar",
+                "username",
+                "q3hb3_az",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.VULGAR);
+        assertThat(result.reason()).isEqualTo(FinalReason.SAFETY);
+        assertThat(result.aiUsage().meteredCalls()).isZero();
+        verify(clients).persistUsernameDecisionAudit(any());
+        verify(clients, never()).evaluateHandle(any(), any(), any(), any());
+        verify(clients, never()).analyzeText(any(), any(), any());
+        verify(clients, never()).recordHandleVerdict(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void aTypedPoliticalUsernameReturnsItsCategoryWithoutCallingAi() throws Exception {
         Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
         Files.writeString(
@@ -1947,6 +1971,37 @@ class ModerationControllerTest {
     }
 
     @Test
+    void aLegacyUsernameVerdictWithoutFullConfigurationUsesTheCoordinator() throws Exception {
+        Map<String, Object> legacy = new java.util.LinkedHashMap<>(successfulUsernameAi());
+        legacy.remove("configuration");
+
+        assertLegacyUsernameCacheMiss(Map.copyOf(legacy));
+    }
+
+    @Test
+    void aLegacyUsernameVerdictFromDifferentModerationConfigurationUsesTheCoordinator()
+            throws Exception {
+        Map<String, Object> legacy = new java.util.LinkedHashMap<>(successfulUsernameAi());
+        Map<String, Object> configuration = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(legacy, "configuration"));
+        configuration.put("moderationModel", "different-moderation-model");
+        legacy.put("configuration", Map.copyOf(configuration));
+
+        assertLegacyUsernameCacheMiss(Map.copyOf(legacy));
+    }
+
+    @Test
+    void aNonCacheableLegacyUsernameVerdictUsesTheCoordinator() throws Exception {
+        Map<String, Object> legacy = new java.util.LinkedHashMap<>(successfulUsernameAi());
+        Map<String, Object> classification = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(legacy, "classification"));
+        classification.put("status", "error");
+        legacy.put("classification", Map.copyOf(classification));
+
+        assertLegacyUsernameCacheMiss(Map.copyOf(legacy));
+    }
+
+    @Test
     void aFreshUsernameVerdictIsStillWrittenToItsExistingCache() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         when(clients.evaluateHandle(eq("fresh_name"), any(), any(), any()))
@@ -1964,6 +2019,39 @@ class ModerationControllerTest {
                         new MockHttpServletResponse());
 
         verify(clients).recordHandleVerdict(eq("fresh_name"), any(), any(), any(), any());
+    }
+
+    @Test
+    void usernameLegacyCacheMissesUseConfigurationBoundCoordination() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("coordinated_name"), any(), any(), any()))
+                .thenReturn(cleanHandleEvidence());
+        when(clients.analyzeText("user-first", ContentType.USERNAME, "coordinated_name"))
+                .thenReturn(successfulUsernameAi());
+        ModerationController controller = controller(
+                clients, properties(), new InMemoryAiWorkCoordinator());
+
+        ModerationResponse first = controller.moderate(
+                "user-first",
+                "username",
+                "coordinated_name",
+                null,
+                null,
+                new MockHttpServletResponse());
+        ModerationResponse replay = controller.moderate(
+                "user-replay",
+                "username",
+                "coordinated_name",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(first.aiUsage().meteredCalls()).isOne();
+        assertThat(replay.aiUsage().meteredCalls()).isZero();
+        verify(clients).analyzeText("user-first", ContentType.USERNAME, "coordinated_name");
+        verify(clients, never())
+                .analyzeText("user-replay", ContentType.USERNAME, "coordinated_name");
+        verify(clients).recordHandleVerdict(eq("coordinated_name"), any(), any(), any(), any());
     }
 
     @Test
@@ -2382,12 +2470,13 @@ class ModerationControllerTest {
                 8_388_608,
                 9_437_184,
                 30,
+                3_000,
                 scoreBlockThreshold,
                 "omni-moderation-2024-09-26",
                 "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                 "gpt-5.6-terra",
-                "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba",
-                "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216",
+                "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8",
+                "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d",
                 "gpt-5.6-terra",
                 "medium",
                 "image-adjudication-v5",
@@ -2408,6 +2497,35 @@ class ModerationControllerTest {
                 new ReloadingBlockedTerms(properties),
                 new ReloadingRestrictedPoliticalEntities(properties),
                 AiWorkCoordinator.direct());
+    }
+
+    private static void assertLegacyUsernameCacheMiss(Map<String, Object> legacyVerdict)
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("legacy_miss"), any(), any(), any()))
+                .thenReturn(handleEvidenceWith("cachedVerdict", legacyVerdict));
+        when(clients.analyzeText("legacy-user", ContentType.USERNAME, "legacy_miss"))
+                .thenReturn(successfulUsernameAi());
+        java.util.concurrent.atomic.AtomicInteger coordinatorCalls =
+                new java.util.concurrent.atomic.AtomicInteger();
+        AiWorkCoordinator coordinator = (identity, liveAnalysis) -> {
+            coordinatorCalls.incrementAndGet();
+            return liveAnalysis.get();
+        };
+
+        ModerationResponse result = controller(clients, properties(), coordinator)
+                .moderate(
+                        "legacy-user",
+                        "username",
+                        "legacy_miss",
+                        null,
+                        null,
+                        new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(coordinatorCalls).hasValue(1);
+        verify(clients).analyzeText("legacy-user", ContentType.USERNAME, "legacy_miss");
+        verify(clients).recordHandleVerdict(eq("legacy_miss"), any(), any(), any(), any());
     }
 
     private static ModerationController controller(
@@ -2546,10 +2664,10 @@ class ModerationControllerTest {
                 Map.entry("customModel", "gpt-5.6-terra"),
                 Map.entry(
                         "classificationPromptBundleSha256",
-                        "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba"),
+                        "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8"),
                 Map.entry(
                         "classificationProfileSha256",
-                        "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216"),
+                        "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d"),
                 Map.entry("adjudicationModel", "gpt-5.6-terra"),
                 Map.entry("adjudicationReasoningEffort", "medium"),
                 Map.entry("adjudicationPromptVersion", "image-adjudication-v5"),

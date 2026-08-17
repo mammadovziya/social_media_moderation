@@ -9,8 +9,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import org.springframework.stereotype.Service;
-import pdqhashing.hasher.PDQHasher;
-import pdqhashing.types.HashAndQuality;
 
 @Service
 public class PdqHashService {
@@ -25,19 +23,21 @@ public class PdqHashService {
     private final ReferenceAssetIndex referenceAssetIndex;
     private final VisualReferenceIndex visualReferenceIndex;
     private final TextMasker textMasker;
-    private final PDQHasher hasher = new PDQHasher();
+    private final BoundedPdqHasher hasher;
 
     public PdqHashService(
             MediaProperties properties,
             PdqHashRepository repository,
             ReferenceAssetIndex referenceAssetIndex,
             VisualReferenceIndex visualReferenceIndex,
-            TextMasker textMasker) {
+            TextMasker textMasker,
+            BoundedPdqHasher hasher) {
         this.properties = properties;
         this.repository = repository;
         this.referenceAssetIndex = referenceAssetIndex;
         this.visualReferenceIndex = visualReferenceIndex;
         this.textMasker = textMasker;
+        this.hasher = hasher;
     }
 
     /**
@@ -62,6 +62,19 @@ public class PdqHashService {
             throw new IllegalArgumentException(
                     "SHA-256 preflight does not belong to the uploaded bytes");
         }
+        return analyzeAuthoritativeExact(
+                originalBytes.length, contentId, detectedFormat, preflight);
+    }
+
+    Analysis analyzeAuthoritativeExact(
+            int originalByteLength,
+            String contentId,
+            String detectedFormat,
+            Preflight preflight) {
+        if (originalByteLength < 1) {
+            throw new IllegalArgumentException("Authoritative upload length must be positive");
+        }
+        String observedSha256 = preflight.sha256();
         ModerationReferenceAsset authoritative = preflight.authoritativeExactMatch();
         if (authoritative == null) {
             throw new IllegalArgumentException(
@@ -98,7 +111,7 @@ public class PdqHashService {
         repository.saveEvidence(new MediaEvidence(
                 contentId,
                 observedSha256,
-                originalBytes.length,
+                originalByteLength,
                 detectedFormat,
                 AUTHORITATIVE_SHA256_EXACT_PATH,
                 null,
@@ -130,10 +143,6 @@ public class PdqHashService {
         PdqHash full = compute(source);
         TextMasker.MaskResult mask = textMasker.mask(source, ocrResult.spans());
         PdqHash masked = mask.applied() ? compute(mask.image()) : full;
-        repository.save(contentId, full.hash(), full.quality());
-        boolean fullQualityAccepted = full.quality() > properties.pdqQualityThreshold();
-        boolean maskedQualityAccepted = masked.quality() > properties.pdqQualityThreshold();
-
         ReferenceAssetIndex.SearchResult search = referenceAssetIndex.findCandidates(
                 sha256, full.hash(), masked.hash());
         VisualReferenceIndex.SearchResult visualSearch = search.exactSha256Candidates().isEmpty()
@@ -144,6 +153,84 @@ public class PdqHashService {
                         source.getWidth(),
                         source.getHeight())
                 : new VisualReferenceIndex.SearchResult(false, 0, List.of());
+        CompletedAnalysis completed = assemble(
+                sha256,
+                originalBytes.length,
+                detectedFormat,
+                ocrResult,
+                full,
+                masked,
+                mask,
+                search,
+                visualSearch);
+        persist(contentId, completed);
+        return completed.analysis();
+    }
+
+    VisualReferenceIndex.SearchResult findVisualCandidates(
+            byte[] originalBytes,
+            String detectedFormat,
+            BufferedImage source,
+            Preflight preflight,
+            ModerationDeadline deadline) {
+        if (!preflight.search().exactSha256Candidates().isEmpty()) {
+            return new VisualReferenceIndex.SearchResult(false, 0, List.of());
+        }
+        return visualReferenceIndex.findCandidates(
+                originalBytes,
+                detectedFormat,
+                source.getWidth(),
+                source.getHeight(),
+                preflight.search().revision(),
+                deadline);
+    }
+
+    CompletedAnalysis complete(
+            BufferedImage source,
+            int originalByteLength,
+            String detectedFormat,
+            OcrResult ocrResult,
+            Preflight preflight,
+            PdqHash full,
+            VisualReferenceIndex.SearchResult visualSearch,
+            ModerationDeadline deadline) {
+        deadline.check();
+        TextMasker.MaskResult mask = textMasker.mask(source, ocrResult.spans());
+        PdqHash masked = mask.applied() ? compute(mask.image(), deadline) : full;
+        ReferenceAssetIndex.SearchResult search = referenceAssetIndex.findCandidates(
+                preflight.search(), preflight.sha256(), full.hash(), masked.hash());
+        return assemble(
+                preflight.sha256(),
+                originalByteLength,
+                detectedFormat,
+                ocrResult,
+                full,
+                masked,
+                mask,
+                search,
+                visualSearch);
+    }
+
+    void persist(String contentId, CompletedAnalysis completed) {
+        repository.saveCompletedAnalysis(
+                contentId,
+                completed.full().hash(),
+                completed.full().quality(),
+                completed.evidence().withContentId(contentId));
+    }
+
+    private CompletedAnalysis assemble(
+            String sha256,
+            int originalByteLength,
+            String detectedFormat,
+            OcrResult ocrResult,
+            PdqHash full,
+            PdqHash masked,
+            TextMasker.MaskResult mask,
+            ReferenceAssetIndex.SearchResult search,
+            VisualReferenceIndex.SearchResult visualSearch) {
+        boolean fullQualityAccepted = full.quality() > properties.pdqQualityThreshold();
+        boolean maskedQualityAccepted = masked.quality() > properties.pdqQualityThreshold();
         List<ReferenceAssetIndex.Candidate> acceptedCandidates = search.perceptualCandidates()
                 .stream()
                 .flatMap(candidate -> candidate.retaining(type -> switch (type) {
@@ -212,10 +299,10 @@ public class PdqHashService {
                     "authoritativeExactMatch",
                     candidateMap(authoritativeExact, 0, "SHA256"));
         }
-        repository.saveEvidence(new MediaEvidence(
-                contentId,
+        MediaEvidence evidence = new MediaEvidence(
+                null,
                 sha256,
-                originalBytes.length,
+                originalByteLength,
                 detectedFormat,
                 FULL_ANALYSIS_PATH,
                 full.hash(),
@@ -233,8 +320,12 @@ public class PdqHashService {
                 REFERENCE_COMMIT,
                 null,
                 null,
-                null));
-        return new Analysis(Map.copyOf(identity), Map.copyOf(pdq));
+                null);
+        return new CompletedAnalysis(
+                new Analysis(Map.copyOf(identity), Map.copyOf(pdq)),
+                ocrResult,
+                full,
+                evidence);
     }
 
     private void putConfiguredEvidence(Map<String, Object> pdq) {
@@ -262,17 +353,11 @@ public class PdqHashService {
     }
 
     public PdqHash compute(BufferedImage source) {
-        int rows = source.getHeight();
-        int columns = source.getWidth();
-        int pixels = Math.multiplyExact(rows, columns);
-        HashAndQuality result = hasher.fromBufferedImage(
-                source,
-                new float[pixels],
-                new float[pixels],
-                new float[64][64],
-                new float[16][64],
-                new float[16][16]);
-        return new PdqHash(result.getHash().toString(), result.getQuality());
+        return compute(source, ModerationDeadline.none());
+    }
+
+    PdqHash compute(BufferedImage source, ModerationDeadline deadline) {
+        return hasher.compute(source, deadline);
     }
 
     public static int hammingDistance(String left, String right) {
@@ -411,6 +496,29 @@ public class PdqHashService {
         public Analysis {
             identity = Map.copyOf(identity);
             pdq = Map.copyOf(pdq);
+        }
+    }
+
+    record CompletedAnalysis(
+            Analysis analysis,
+            OcrResult ocrResult,
+            PdqHash full,
+            MediaEvidence evidence) {
+        CompletedAnalysis {
+            if (analysis == null || ocrResult == null || full == null || evidence == null) {
+                throw new IllegalArgumentException("Completed media analysis is incomplete");
+            }
+            if (evidence.contentId() != null) {
+                throw new IllegalArgumentException(
+                        "Cached media analysis must not contain a content ID");
+            }
+        }
+
+        boolean cacheable() {
+            return switch (ocrResult.status()) {
+                case "disabled", "no_text", "ok" -> !ocrResult.truncated();
+                default -> false;
+            };
         }
     }
 }

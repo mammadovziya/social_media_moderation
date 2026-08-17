@@ -4,7 +4,9 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -14,7 +16,7 @@ class VisualReferenceIndex {
     private final PdqHashRepository repository;
     private final VisualRetrievalHttpClient client;
     private final VisualRetrievalProperties properties;
-    private final Object refreshLock = new Object();
+    private final ReentrantLock refreshLock = new ReentrantLock(true);
     private final AtomicReference<CachedSnapshot> cached =
             new AtomicReference<>(CachedSnapshot.empty());
 
@@ -57,68 +59,85 @@ class VisualReferenceIndex {
             OcrResult ocr,
             int imageWidth,
             int imageHeight) {
-        String channel = "UNMASKED";
-        List<VisualRetrievalHttpClient.ExclusionBox> exclusionBoxes = List.of();
-        for (int attempt = 0; attempt < 2; attempt++) {
-            long observedRevision = repository.referenceAssetsRevision();
-            CachedSnapshot snapshot = ensureSnapshot(observedRevision, false);
-            if (repository.referenceAssetsRevision() != observedRevision) {
-                continue;
-            }
-            if (snapshot.assets().isEmpty()) {
-                return new SearchResult(
-                        false,
-                        snapshot.revision(),
-                        snapshot.snapshotDigest(),
-                        properties.descriptorVersion(),
-                        properties.candidateSelectionVersion(),
-                        false,
-                        0,
-                        List.of());
-            }
-            try {
-                return validate(
-                        snapshot,
-                        client.query(
-                                imageBytes,
-                                "upload." + safeExtension(detectedFormat),
-                                mimeType(detectedFormat),
-                                observedRevision,
-                                properties.descriptorVersion(),
-                                channel,
-                                exclusionBoxes,
-                                properties.candidateLimit()),
-                        channel);
-            } catch (VisualRetrievalHttpClient.MissingRevisionException exception) {
-                snapshot = ensureSnapshot(observedRevision, true);
-                return validate(
-                        snapshot,
-                        client.query(
-                                imageBytes,
-                                "upload." + safeExtension(detectedFormat),
-                                mimeType(detectedFormat),
-                                observedRevision,
-                                properties.descriptorVersion(),
-                                channel,
-                                exclusionBoxes,
-                                properties.candidateLimit()),
-                        channel);
-            }
-        }
-        throw new VisualRetrievalUnavailableException(
-                "visual reference revision changed repeatedly during lookup");
+        return findCandidates(
+                imageBytes,
+                detectedFormat,
+                imageWidth,
+                imageHeight,
+                repository.referenceAssetsRevision(),
+                ModerationDeadline.none());
     }
 
-    private CachedSnapshot ensureSnapshot(long observedRevision, boolean force) {
+    SearchResult findCandidates(
+            byte[] imageBytes,
+            String detectedFormat,
+            int imageWidth,
+            int imageHeight,
+            long observedRevision,
+            ModerationDeadline deadline) {
+        String channel = "UNMASKED";
+        List<VisualRetrievalHttpClient.ExclusionBox> exclusionBoxes = List.of();
+        deadline.check();
+        CachedSnapshot snapshot = ensureSnapshot(observedRevision, null, deadline);
+        if (snapshot.assets().isEmpty()) {
+            return new SearchResult(
+                    false,
+                    snapshot.revision(),
+                    snapshot.snapshotDigest(),
+                    properties.descriptorVersion(),
+                    properties.candidateSelectionVersion(),
+                    false,
+                    0,
+                    List.of());
+        }
+        try {
+            return validate(
+                    snapshot,
+                    query(
+                            imageBytes,
+                            detectedFormat,
+                            observedRevision,
+                            channel,
+                            exclusionBoxes,
+                            deadline),
+                    channel);
+        } catch (VisualRetrievalHttpClient.MissingRevisionException exception) {
+            snapshot = ensureSnapshot(
+                    observedRevision, snapshot.generation(), deadline);
+            return validate(
+                    snapshot,
+                    query(
+                            imageBytes,
+                            detectedFormat,
+                            observedRevision,
+                            channel,
+                            exclusionBoxes,
+                            deadline),
+                    channel);
+        }
+    }
+
+    void prewarm() {
+        long revision = repository.referenceAssetsRevision();
+        ensureSnapshot(revision, null, ModerationDeadline.none());
+    }
+
+    private CachedSnapshot ensureSnapshot(
+            long observedRevision,
+            Long refreshAfterGeneration,
+            ModerationDeadline deadline) {
         CachedSnapshot current = cached.get();
-        if (!force && current.revision() == observedRevision) {
+        if (reusable(current, observedRevision, refreshAfterGeneration)) {
             return current;
         }
-        synchronized (refreshLock) {
+        acquireRefreshLock(deadline);
+        try {
+            deadline.check();
             current = cached.get();
-            if (!force && current.revision() == observedRevision) {
+            if (reusable(current, observedRevision, refreshAfterGeneration)) {
                 return current;
             }
+            deadline.check();
             PdqHashRepository.VisualReferenceSnapshot loaded =
                     repository.loadVisualReferenceSnapshot(properties.descriptorVersion());
             if (loaded.revision() != observedRevision) {
@@ -139,10 +158,16 @@ class VisualReferenceIndex {
                             "visual reference snapshot contains duplicate reference IDs");
                 }
             }
-            String snapshotDigest = client.refresh(
-                    observedRevision,
-                    properties.descriptorVersion(),
-                    loaded.descriptors());
+            String snapshotDigest = deadline.present() || deadline.traceparent() != null
+                    ? client.refresh(
+                            observedRevision,
+                            properties.descriptorVersion(),
+                            loaded.descriptors(),
+                            deadline)
+                    : client.refresh(
+                            observedRevision,
+                            properties.descriptorVersion(),
+                            loaded.descriptors());
             CachedSnapshot replacement = new CachedSnapshot(
                     observedRevision,
                     snapshotDigest,
@@ -151,10 +176,73 @@ class VisualReferenceIndex {
                             descriptor -> metadataKey(
                                     descriptor.asset().externalId(), descriptor.channel()),
                             descriptor -> new DescriptorMetadata(
-                                    descriptor.implementationVersion()))));
+                                    descriptor.implementationVersion()))),
+                    Math.addExact(current.generation(), 1));
             cached.set(replacement);
             return replacement;
+        } finally {
+            refreshLock.unlock();
         }
+    }
+
+    private static boolean reusable(
+            CachedSnapshot current,
+            long observedRevision,
+            Long refreshAfterGeneration) {
+        return current.revision() == observedRevision
+                && (refreshAfterGeneration == null
+                        || current.generation() > refreshAfterGeneration);
+    }
+
+    private void acquireRefreshLock(ModerationDeadline deadline) {
+        deadline.check();
+        try {
+            if (deadline.present()) {
+                long remaining = deadline.remainingMillis();
+                if (!refreshLock.tryLock(Math.max(1, remaining), TimeUnit.MILLISECONDS)) {
+                    throw new MediaDeadlineExceededException();
+                }
+                return;
+            }
+            refreshLock.lockInterruptibly();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            if (deadline.present()) {
+                throw new MediaDeadlineExceededException(exception);
+            }
+            throw new VisualRetrievalUnavailableException(
+                    "visual reference refresh wait was interrupted", exception);
+        }
+    }
+
+    private VisualRetrievalHttpClient.QueryResponse query(
+            byte[] imageBytes,
+            String detectedFormat,
+            long observedRevision,
+            String channel,
+            List<VisualRetrievalHttpClient.ExclusionBox> exclusionBoxes,
+            ModerationDeadline deadline) {
+        if (deadline.present() || deadline.traceparent() != null) {
+            return client.query(
+                    imageBytes,
+                    "upload." + safeExtension(detectedFormat),
+                    mimeType(detectedFormat),
+                    observedRevision,
+                    properties.descriptorVersion(),
+                    channel,
+                    exclusionBoxes,
+                    properties.candidateLimit(),
+                    deadline);
+        }
+        return client.query(
+                imageBytes,
+                "upload." + safeExtension(detectedFormat),
+                mimeType(detectedFormat),
+                observedRevision,
+                properties.descriptorVersion(),
+                channel,
+                exclusionBoxes,
+                properties.candidateLimit());
     }
 
     private SearchResult validate(
@@ -308,9 +396,10 @@ class VisualReferenceIndex {
             long revision,
             String snapshotDigest,
             Map<String, ModerationReferenceAsset> assets,
-            Map<String, DescriptorMetadata> descriptorMetadata) {
+            Map<String, DescriptorMetadata> descriptorMetadata,
+            long generation) {
         static CachedSnapshot empty() {
-            return new CachedSnapshot(-1, "", Map.of(), Map.of());
+            return new CachedSnapshot(-1, "", Map.of(), Map.of(), 0);
         }
     }
 }

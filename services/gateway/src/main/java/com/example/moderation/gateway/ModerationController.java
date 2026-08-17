@@ -130,8 +130,16 @@ public class ModerationController {
         restrictedPoliticalEntities.snapshot();
         boolean localPolicy = blockedTerms.reloadHealthy();
         boolean politicalRegistry = restrictedPoliticalEntities.reloadHealthy();
-        boolean media = clients.mediaReady();
-        boolean ai = clients.aiReady();
+        java.util.concurrent.CompletableFuture<Boolean> mediaProbe =
+                java.util.concurrent.CompletableFuture.supplyAsync(
+                        clients::mediaReady,
+                        command -> Thread.startVirtualThread(command));
+        java.util.concurrent.CompletableFuture<Boolean> aiProbe =
+                java.util.concurrent.CompletableFuture.supplyAsync(
+                        clients::aiReady,
+                        command -> Thread.startVirtualThread(command));
+        boolean media = mediaProbe.join();
+        boolean ai = aiProbe.join();
         if (!localPolicy || !politicalRegistry || !media || !ai) {
             throw new ResponseStatusException(
                     HttpStatus.SERVICE_UNAVAILABLE,
@@ -545,7 +553,7 @@ public class ModerationController {
                 ? null
                 : imageMatchScore(media);
         AiUsage usage = aiUsage(ai);
-        int latencyMs = (int) Math.min(
+        int auditLatencyMs = (int) Math.min(
                 600_000,
                 java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
                         System.nanoTime() - startedAt));
@@ -566,8 +574,9 @@ public class ModerationController {
                     localFinancialPrivacy,
                     blockedTermsSnapshot.semanticSha256(),
                     politicalRegistrySnapshot.semanticSha256(),
-                    latencyMs);
+                    auditLatencyMs);
         }
+        int latencyMs = elapsedMillis(startedAt);
         log.info(
                 "moderation decision requestId={} contentId={} decision={} violation={} "
                         + "imageMatch={} candidateCount={} ocrStatus={} adjudicationStatus={} "
@@ -680,8 +689,12 @@ public class ModerationController {
         }
         Map<String, Object> localEvidence = Map.copyOf(localEvidenceBuilder);
 
-        // Free local checks first. Neither needs stored state, so neither should cost a round trip.
-        Violation blockedTermViolation = blockedTermsSnapshot.violation(normalized);
+        // Free local checks first. The folded VULGAR trie runs beside the literal trie because a
+        // handle has no word boundaries: separators, digits, and transliteration digraphs can hide
+        // a configured term without changing what the handle spells.
+        Violation blockedTermViolation = ReloadingBlockedTerms.strongestViolation(
+                blockedTermsSnapshot.violation(normalized),
+                blockedTermsSnapshot.handleViolation(normalized));
         if (blockedTermViolation != Violation.NONE) {
             return finishHandle(
                     contentId,
@@ -780,11 +793,12 @@ public class ModerationController {
                     startedAt);
         }
         Map<String, Object> cachedVerdict = DecisionPolicy.nestedMap(evidence, "cachedVerdict");
-        boolean fromCache = !cachedVerdict.isEmpty();
-        Map<String, Object> ai = fromCache
+        boolean fromLegacyCache = reusableLegacyHandleVerdict(cachedVerdict);
+        Map<String, Object> ai = fromLegacyCache
                 ? cachedVerdict
                 : analyzeText(
                         contentId, ContentType.USERNAME, normalized, "", "", "", requestId);
+        boolean fromCache = fromLegacyCache || AiWorkCoordinator.isCacheHit(ai);
         if (!fromCache) {
             cacheHandleVerdict(normalized, ai, requestId);
         }
@@ -831,6 +845,12 @@ public class ModerationController {
                         ? UsernameDecisionAuditPayload.VerdictSource.CACHE
                         : UsernameDecisionAuditPayload.VerdictSource.LIVE,
                 startedAt);
+    }
+
+    private boolean reusableLegacyHandleVerdict(Map<String, Object> cachedVerdict) {
+        return !cachedVerdict.isEmpty()
+                && ConfigurationBoundAiWorkCoordinator.cacheable(cachedVerdict)
+                && expectedAiConfiguration().equals(observedAiConfiguration(cachedVerdict));
     }
 
     private Map<String, Object> handleEvidence(String handle, String requestId) {
@@ -890,7 +910,7 @@ public class ModerationController {
             Map<String, Object> ai,
             UsernameDecisionAuditPayload.VerdictSource verdictSource,
             long startedAt) {
-        int latencyMs = (int) Math.min(
+        int auditLatencyMs = (int) Math.min(
                 600_000,
                 java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
                         System.nanoTime() - startedAt));
@@ -910,7 +930,9 @@ public class ModerationController {
                 localFinancialPrivacy,
                 ai,
                 verdictSource,
-                latencyMs);
+                auditLatencyMs);
+
+        int latencyMs = elapsedMillis(startedAt);
 
         log.info(
                 "handle decision requestId={} contentId={} decision={} violation={} "
@@ -2127,6 +2149,13 @@ public class ModerationController {
         return value == null ? null : value.name();
     }
 
+    private static int elapsedMillis(long startedAt) {
+        return (int) Math.min(
+                600_000,
+                java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
+                        System.nanoTime() - startedAt));
+    }
+
     private static String limitWithoutSplittingSurrogate(String value, int maxChars) {
         if (value.length() <= maxChars) {
             return value;
@@ -2163,9 +2192,6 @@ public class ModerationController {
                                 quotedText);
                 return validatedAiResponse(response, requestId);
             };
-            if (type == ContentType.USERNAME) {
-                return liveAnalysis.get();
-            }
             AiWorkIdentity identity = textAiWorkIdentity(
                     type,
                     text,
@@ -2234,6 +2260,8 @@ public class ModerationController {
             boolean adjudicationAllowed = !requiresAdjudication
                     || DecisionPolicy.hasCompleteRequiredOcr(media);
             Map<String, Object> ocr = DecisionPolicy.nestedMap(media, "ocr");
+            Map<String, Object> preparedReferenceEvidence =
+                    AnalyzerClients.prepareReferenceEvidence(media);
             java.util.function.Supplier<Map<String, Object>> liveAnalysis =
                     () -> validatedAiResponse(
                             clients.analyzeImageAi(
@@ -2247,7 +2275,7 @@ public class ModerationController {
                                     String.valueOf(ocr.get("status")),
                                     Boolean.TRUE.equals(ocr.get("confidenceAccepted")),
                                     Boolean.TRUE.equals(ocr.get("truncated")),
-                                    media,
+                                    preparedReferenceEvidence,
                                     requiresAdjudication,
                                     adjudicationAllowed),
                             requestId);
@@ -2259,7 +2287,7 @@ public class ModerationController {
                         type,
                         text,
                         ocrText,
-                        media,
+                        preparedReferenceEvidence,
                         requiresAdjudication,
                         adjudicationAllowed);
             } catch (RuntimeException exception) {
@@ -2721,7 +2749,7 @@ public class ModerationController {
     }
 
     private static String requestId(String supplied) {
-        return RequestIdentifiers.resolve(supplied);
+        return InternalRequestContext.requestId(supplied);
     }
 
     private static Map<String, Object> unavailableAi() {

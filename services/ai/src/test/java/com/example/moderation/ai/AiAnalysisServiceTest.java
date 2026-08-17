@@ -44,10 +44,10 @@ class AiAnalysisServiceTest {
                     .containsEntry("customModel", "gpt-5.6-terra")
                     .containsEntry(
                             "classificationPromptBundleSha256",
-                            "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba")
+                            "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8")
                     .containsEntry(
                             "classificationProfileSha256",
-                            "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216")
+                            "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d")
                     .containsEntry("adjudicationModel", "gpt-5.6-terra")
                     .containsEntry("adjudicationReasoningEffort", "medium")
                     .containsEntry("adjudicationPromptVersion", "image-adjudication-v5")
@@ -182,6 +182,7 @@ class AiAnalysisServiceTest {
             assertThat(provider.moderationOcrText).isEqualTo("Visible OCR text");
             assertThat(provider.adjudicationText).isEqualTo("Current text");
             assertThat(provider.ocrText).isEqualTo("Visible OCR text");
+            assertThat(provider.imagePreparationCalls).isOne();
             assertThat((Map<String, Object>) result.get("adjudication"))
                     .containsEntry("action", "allow")
                     .containsEntry("candidateDisposition", "rejected");
@@ -517,6 +518,7 @@ class AiAnalysisServiceTest {
         private volatile OpenAiRestClient.OpenAiFailureCode classificationFailureCode;
         private volatile boolean moderationFlagged;
         private volatile int adjudicationCalls;
+        private volatile int imagePreparationCalls;
 
         @Override
         public String name() {
@@ -539,10 +541,10 @@ class AiAnalysisServiceTest {
             details.put("customModel", "gpt-5.6-terra");
             details.put(
                     "classificationPromptBundleSha256",
-                    "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba");
+                    "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8");
             details.put(
                     "classificationProfileSha256",
-                    "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216");
+                    "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d");
             details.put("adjudicationModel", "gpt-5.6-terra");
             details.put("adjudicationReasoningEffort", "medium");
             details.put(
@@ -558,6 +560,12 @@ class AiAnalysisServiceTest {
         @Override
         public Map<String, Object> moderateText(String text) {
             return moderation();
+        }
+
+        @Override
+        public PreparedImage prepareImage(byte[] bytes, String contentType) {
+            imagePreparationCalls++;
+            return AiProvider.super.prepareImage(bytes, contentType);
         }
 
         @Override

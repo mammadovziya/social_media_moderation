@@ -7,6 +7,8 @@ target/
 .idea/
 .vscode/
 *.swp
+__pycache__/
+*.py[cod]
 docs/
 
 # Architect demo corpus, evaluators, and reports are intentionally local-only.

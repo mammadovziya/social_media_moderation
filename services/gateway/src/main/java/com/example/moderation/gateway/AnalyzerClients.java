@@ -4,18 +4,34 @@ import com.example.moderation.gateway.api.ContentType;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
+import java.util.AbstractMap;
+import java.util.Collections;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import jakarta.annotation.PreDestroy;
+import org.apache.hc.client5.http.config.ConnectionConfig;
+import org.apache.hc.client5.http.config.RequestConfig;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
+import org.apache.hc.client5.http.protocol.HttpClientContext;
+import org.apache.hc.core5.util.TimeValue;
+import org.apache.hc.core5.util.Timeout;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
@@ -23,26 +39,77 @@ import org.springframework.web.client.RestClient;
 
 @Component
 public class AnalyzerClients {
+    private static final ObjectMapper CANONICAL_MAPPER = new ObjectMapper()
+            .configure(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS, true);
+
     private final RestClient mediaClient;
+    private final RestClient mediaAnalysisClient;
+    private final RestClient mediaCoordinationClient;
     private final RestClient aiClient;
-    private final ObjectMapper objectMapper;
+    private final RestClient aiAnalysisClient;
     private final AiWorkIdempotencySecurityProperties aiWorkSecurity;
+    private final CloseableHttpClient pooledHttpClient;
 
     public AnalyzerClients(
             RestClient.Builder builder,
             ModerationProperties properties,
+            GatewayTransportProperties transportProperties,
             AiWorkIdempotencySecurityProperties aiWorkSecurity,
             ObjectMapper objectMapper) {
-        this.objectMapper = objectMapper;
         this.aiWorkSecurity = aiWorkSecurity;
-        this.mediaClient = builder.clone()
-                .baseUrl(properties.mediaServiceUrl())
-                .requestFactory(requestFactory(properties))
+        Duration maximumTimeout = properties.upstreamTimeout();
+        ConnectionConfig connectionConfig = ConnectionConfig.custom()
+                .setConnectTimeout(Timeout.ofMilliseconds(Math.min(
+                        maximumTimeout.toMillis(), transportProperties.connectTimeoutMs())))
+                .setSocketTimeout(Timeout.ofMilliseconds(maximumTimeout.toMillis()))
+                .setTimeToLive(TimeValue.ofSeconds(transportProperties.keepAliveSeconds()))
                 .build();
-        this.aiClient = builder.clone()
-                .baseUrl(properties.aiServiceUrl())
-                .requestFactory(requestFactory(properties))
+        PoolingHttpClientConnectionManager connectionManager =
+                PoolingHttpClientConnectionManagerBuilder.create()
+                        .setMaxConnTotal(transportProperties.maxConnections())
+                        .setMaxConnPerRoute(transportProperties.maxConnectionsPerRoute())
+                        .setDefaultConnectionConfig(connectionConfig)
+                        .build();
+        RequestConfig requestConfig = requestConfig(
+                maximumTimeout.toMillis(), transportProperties);
+        this.pooledHttpClient = HttpClients.custom()
+                .setConnectionManager(connectionManager)
+                .setDefaultRequestConfig(requestConfig)
+                .disableAutomaticRetries()
+                .evictExpiredConnections()
+                .evictIdleConnections(TimeValue.ofSeconds(
+                        transportProperties.idleConnectionEvictSeconds()))
                 .build();
+        this.mediaClient = internalClient(
+                builder,
+                properties.mediaServiceUrl(),
+                properties,
+                transportProperties,
+                DeadlineBudget.FINALIZATION);
+        this.mediaAnalysisClient = internalClient(
+                builder,
+                properties.mediaServiceUrl(),
+                properties,
+                transportProperties,
+                DeadlineBudget.ANALYSIS);
+        this.mediaCoordinationClient = internalClient(
+                builder,
+                properties.mediaServiceUrl(),
+                properties,
+                transportProperties,
+                DeadlineBudget.COORDINATION);
+        this.aiClient = internalClient(
+                builder,
+                properties.aiServiceUrl(),
+                properties,
+                transportProperties,
+                DeadlineBudget.FINALIZATION);
+        this.aiAnalysisClient = internalClient(
+                builder,
+                properties.aiServiceUrl(),
+                properties,
+                transportProperties,
+                DeadlineBudget.ANALYSIS);
     }
 
     @SuppressWarnings("unchecked")
@@ -59,7 +126,7 @@ public class AnalyzerClients {
             String parentPostText,
             String authorUsername,
             String quotedText) {
-        return aiClient.post()
+        return GatewayMetrics.timed("ai.text", () -> aiAnalysisClient.post()
                 .uri("/internal/v1/analyze/text")
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of(
@@ -70,7 +137,7 @@ public class AnalyzerClients {
                         "authorUsername", authorUsername,
                         "quotedText", quotedText))
                 .retrieve()
-                .body(Map.class);
+                .body(Map.class));
     }
 
     @SuppressWarnings("unchecked")
@@ -78,12 +145,12 @@ public class AnalyzerClients {
             byte[] image, String filename, String contentType, String contentId) {
         MultiValueMap<String, Object> form = imageForm(image, filename, contentType);
         form.add("contentId", contentId);
-        return mediaClient.post()
+        return GatewayMetrics.timed("media.image", () -> mediaAnalysisClient.post()
                 .uri("/internal/v1/analyze/image")
                 .contentType(MediaType.MULTIPART_FORM_DATA)
                 .body(form)
                 .retrieve()
-                .body(Map.class);
+                .body(Map.class));
     }
 
     @SuppressWarnings("unchecked")
@@ -115,12 +182,12 @@ public class AnalyzerClients {
         form.add("referenceEvidence", boundedJson(referenceEvidence));
         form.add("requiresAdjudication", Boolean.toString(requiresAdjudication));
         form.add("adjudicationAllowed", Boolean.toString(adjudicationAllowed));
-        return aiClient.post()
+        return GatewayMetrics.timed("ai.image", () -> aiAnalysisClient.post()
                 .uri("/internal/v1/analyze/image")
                 .contentType(MediaType.MULTIPART_FORM_DATA)
                 .body(form)
                 .retrieve()
-                .body(Map.class);
+                .body(Map.class));
     }
 
     /**
@@ -133,7 +200,7 @@ public class AnalyzerClients {
             String classificationModel,
             String promptBundleSha256,
             String classificationProfileSha256) {
-        return mediaClient.post()
+        return GatewayMetrics.timed("media.handle.evaluate", () -> mediaAnalysisClient.post()
                 .uri("/internal/v1/handles/evaluate")
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of(
@@ -142,7 +209,7 @@ public class AnalyzerClients {
                         "promptBundleSha256", promptBundleSha256,
                         "classificationProfileSha256", classificationProfileSha256))
                 .retrieve()
-                .body(Map.class);
+                .body(Map.class));
     }
 
     /** Caches a fresh model verdict so the same handle resolves identically on a retry. */
@@ -152,7 +219,7 @@ public class AnalyzerClients {
             String promptBundleSha256,
             String classificationProfileSha256,
             Map<String, Object> verdict) {
-        mediaClient.post()
+        GatewayMetrics.timed("media.handle.record", () -> mediaClient.post()
                 .uri("/internal/v1/handles/verdict")
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of(
@@ -162,26 +229,26 @@ public class AnalyzerClients {
                         "classificationProfileSha256", classificationProfileSha256,
                         "verdict", verdict))
                 .retrieve()
-                .toBodilessEntity();
+                .toBodilessEntity());
     }
 
     @SuppressWarnings("unchecked")
     public Map<String, Object> persistUsernameDecisionAudit(UsernameDecisionAuditPayload event) {
-        return mediaClient.post()
+        return GatewayMetrics.timed("media.audit.username", () -> mediaClient.post()
                 .uri("/internal/v1/audit/username-decision")
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(event)
                 .retrieve()
-                .body(Map.class);
+                .body(Map.class));
     }
 
     public void persistImageDecisionAudit(ImageDecisionAuditPayload event) {
-        mediaClient.post()
+        GatewayMetrics.timed("media.audit.image", () -> mediaClient.post()
                 .uri("/internal/v1/audit/image-decision")
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(event)
                 .retrieve()
-                .toBodilessEntity();
+                .toBodilessEntity());
     }
 
     @SuppressWarnings("unchecked")
@@ -191,8 +258,42 @@ public class AnalyzerClients {
             int leaseSeconds,
             int completedTtlSeconds,
             int failedCooldownSeconds) {
-        Map<String, Object> response = authenticatedAiWorkRequest(
-                        mediaClient.post().uri("/internal/v1/idempotency/ai-work/claim"),
+        return claimAiWork(
+                mediaCoordinationClient,
+                identity,
+                ownerToken,
+                leaseSeconds,
+                completedTtlSeconds,
+                failedCooldownSeconds);
+    }
+
+    /** Lease maintenance is finalization work and may consume the reserved request tail. */
+    public AiWorkClaim refreshAiWorkLease(
+            AiWorkIdentity identity,
+            String ownerToken,
+            int leaseSeconds,
+            int completedTtlSeconds,
+            int failedCooldownSeconds) {
+        return claimAiWork(
+                mediaClient,
+                identity,
+                ownerToken,
+                leaseSeconds,
+                completedTtlSeconds,
+                failedCooldownSeconds);
+    }
+
+    @SuppressWarnings("unchecked")
+    private AiWorkClaim claimAiWork(
+            RestClient client,
+            AiWorkIdentity identity,
+            String ownerToken,
+            int leaseSeconds,
+            int completedTtlSeconds,
+            int failedCooldownSeconds) {
+        Map<String, Object> response = GatewayMetrics.timed(
+                "media.ai_work.claim", () -> authenticatedAiWorkRequest(
+                        client.post().uri("/internal/v1/idempotency/ai-work/claim"),
                         aiWorkSecurity)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of(
@@ -205,7 +306,7 @@ public class AnalyzerClients {
                         "completedTtlSeconds", completedTtlSeconds,
                         "failedCooldownSeconds", failedCooldownSeconds))
                 .retrieve()
-                .body(Map.class);
+                .body(Map.class));
         if (response == null) {
             throw new IllegalStateException("AI work coordinator returned no claim");
         }
@@ -228,7 +329,7 @@ public class AnalyzerClients {
 
     public void completeAiWork(
             String keySha256, String ownerToken, Map<String, Object> result) {
-        authenticatedAiWorkRequest(
+        GatewayMetrics.timed("media.ai_work.complete", () -> authenticatedAiWorkRequest(
                         mediaClient.post().uri("/internal/v1/idempotency/ai-work/complete"),
                         aiWorkSecurity)
                 .contentType(MediaType.APPLICATION_JSON)
@@ -237,17 +338,17 @@ public class AnalyzerClients {
                         "ownerToken", ownerToken,
                         "result", result))
                 .retrieve()
-                .toBodilessEntity();
+                .toBodilessEntity());
     }
 
     public void failAiWork(String keySha256, String ownerToken) {
-        authenticatedAiWorkRequest(
+        GatewayMetrics.timed("media.ai_work.fail", () -> authenticatedAiWorkRequest(
                         mediaClient.post().uri("/internal/v1/idempotency/ai-work/fail"),
                         aiWorkSecurity)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of("keySha256", keySha256, "ownerToken", ownerToken))
                 .retrieve()
-                .toBodilessEntity();
+                .toBodilessEntity());
     }
 
     static RestClient.RequestBodySpec authenticatedAiWorkRequest(
@@ -267,9 +368,34 @@ public class AnalyzerClients {
                 security.internalToken());
     }
 
+    static Map<String, String> internalRequestHeaders(Duration fallbackTimeout) {
+        return internalRequestHeaders(
+                fallbackTimeout, Duration.ZERO, DeadlineBudget.FINALIZATION);
+    }
+
+    static Map<String, String> internalRequestHeaders(
+            Duration fallbackTimeout,
+            Duration finalizationReserve,
+            DeadlineBudget deadlineBudget) {
+        Map<String, String> headers =
+                new LinkedHashMap<>(InternalRequestContext.forwardingHeaders());
+        headers.put(
+                InternalRequestDeadline.HEADER_NAME,
+                switch (deadlineBudget) {
+                    case ANALYSIS -> InternalRequestDeadline.analysisHeaderValue(
+                            fallbackTimeout, finalizationReserve);
+                    case COORDINATION -> InternalRequestDeadline.coordinationHeaderValue(
+                            fallbackTimeout, finalizationReserve);
+                    case FINALIZATION ->
+                            InternalRequestDeadline.headerValue(fallbackTimeout);
+                });
+        return Map.copyOf(headers);
+    }
+
     private String boundedJson(Map<String, Object> value) {
-        String json = new String(
-                canonicalReferenceEvidence(value), StandardCharsets.UTF_8);
+        String json = value instanceof PreparedReferenceEvidence prepared
+                ? prepared.json()
+                : new String(canonicalReferenceEvidence(value), StandardCharsets.UTF_8);
         if (json.length() > 20_000) {
             throw new IllegalStateException("bounded media evidence exceeded 20000 characters");
         }
@@ -277,24 +403,53 @@ public class AnalyzerClients {
     }
 
     /**
+     * Prepares the one bounded evidence representation used by both the AI multipart body and the
+     * idempotency identity. The returned map compares equal to the source map, preserving existing
+     * client and test contracts.
+     */
+    public static Map<String, Object> prepareReferenceEvidence(Map<String, Object> value) {
+        if (value instanceof PreparedReferenceEvidence) {
+            return value;
+        }
+        byte[] canonicalBytes = canonicalReferenceEvidence(value);
+        String json = new String(canonicalBytes, StandardCharsets.UTF_8);
+        if (json.length() > 20_000) {
+            throw new IllegalStateException("bounded media evidence exceeded 20000 characters");
+        }
+        return new PreparedReferenceEvidence(
+                value == null ? Map.of() : value,
+                canonicalBytes,
+                json,
+                sha256(canonicalBytes));
+    }
+
+    /**
      * Canonical digest of the exact bounded evidence object sent to image adjudication. Object
      * keys are sorted recursively while candidate-list order remains significant.
      */
     public static String referenceEvidenceSha256(Map<String, Object> value) {
+        if (value instanceof PreparedReferenceEvidence prepared) {
+            return prepared.sha256();
+        }
+        return sha256(canonicalReferenceEvidence(value));
+    }
+
+    private static String sha256(byte[] value) {
         try {
             return HexFormat.of().formatHex(
                     MessageDigest.getInstance("SHA-256")
-                            .digest(canonicalReferenceEvidence(value)));
+                            .digest(value));
         } catch (NoSuchAlgorithmException exception) {
             throw new IllegalStateException("SHA-256 is not available", exception);
         }
     }
 
     private static byte[] canonicalReferenceEvidence(Map<String, Object> value) {
+        if (value instanceof PreparedReferenceEvidence prepared) {
+            return prepared.canonicalBytes().clone();
+        }
         try {
-            return new ObjectMapper()
-                    .writer()
-                    .with(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
+            return CANONICAL_MAPPER.writer()
                     .writeValueAsBytes(adjudicationEvidence(value));
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException(
@@ -397,19 +552,19 @@ public class AnalyzerClients {
     }
 
     public boolean mediaReady() {
-        return ready(mediaClient);
+        return ready(mediaClient, "media.ready");
     }
 
     public boolean aiReady() {
-        return ready(aiClient);
+        return ready(aiClient, "ai.ready");
     }
 
-    private boolean ready(RestClient client) {
+    private boolean ready(RestClient client, String stage) {
         try {
-            client.get()
+            GatewayMetrics.timed(stage, () -> client.get()
                     .uri("/readyz")
                     .retrieve()
-                    .toBodilessEntity();
+                    .toBodilessEntity());
             return true;
         } catch (RuntimeException ignored) {
             return false;
@@ -427,12 +582,130 @@ public class AnalyzerClients {
         return form;
     }
 
-    private static SimpleClientHttpRequestFactory requestFactory(
-            ModerationProperties properties) {
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(properties.upstreamTimeout());
-        factory.setReadTimeout(properties.upstreamTimeout());
+    private RestClient internalClient(
+            RestClient.Builder builder,
+            String baseUrl,
+            ModerationProperties properties,
+            GatewayTransportProperties transportProperties,
+            DeadlineBudget deadlineBudget) {
+        return builder.clone()
+                .baseUrl(baseUrl)
+                .requestFactory(requestFactory(
+                        properties.upstreamTimeout(),
+                        properties.finalizationReserve(),
+                        transportProperties,
+                        deadlineBudget))
+                .requestInterceptor((request, body, execution) -> {
+                    internalRequestHeaders(
+                                    properties.upstreamTimeout(),
+                                    properties.finalizationReserve(),
+                                    deadlineBudget)
+                            .forEach(request.getHeaders()::set);
+                    return execution.execute(request, body);
+                })
+                .build();
+    }
+
+    private HttpComponentsClientHttpRequestFactory requestFactory(
+            Duration maximumTimeout,
+            Duration finalizationReserve,
+            GatewayTransportProperties transportProperties,
+            DeadlineBudget deadlineBudget) {
+        HttpComponentsClientHttpRequestFactory factory =
+                new HttpComponentsClientHttpRequestFactory(pooledHttpClient);
+        factory.setHttpContextFactory((method, uri) -> {
+            long remainingMillis = switch (deadlineBudget) {
+                case ANALYSIS -> InternalRequestDeadline.remainingAnalysisMillis(
+                        maximumTimeout, finalizationReserve);
+                case COORDINATION -> InternalRequestDeadline.remainingCoordinationMillis(
+                        maximumTimeout, finalizationReserve);
+                case FINALIZATION ->
+                        InternalRequestDeadline.remainingFinalizationMillis(maximumTimeout);
+            };
+            if (remainingMillis <= 0) {
+                throw new RequestDeadlineExceededException(
+                        switch (deadlineBudget) {
+                            case ANALYSIS -> "analysis deadline expired before internal I/O";
+                            case COORDINATION ->
+                                    "coordination deadline expired before internal I/O";
+                            case FINALIZATION ->
+                                    "request deadline expired before finalization I/O";
+                        });
+            }
+            HttpClientContext context = HttpClientContext.create();
+            context.setRequestConfig(requestConfig(remainingMillis, transportProperties));
+            return context;
+        });
         return factory;
+    }
+
+    static RequestConfig requestConfig(
+            long remainingMillis, GatewayTransportProperties transportProperties) {
+        long boundedRemaining = Math.max(1, remainingMillis);
+        return RequestConfig.custom()
+                .setConnectionRequestTimeout(Timeout.ofMilliseconds(Math.min(
+                        boundedRemaining,
+                        transportProperties.connectionRequestTimeoutMs())))
+                .setConnectTimeout(Timeout.ofMilliseconds(Math.min(
+                        boundedRemaining, transportProperties.connectTimeoutMs())))
+                .setResponseTimeout(Timeout.ofMilliseconds(boundedRemaining))
+                .setDefaultKeepAlive(
+                        transportProperties.keepAliveSeconds(), TimeUnit.SECONDS)
+                .setRedirectsEnabled(false)
+                .build();
+    }
+
+    @PreDestroy
+    void closeTransport() throws IOException {
+        pooledHttpClient.close();
+    }
+
+    enum DeadlineBudget {
+        ANALYSIS,
+        COORDINATION,
+        FINALIZATION
+    }
+
+    static final class RequestDeadlineExceededException extends RuntimeException {
+        private RequestDeadlineExceededException(String message) {
+            super(message);
+        }
+    }
+
+    private static final class PreparedReferenceEvidence
+            extends AbstractMap<String, Object> {
+        private final Map<String, Object> delegate;
+        private final byte[] canonicalBytes;
+        private final String json;
+        private final String sha256;
+
+        private PreparedReferenceEvidence(
+                Map<String, Object> delegate,
+                byte[] canonicalBytes,
+                String json,
+                String sha256) {
+            this.delegate = Collections.unmodifiableMap(new LinkedHashMap<>(delegate));
+            this.canonicalBytes = canonicalBytes.clone();
+            this.json = json;
+            this.sha256 = sha256;
+        }
+
+        @Override
+        public Set<Entry<String, Object>> entrySet() {
+            return delegate.entrySet();
+        }
+
+        private byte[] canonicalBytes() {
+            return canonicalBytes;
+        }
+
+        private String json() {
+            return json;
+        }
+
+        private String sha256() {
+            return sha256;
+        }
     }
 
     private static final class NamedByteArrayResource extends ByteArrayResource {

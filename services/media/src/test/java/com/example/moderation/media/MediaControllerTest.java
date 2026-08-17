@@ -10,6 +10,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.awt.image.BufferedImage;
 import java.util.List;
 import java.util.Map;
@@ -40,8 +41,19 @@ class MediaControllerTest {
     private final PdqHashRepository repository = mock(PdqHashRepository.class);
     private final OcrService ocr = mock(OcrService.class);
     private final VisualReferenceIndex visualRetrieval = mock(VisualReferenceIndex.class);
+    private final MediaAnalysisCoordinator coordinator = mock(MediaAnalysisCoordinator.class);
+    private final MediaStageMetrics metrics =
+            new MediaStageMetrics(new SimpleMeterRegistry());
     private final MediaController controller =
-            new MediaController(properties, decoder, pdq, repository, ocr, visualRetrieval);
+            new MediaController(
+                    properties,
+                    decoder,
+                    pdq,
+                    repository,
+                    ocr,
+                    visualRetrieval,
+                    coordinator,
+                    metrics);
 
     @BeforeEach
     void defaultToTheFullAnalysisPath() {
@@ -67,11 +79,12 @@ class MediaControllerTest {
                 java.util.List.of(new OcrSpan("Salam Bakı", 95.0, 1, 1, 10, 5)),
                 false,
                 "test-tsv");
-        when(ocr.analyze(decodedImage)).thenReturn(ocrResult);
-        when(pdq.analyze(decodedImage, upload.getBytes(), "post-1", ocrResult, "png"))
-                .thenReturn(new PdqHashService.Analysis(
+        PdqHashService.Analysis analysis = new PdqHashService.Analysis(
                         Map.of("sha256", "b".repeat(64)),
-                        Map.of("candidateFound", false)));
+                        Map.of("candidateFound", false));
+        when(coordinator.analyze(
+                        any(), any(byte[].class), any(), any(), any()))
+                .thenReturn(completed(analysis, ocrResult));
 
         Map<String, Object> response = controller.analyze("post-1", upload);
 
@@ -90,8 +103,8 @@ class MediaControllerTest {
         assertThat(imageResponse.get("maxImagePixels")).isEqualTo(16_777_216L);
         assertThat(ocrResponse.get("timeoutSeconds")).isEqualTo(10);
         assertThat(ocrResponse.get("maxConcurrent")).isEqualTo(2);
-        verify(ocr).analyze(decodedImage);
-        verify(pdq).analyze(decodedImage, upload.getBytes(), "post-1", ocrResult, "png");
+        verify(coordinator).analyze(
+                any(), any(byte[].class), any(), any(), any());
     }
 
     @Test
@@ -119,7 +132,7 @@ class MediaControllerTest {
                 "b".repeat(64),
                 new ReferenceAssetIndex.ExactSearchResult(17, true, List.of(exact)));
         when(pdq.preflight(bytes)).thenReturn(preflight);
-        when(pdq.analyzeAuthoritativeExact(bytes, "post-exact", "png", preflight))
+        when(pdq.analyzeAuthoritativeExact(bytes.length, "post-exact", "png", preflight))
                 .thenReturn(new PdqHashService.Analysis(
                         Map.of(
                                 "sha256", "b".repeat(64),
@@ -151,8 +164,9 @@ class MediaControllerTest {
         boundedOrder.verify(decoder).decode(bytes);
         boundedOrder.verify(pdq).preflight(bytes);
         boundedOrder.verify(pdq)
-                .analyzeAuthoritativeExact(bytes, "post-exact", "png", preflight);
+                .analyzeAuthoritativeExact(bytes.length, "post-exact", "png", preflight);
         verifyNoInteractions(ocr);
+        verifyNoInteractions(coordinator);
         verify(pdq, never()).analyze(any(), any(), any(), any(), any());
     }
 
@@ -165,9 +179,10 @@ class MediaControllerTest {
         when(decoder.decode(upload.getBytes()))
                 .thenReturn(new ImageDecoder.DecodedImage(decodedImage, "png"));
         OcrResult ocrResult = OcrResult.error();
-        when(ocr.analyze(decodedImage)).thenReturn(ocrResult);
-        when(pdq.analyze(decodedImage, upload.getBytes(), "post-1", ocrResult, "png"))
-                .thenReturn(new PdqHashService.Analysis(Map.of(), Map.of()));
+        when(coordinator.analyze(
+                        any(), any(byte[].class), any(), any(), any()))
+                .thenReturn(completed(
+                        new PdqHashService.Analysis(Map.of(), Map.of()), ocrResult));
 
         Map<String, Object> response = controller.analyze("post-1", upload);
 
@@ -193,14 +208,29 @@ class MediaControllerTest {
     void readinessShowsOcrStatus() {
         when(ocr.ready()).thenReturn(true);
         when(visualRetrieval.ready()).thenReturn(true);
+        when(repository.databaseReady()).thenReturn(true);
         when(ocr.readinessStatus()).thenReturn("disabled");
-        when(repository.observedHashCount()).thenReturn(12L);
+        when(repository.cachedObservedHashCount()).thenReturn(12L);
 
         Map<String, Object> response = controller.ready();
 
         assertThat(response).containsEntry("status", "ready");
         Map<?, ?> ocrResponse = (Map<?, ?>) response.get("ocr");
         assertThat(ocrResponse.get("status")).isEqualTo("disabled");
+    }
+
+    @Test
+    void readinessFailsWhenTheDatabaseIsUnavailable() {
+        when(ocr.ready()).thenReturn(true);
+        when(visualRetrieval.ready()).thenReturn(true);
+        when(repository.databaseReady()).thenReturn(false);
+
+        assertThatThrownBy(controller::ready)
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        exception -> assertThat(exception.getStatusCode())
+                                .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
+        verify(repository, never()).cachedObservedHashCount();
     }
 
     @Test
@@ -223,9 +253,8 @@ class MediaControllerTest {
                 new MockMultipartFile("image", "post.png", "image/png", new byte[] {1});
         when(decoder.decode(upload.getBytes()))
                 .thenReturn(new ImageDecoder.DecodedImage(decodedImage, "png"));
-        OcrResult ocrResult = OcrResult.noText();
-        when(ocr.analyze(decodedImage)).thenReturn(ocrResult);
-        when(pdq.analyze(decodedImage, upload.getBytes(), "post-1", ocrResult, "png"))
+        when(coordinator.analyze(
+                        any(), any(byte[].class), any(), any(), any()))
                 .thenThrow(new VisualRetrievalUnavailableException("unavailable"));
 
         assertThatThrownBy(() -> controller.analyze("post-1", upload))
@@ -233,5 +262,66 @@ class MediaControllerTest {
                         ResponseStatusException.class,
                         exception -> assertThat(exception.getStatusCode())
                                 .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
+    }
+
+    @Test
+    void expiredCallerDeadlineStopsBeforeDecode() {
+        MockMultipartFile upload = new MockMultipartFile(
+                "image", "post.png", "image/png", new byte[] {1});
+
+        assertThatThrownBy(() -> controller.analyze(
+                        "post-expired",
+                        upload,
+                        System.currentTimeMillis() - 1,
+                        null))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        exception -> assertThat(exception.getStatusCode())
+                                .isEqualTo(HttpStatus.GATEWAY_TIMEOUT));
+
+        verifyNoInteractions(decoder);
+    }
+
+    @Test
+    void nonPositiveCallerDeadlineIsRejected() {
+        MockMultipartFile upload = new MockMultipartFile(
+                "image", "post.png", "image/png", new byte[] {1});
+
+        assertThatThrownBy(() -> controller.analyze(
+                        "post-invalid", upload, 0L, null))
+                .isInstanceOfSatisfying(
+                        ResponseStatusException.class,
+                        exception -> assertThat(exception.getStatusCode())
+                                .isEqualTo(HttpStatus.BAD_REQUEST));
+    }
+
+    private static PdqHashService.CompletedAnalysis completed(
+            PdqHashService.Analysis analysis, OcrResult ocrResult) {
+        return new PdqHashService.CompletedAnalysis(
+                analysis,
+                ocrResult,
+                new PdqHashService.PdqHash("0".repeat(64), 80),
+                new MediaEvidence(
+                        null,
+                        "a".repeat(64),
+                        3,
+                        "png",
+                        PdqHashService.FULL_ANALYSIS_PATH,
+                        "0".repeat(64),
+                        80,
+                        "0".repeat(64),
+                        80,
+                        0,
+                        ocrResult.status(),
+                        ocrResult.digest(),
+                        ocrResult.confidence(),
+                        ocrResult.confidenceAccepted(),
+                        ocrResult.truncated(),
+                        ocrResult.engine(),
+                        0,
+                        PdqHashService.REFERENCE_COMMIT,
+                        null,
+                        null,
+                        null));
     }
 }

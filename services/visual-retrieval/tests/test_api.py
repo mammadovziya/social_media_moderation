@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from fastapi.testclient import TestClient
 
 from app.api import create_app
@@ -176,3 +178,25 @@ def test_request_limits_versions_and_top_k_are_strict() -> None:
     )
     assert oversized.status_code == 413
     assert oversized.json()["error"]["code"] == "request_too_large"
+
+
+def test_expired_caller_deadline_stops_work_before_body_processing() -> None:
+    client = _client()
+    expired = client.post(
+        "/internal/v1/query",
+        headers={
+            "X-Internal-Token": TOKEN,
+            "X-Moderation-Deadline-Epoch-Ms": str(int(time.time() * 1000) - 1),
+        },
+        data={
+            "revision": "not-loaded",
+            "topK": "5",
+            "descriptorVersion": ALGORITHM_VERSION,
+            "channel": "UNMASKED",
+            "exclusionBoxes": "[]",
+        },
+        files={"image": ("ignored.png", synthetic_image(902), "image/png")},
+    )
+
+    assert expired.status_code == 504
+    assert expired.json()["error"]["code"] == "processing_timeout"

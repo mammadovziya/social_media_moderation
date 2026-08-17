@@ -36,6 +36,16 @@ class ModerationPropertiesTest {
                         properties(0.70, 8_388_608, 9_437_184, 301, "http://ai"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("UPSTREAM_TIMEOUT_SECONDS");
+        assertThatThrownBy(() -> properties(
+                        0.70,
+                        8_388_608,
+                        9_437_184,
+                        30,
+                        "http://ai",
+                        "./config/blocked_terms.txt",
+                        30_000))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("MODERATION_FINALIZATION_RESERVE_MS");
     }
 
     @Test
@@ -58,12 +68,13 @@ class ModerationPropertiesTest {
                         8_388_608,
                         9_437_184,
                         30,
+                        3_000,
                         0.70,
                         "unsafe model id",
                         "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                         "gpt-4o-mini",
-                        "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba",
-                        "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216",
+                        "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8",
+                        "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d",
                         "gpt-5.6-terra",
                         "medium",
                         "image-adjudication-v5",
@@ -100,12 +111,13 @@ class ModerationPropertiesTest {
                         8_388_608,
                         9_437_184,
                         30,
+                        3_000,
                         0.70,
                         "omni-moderation-2024-09-26",
                         "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                         "gpt-5.6-terra",
-                        "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba",
-                        "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216",
+                        "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8",
+                        "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d",
                         "gpt-5.6-terra",
                         "medium",
                         "image-adjudication-v5",
@@ -141,18 +153,37 @@ class ModerationPropertiesTest {
             long timeoutSeconds,
             String aiUrl,
             String blockedTermsFile) {
+        return properties(
+                threshold,
+                maxImageBytes,
+                maxImageRequestBytes,
+                timeoutSeconds,
+                aiUrl,
+                blockedTermsFile,
+                Math.min(3_000, timeoutSeconds * 1_000 - 1));
+    }
+
+    private static ModerationProperties properties(
+            double threshold,
+            long maxImageBytes,
+            long maxImageRequestBytes,
+            long timeoutSeconds,
+            String aiUrl,
+            String blockedTermsFile,
+            long finalizationReserveMs) {
         return new ModerationProperties(
                 aiUrl,
                 "http://media",
                 maxImageBytes,
                 maxImageRequestBytes,
                 timeoutSeconds,
+                finalizationReserveMs,
                 threshold,
                 "omni-moderation-2024-09-26",
                 "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                 "gpt-5.6-terra",
-                "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba",
-                "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216",
+                "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8",
+                "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d",
                 "gpt-5.6-terra",
                 "medium",
                 "image-adjudication-v5",

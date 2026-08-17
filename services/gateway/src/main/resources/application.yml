@@ -17,7 +17,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       probes:
@@ -32,23 +32,34 @@ springdoc:
     operations-sorter: method
     tags-sorter: alpha
 
+gateway:
+  transport:
+    max-connections: ${GATEWAY_HTTP_MAX_CONNECTIONS:128}
+    max-connections-per-route: ${GATEWAY_HTTP_MAX_CONNECTIONS_PER_ROUTE:64}
+    connection-request-timeout-ms: ${GATEWAY_HTTP_CONNECTION_REQUEST_TIMEOUT_MS:1000}
+    connect-timeout-ms: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:3000}
+    keep-alive-seconds: ${GATEWAY_HTTP_KEEP_ALIVE_SECONDS:30}
+    idle-connection-evict-seconds: ${GATEWAY_HTTP_IDLE_CONNECTION_EVICT_SECONDS:30}
+
 moderation:
   ai-service-url: ${AI_SERVICE_URL:http://ai-service:8000}
   media-service-url: ${MEDIA_SERVICE_URL:http://media-service:8000}
   max-image-bytes: ${MAX_IMAGE_BYTES:8388608}
   max-image-request-bytes: ${MAX_IMAGE_REQUEST_BYTES:9437184}
   upstream-timeout-seconds: ${UPSTREAM_TIMEOUT_SECONDS:45}
+  finalization-reserve-ms: ${MODERATION_FINALIZATION_RESERVE_MS:3000}
+  policy-reload-interval-ms: ${POLICY_RELOAD_INTERVAL_MS:250}
   moderation-score-block-threshold: ${MODERATION_SCORE_BLOCK_THRESHOLD:0.15}
   expected-moderation-model: ${OPENAI_MODERATION_MODEL:omni-moderation-2024-09-26}
   expected-moderation-profile-sha256: ${OPENAI_MODERATION_PROFILE_SHA256:25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073}
   expected-classification-model: ${OPENAI_CUSTOM_MODEL:gpt-5.4-mini}
-  expected-classification-prompt-bundle-sha256: ${OPENAI_CLASSIFICATION_PROMPT_BUNDLE_SHA256:92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba}
-  expected-classification-profile-sha256: ${OPENAI_CLASSIFICATION_PROFILE_SHA256:4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216}
+  expected-classification-prompt-bundle-sha256: ${OPENAI_CLASSIFICATION_PROMPT_BUNDLE_SHA256:89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8}
+  expected-classification-profile-sha256: ${OPENAI_CLASSIFICATION_PROFILE_SHA256:d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d}
   expected-adjudication-model: ${OPENAI_ADJUDICATION_MODEL:gpt-5.6-terra}
   expected-adjudication-reasoning-effort: ${OPENAI_ADJUDICATION_REASONING_EFFORT:medium}
   expected-adjudication-prompt-version: image-adjudication-v5
   expected-adjudication-prompt-sha256: ${OPENAI_ADJUDICATION_PROMPT_SHA256:d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505}
-  expected-adjudication-profile-sha256: ${OPENAI_ADJUDICATION_PROFILE_SHA256:d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa}
+  expected-adjudication-profile-sha256: ${OPENAI_ADJUDICATION_PROFILE_SHA256:9efc6b244bba4ab2cd0ab0747e7a9fbf8f83d4479cf1310cdbbdeb5c0e3e3eef}
   expected-open-ai-timeout-seconds: ${OPENAI_TIMEOUT_SECONDS:30}
   blocked-terms-file: ${BLOCKED_TERMS_FILE:${user.dir}/config/blocked_terms.txt}
   restricted-political-entities-file: ${RESTRICTED_POLITICAL_ENTITIES_FILE:${user.dir}/config/restricted_political_entities.txt}

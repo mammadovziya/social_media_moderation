@@ -28,7 +28,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       probes:
@@ -48,6 +48,14 @@ media:
   ocr-max-spans: ${OCR_MAX_SPANS:256}
   ocr-min-confidence: ${OCR_MIN_CONFIDENCE:45.0}
   ocr-max-concurrent: ${OCR_MAX_CONCURRENT:2}
+  performance:
+    # At MAX_IMAGE_PIXELS, one PDQ call uses about 128 MiB of full-image float scratch.
+    # Validation caps analysis at 8 and PDQ at 4 for a conservative default 3 GiB envelope.
+    analysis-max-concurrent: ${MEDIA_ANALYSIS_MAX_CONCURRENT:4}
+    pdq-max-concurrent: ${MEDIA_PDQ_MAX_CONCURRENT:2}
+    acquire-timeout-millis: ${MEDIA_ACQUIRE_TIMEOUT_MILLIS:30000}
+    result-cache-max-entries: ${MEDIA_RESULT_CACHE_MAX_ENTRIES:512}
+    result-cache-ttl-seconds: ${MEDIA_RESULT_CACHE_TTL_SECONDS:3600}
 
 visual-retrieval:
   url: ${VISUAL_RETRIEVAL_URL:http://visual-retrieval:8000}

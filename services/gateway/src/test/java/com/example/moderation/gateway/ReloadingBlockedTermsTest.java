@@ -27,7 +27,7 @@ class ReloadingBlockedTermsTest {
     private Path directory;
 
     @Test
-    void shippedPolicyContainsSevenThousandSixHundredEightyNineDistinctCanonicalVulgarTerms()
+    void shippedPolicyContainsSevenThousandFourHundredNineteenDistinctCanonicalVulgarTerms()
             throws IOException {
         Path policy = repositoryFile("config/blocked_terms.txt");
         List<String> activeTerms = activePolicyLines(policy).stream()
@@ -39,7 +39,7 @@ class ReloadingBlockedTermsTest {
 
         assertThat(activeTerms).doesNotHaveDuplicates();
         assertThat(snapshot.termCount()).isEqualTo(activeTerms.size());
-        assertThat(snapshot.vulgarTermCount()).isEqualTo(7_689).isGreaterThanOrEqualTo(7_500);
+        assertThat(snapshot.vulgarTermCount()).isEqualTo(7_419).isGreaterThanOrEqualTo(7_000);
     }
 
     @Test
@@ -55,11 +55,9 @@ class ReloadingBlockedTermsTest {
         manual.addAll(vulgarTerms(lines.subList(end + 1, lines.size())));
         Set<String> generated = vulgarTerms(lines.subList(begin + 1, end));
 
-        assertThat(manual).hasSize(38);
-        assertThat(generated).hasSize(7_651);
+        assertThat(manual).hasSize(32);
+        assertThat(generated).hasSize(7_387);
         assertThat(generated).contains(
-                canonical("sikim ananı"),
-                canonical("anani sikim"),
                 canonical("ananısikim"),
                 canonical("ananı s i k i m"),
                 canonical("ananın götünü sikərəm"),
@@ -72,11 +70,12 @@ class ReloadingBlockedTermsTest {
                 canonical("yeyəsiniz poxumu"),
                 canonical("qəhbələri"),
                 canonical("amcıqları"),
+                canonical("cındırları"),
                 canonical("götləri"));
 
         Set<String> complete = new HashSet<>(manual);
         complete.addAll(generated);
-        assertThat(complete).hasSize(7_689);
+        assertThat(complete).hasSize(7_419);
         assertNoContiguousSubsumption(complete);
     }
 
@@ -96,11 +95,33 @@ class ReloadingBlockedTermsTest {
                 "vulgar|got",
                 "vulgar|mal",
                 "vulgar|meme",
-                "vulgar|peysər",
                 "vulgar|pox",
                 "vulgar|qoyun",
                 "vulgar|xiyar",
                 "vulgar|yap");
+    }
+
+    @Test
+    void shippedPolicyContainsTheReviewedStrictBareTerms() throws IOException {
+        List<String> entries = Files.readAllLines(
+                        repositoryFile("config/blocked_terms.txt"), StandardCharsets.UTF_8)
+                .stream()
+                .map(String::strip)
+                .map(String::toLowerCase)
+                .toList();
+
+        assertThat(entries).contains("vulgar|peysər", "vulgar|sikim");
+    }
+
+    @Test
+    void shippedStrictBareTermsBlockRegardlessOfSurroundingContext() throws IOException {
+        ReloadingBlockedTerms.Snapshot snapshot =
+                new ReloadingBlockedTerms(repositoryFile("config/blocked_terms.txt")).snapshot();
+
+        assertThat(snapshot.violation("Peysər nahiyəsinin anatomiyası müzakirə olundu."))
+                .isEqualTo(Violation.VULGAR);
+        assertThat(snapshot.violation("Dilçilik dərsində sikim sözü müzakirə edildi."))
+                .isEqualTo(Violation.VULGAR);
     }
 
     @Test
@@ -138,6 +159,96 @@ class ReloadingBlockedTermsTest {
         assertThat(snapshot.matches("redflag")).isFalse();
         assertThat(snapshot.violation("A BLOCKED word appears.")).isEqualTo(Violation.OTHER);
         assertThat(snapshot.violation("unblocked wording")).isEqualTo(Violation.NONE);
+    }
+
+    @Test
+    void shippedPolicyBlocksThirtyOneReviewedFoldedHandleSpellings() throws IOException {
+        ReloadingBlockedTerms.Snapshot snapshot =
+                new ReloadingBlockedTerms(repositoryFile("config/blocked_terms.txt")).snapshot();
+
+        List<String> deterministic = List.of(
+                "qehb3", "q3hb3", "qehb.e", "qeh.be", "q.ehbe", "qe.h.b.e", "q.e.eh.b.e",
+                "qehbebalasi", "qehb3_az",
+                "peyserbalasi", "peyser.balasi", "p.ey.ser_balasi",
+                "pidaraz", "pidar_az", "p1dar_az",
+                "qavat",
+                "dashag", "dashshaq", "dasshagimiye", "g1cd1llaq",
+                "ananis2k2m", "nesl2n2s2k2m", "am2naqoyum",
+                "peyser", "peys3r", "p3yser", "p.ey.ser", "peyser_official",
+                "s2m", "s2kim", "s2mvaryoxuvu");
+        assertThat(deterministic).hasSize(31);
+        for (String handle : deterministic) {
+            assertThat(snapshot.handleViolation(handle))
+                    .as("folded handle %s", handle)
+                    .isEqualTo(Violation.VULGAR);
+        }
+    }
+
+    @Test
+    void unreviewedHandleSpellingsRemainClassifierOwned() throws IOException {
+        ReloadingBlockedTerms.Snapshot snapshot =
+                new ReloadingBlockedTerms(repositoryFile("config/blocked_terms.txt")).snapshot();
+
+        for (String handle : List.of("neslivis2m", "s.i.keremeyvazli")) {
+            assertThat(snapshot.handleViolation(handle))
+                    .as("classifier-owned handle %s", handle)
+                    .isEqualTo(Violation.NONE);
+        }
+    }
+
+    @Test
+    void digitNoiseOutsideAComponentCannotConsumeItsExpansionBudget() throws IOException {
+        ReloadingBlockedTerms.Snapshot snapshot =
+                new ReloadingBlockedTerms(repositoryFile("config/blocked_terms.txt")).snapshot();
+
+        for (String handle : List.of(
+                "22222q3hb3balasi",
+                "q3hb3balasi22222",
+                "22222q3hb3balasi22222")) {
+            assertThat(snapshot.handleViolation(handle))
+                    .as("digit-noise handle %s", handle)
+                    .isEqualTo(Violation.VULGAR);
+        }
+    }
+
+    @Test
+    void separatorsInsideTransliterationDigraphsDoNotHideAVulgarTerm() throws IOException {
+        ReloadingBlockedTerms.Snapshot snapshot =
+                new ReloadingBlockedTerms(repositoryFile("config/blocked_terms.txt")).snapshot();
+
+        assertThat(snapshot.handleViolation("das.h.s.h.aq")).isEqualTo(Violation.VULGAR);
+    }
+
+    @Test
+    void lossyHandleFoldIndexesOnlyVulgarTerms() throws IOException {
+        Path file = write(
+                "VULGAR|vulgar sentinel\n"
+                        + "POLITICAL_CONTENT|public sentinel\n"
+                        + "ordinary sentinel\n");
+        ReloadingBlockedTerms.Snapshot snapshot = new ReloadingBlockedTerms(file).snapshot();
+
+        assertThat(snapshot.handleViolation("vulgar_s3ntinel")).isEqualTo(Violation.VULGAR);
+        assertThat(snapshot.handleViolation("public_s3ntinel")).isEqualTo(Violation.NONE);
+        assertThat(snapshot.handleViolation("ordinary_s3ntinel")).isEqualTo(Violation.NONE);
+        assertThat(snapshot.violation("public_sentinel"))
+                .isEqualTo(Violation.POLITICAL_CONTENT);
+        assertThat(snapshot.violation("ordinary_sentinel")).isEqualTo(Violation.OTHER);
+    }
+
+    @Test
+    void shippedPolicyLeavesReviewedOrdinaryHandlesAlone() throws IOException {
+        ReloadingBlockedTerms.Snapshot snapshot =
+                new ReloadingBlockedTerms(repositoryFile("config/blocked_terms.txt")).snapshot();
+
+        List<String> ordinary = List.of(
+                "value.investor", "kapital_bank", "pasha.bank", "bakuinvestor",
+                "eksikim", "margot", "gotham_fan", "amcasi", "sigortaci",
+                "agustos2024", "etf.trader", "s2p500", "invest2026");
+        for (String handle : ordinary) {
+            assertThat(snapshot.handleViolation(handle))
+                    .as("ordinary handle %s", handle)
+                    .isEqualTo(Violation.NONE);
+        }
     }
 
     private static Path repositoryFile(String relativePath) {
@@ -217,7 +328,6 @@ class ReloadingBlockedTermsTest {
                 "Qoyun əti və xiyar salatı sifariş edildi.",
                 "Dərmanı ağzına qoyum ki, su ilə içsin.",
                 "Günəş kremini sifətinə qoyum.",
-                "Peysər nahiyəsinin anatomiyası müzakirə olundu.",
                 "Yatırımcı şirketin bilançosunu ve gelirini inceledi.",
                 "Başını kuzeye çeviren pusula doğru çalışıyor.",
                 "Ananı aradığını söyledi ve telefonu kapattı.",

@@ -6,8 +6,14 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -24,10 +30,20 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.regex.Pattern;
+import org.apache.hc.client5.http.config.ConnectionConfig;
+import org.apache.hc.client5.http.config.RequestConfig;
+import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
+import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManager;
+import org.apache.hc.client5.http.impl.io.PoolingHttpClientConnectionManagerBuilder;
+import org.apache.hc.client5.http.protocol.HttpClientContext;
+import org.apache.hc.core5.util.TimeValue;
+import org.apache.hc.core5.util.Timeout;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
@@ -73,7 +89,7 @@ public class OpenAiRestClient implements AiProvider {
             "image-adjudication-v5";
     private static final String MODERATION_PROFILE_VERSION = "moderation-profile-v2";
     private static final String CLASSIFICATION_PROFILE_VERSION =
-            "classification-profile-v13";
+            "classification-profile-v14";
     private static final String IMAGE_ADJUDICATION_PROFILE_VERSION =
             "image-adjudication-profile-v11";
     private static final int CLASSIFICATION_MAX_OUTPUT_TOKENS = 320;
@@ -174,7 +190,7 @@ public class OpenAiRestClient implements AiProvider {
     private static final List<String> POLITICAL_CONTEXT_VALUES = List.of(
             "none", "investment_relevant", "general_politics", "uncertain");
     private static final String CLASSIFICATION_PROMPT_BUNDLE_SHA256 = sha256(
-            "classification-prompts-v9|post="
+            "classification-prompts-v10|post="
                     + sha256(POST_ANALYSIS_PROMPT)
                     + "|comment="
                     + sha256(COMMENT_ANALYSIS_PROMPT)
@@ -306,21 +322,117 @@ public class OpenAiRestClient implements AiProvider {
             "outputParser=strict-duplicate-detection;fail-on-trailing-tokens;exact-schema-fields-enums;image-adjudication-cross-field-contract-v5"));
 
     private final OpenAiProperties properties;
+    private final OpenAiTransportProperties transportProperties;
     private final RestClient client;
     private final ObjectMapper objectMapper;
+    private final MeterRegistry meterRegistry;
+    private final CloseableHttpClient httpClient;
+    private final PoolingHttpClientConnectionManager connectionManager;
+    private final OpenAiAdmissionController admissionController;
+    private final String moderationProfileSha256;
+    private final String classificationProfileSha256;
+    private final String adjudicationProfileSha256;
 
     public OpenAiRestClient(OpenAiProperties properties, ObjectMapper objectMapper) {
+        this(
+                properties,
+                OpenAiTransportProperties.defaults(),
+                objectMapper,
+                null);
+    }
+
+    @Autowired
+    public OpenAiRestClient(
+            OpenAiProperties properties,
+            OpenAiTransportProperties transportProperties,
+            ObjectMapper objectMapper,
+            MeterRegistry meterRegistry) {
         this.properties = properties;
+        this.transportProperties = transportProperties;
         this.objectMapper = objectMapper;
-        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-        Duration timeout = Duration.ofSeconds(properties.timeoutSeconds());
-        requestFactory.setConnectTimeout(timeout);
-        requestFactory.setReadTimeout(timeout);
+        this.meterRegistry = meterRegistry;
+        this.moderationProfileSha256 = configuredProfileSha256(
+                MODERATION_PROFILE_SHA256,
+                transportProperties.baseUrl().equals(OpenAiTransportProperties.DEFAULT_BASE_URL),
+                "baseUrl=" + transportProperties.baseUrl());
+        this.classificationProfileSha256 = configuredProfileSha256(
+                CLASSIFICATION_PROFILE_SHA256,
+                transportProperties.baseUrl().equals(OpenAiTransportProperties.DEFAULT_BASE_URL)
+                        && transportProperties.serviceTier().equals(
+                                OpenAiTransportProperties.DEFAULT_SERVICE_TIER)
+                        && transportProperties.classificationImageDetail().equals(
+                                OpenAiTransportProperties.DEFAULT_CLASSIFICATION_IMAGE_DETAIL)
+                        && !transportProperties.promptCacheKeyEnabled(),
+                "baseUrl=" + transportProperties.baseUrl(),
+                "serviceTier=" + transportProperties.serviceTier(),
+                "imageDetail=" + transportProperties.classificationImageDetail(),
+                "promptCacheKey=governed-profile-and-content-type-v1:"
+                        + transportProperties.promptCacheKeyEnabled());
+        this.adjudicationProfileSha256 = configuredProfileSha256(
+                IMAGE_ADJUDICATION_PROFILE_SHA256,
+                transportProperties.baseUrl().equals(OpenAiTransportProperties.DEFAULT_BASE_URL)
+                        && transportProperties.serviceTier().equals(
+                                OpenAiTransportProperties.DEFAULT_SERVICE_TIER)
+                        && transportProperties.adjudicationImageDetail().equals(
+                                OpenAiTransportProperties.DEFAULT_ADJUDICATION_IMAGE_DETAIL)
+                        && !transportProperties.promptCacheKeyEnabled(),
+                "baseUrl=" + transportProperties.baseUrl(),
+                "serviceTier=" + transportProperties.serviceTier(),
+                "imageDetail=" + transportProperties.adjudicationImageDetail(),
+                "promptCacheKey=governed-profile-v1:"
+                        + transportProperties.promptCacheKeyEnabled());
+
+        Timeout timeout = Timeout.ofSeconds(properties.timeoutSeconds());
+        ConnectionConfig connectionConfig = ConnectionConfig.custom()
+                .setConnectTimeout(timeout)
+                .setSocketTimeout(timeout)
+                .build();
+        this.connectionManager = PoolingHttpClientConnectionManagerBuilder.create()
+                .setMaxConnTotal(transportProperties.maxConnections())
+                .setMaxConnPerRoute(transportProperties.maxConnectionsPerRoute())
+                .setDefaultConnectionConfig(connectionConfig)
+                .build();
+        RequestConfig requestConfig = RequestConfig.custom()
+                .setConnectionRequestTimeout(Timeout.ofMilliseconds(
+                        transportProperties.connectionRequestTimeoutMillis()))
+                .setResponseTimeout(timeout)
+                .build();
+        this.httpClient = HttpClients.custom()
+                .setConnectionManager(connectionManager)
+                .setDefaultRequestConfig(requestConfig)
+                .disableAutomaticRetries()
+                .evictExpiredConnections()
+                .evictIdleConnections(TimeValue.ofSeconds(
+                        transportProperties.idleConnectionEvictSeconds()))
+                .addRequestInterceptorFirst((request, entity, context) -> {
+                    long remainingMillis = AiRequestDeadline.boundedWaitMillis(
+                            Duration.ofSeconds(properties.timeoutSeconds()).toMillis());
+                    if (remainingMillis <= 0) {
+                        throw new InterruptedIOException(
+                                "moderation request deadline expired before provider I/O");
+                    }
+                    HttpClientContext clientContext = HttpClientContext.adapt(context);
+                    RequestConfig bounded = RequestConfig.copy(
+                                    clientContext.getRequestConfigOrDefault())
+                            .setConnectTimeout(Timeout.ofMilliseconds(remainingMillis))
+                            .setConnectionRequestTimeout(Timeout.ofMilliseconds(Math.min(
+                                    remainingMillis,
+                                    transportProperties.connectionRequestTimeoutMillis())))
+                            .setResponseTimeout(Timeout.ofMilliseconds(remainingMillis))
+                            .build();
+                    clientContext.setRequestConfig(bounded);
+                })
+                .build();
+        HttpComponentsClientHttpRequestFactory requestFactory =
+                new HttpComponentsClientHttpRequestFactory(httpClient);
         this.client = RestClient.builder()
-                .baseUrl(OPENAI_BASE_URL)
+                .baseUrl(transportProperties.baseUrl())
                 .defaultHeader("Authorization", "Bearer " + properties.apiKey())
                 .requestFactory(requestFactory)
                 .build();
+        this.admissionController =
+                new OpenAiAdmissionController(transportProperties, meterRegistry);
+        registerPoolMetrics();
     }
 
     @Override
@@ -339,14 +451,14 @@ public class OpenAiRestClient implements AiProvider {
         details.put("provider", "openai");
         details.put("networkCalls", true);
         details.put("moderationModel", properties.moderationModel());
-        details.put("moderationProfileSha256", MODERATION_PROFILE_SHA256);
+        details.put("moderationProfileSha256", moderationProfileSha256);
         details.put("customModel", properties.customModel());
         details.put("classificationPromptBundleSha256", CLASSIFICATION_PROMPT_BUNDLE_SHA256);
-        details.put("classificationProfileSha256", CLASSIFICATION_PROFILE_SHA256);
+        details.put("classificationProfileSha256", classificationProfileSha256);
         details.put("adjudicationModel", properties.adjudicationModel());
         details.put("adjudicationReasoningEffort", properties.adjudicationReasoningEffort());
         details.put("adjudicationPromptSha256", IMAGE_ADJUDICATION_PROMPT_SHA256);
-        details.put("adjudicationProfileSha256", IMAGE_ADJUDICATION_PROFILE_SHA256);
+        details.put("adjudicationProfileSha256", adjudicationProfileSha256);
         details.put("openAiTimeoutSeconds", properties.timeoutSeconds());
         return Collections.unmodifiableMap(details);
     }
@@ -364,14 +476,26 @@ public class OpenAiRestClient implements AiProvider {
             String contentType,
             String text,
             String ocrText) {
+        return moderateImage(prepareImage(bytes, contentType), text, ocrText);
+    }
+
+    @Override
+    public PreparedImage prepareImage(byte[] bytes, String contentType) {
+        return new PreparedImage(bytes, contentType, dataUrl(bytes, contentType));
+    }
+
+    @Override
+    public Map<String, Object> moderateImage(
+            PreparedImage image,
+            String text,
+            String ocrText) {
         List<Map<String, Object>> input =
-                moderationImageInput(bytes, contentType, text, ocrText);
+                moderationImageInput(image, text, ocrText);
         return moderation(Map.of("model", properties.moderationModel(), "input", input));
     }
 
     private List<Map<String, Object>> moderationImageInput(
-            byte[] bytes,
-            String contentType,
+            PreparedImage image,
             String text,
             String ocrText) {
         List<Map<String, Object>> input = new ArrayList<>();
@@ -387,8 +511,16 @@ public class OpenAiRestClient implements AiProvider {
                 "type",
                 MODERATION_IMAGE_INPUT_TYPE,
                 "image_url",
-                Map.of("url", dataUrl(bytes, contentType))));
+                Map.of("url", requiredDataUrl(image))));
         return List.copyOf(input);
+    }
+
+    private List<Map<String, Object>> moderationImageInput(
+            byte[] bytes,
+            String contentType,
+            String text,
+            String ocrText) {
+        return moderationImageInput(prepareImage(bytes, contentType), text, ocrText);
     }
 
     private String moderationImageContext(String text, String ocrText) {
@@ -460,6 +592,25 @@ public class OpenAiRestClient implements AiProvider {
             String ocrStatus,
             boolean ocrConfidenceAccepted,
             boolean ocrTruncated) {
+        return classifyImage(
+                contentType,
+                prepareImage(bytes, imageContentType),
+                text,
+                ocrText,
+                ocrStatus,
+                ocrConfidenceAccepted,
+                ocrTruncated);
+    }
+
+    @Override
+    public Map<String, Object> classifyImage(
+            ContentType contentType,
+            PreparedImage image,
+            String text,
+            String ocrText,
+            String ocrStatus,
+            boolean ocrConfidenceAccepted,
+            boolean ocrTruncated) {
         String context = classificationImageContext(
                 contentType,
                 text,
@@ -473,9 +624,9 @@ public class OpenAiRestClient implements AiProvider {
                         "type",
                         RESPONSE_INPUT_IMAGE_TYPE,
                         "image_url",
-                        dataUrl(bytes, imageContentType),
+                        requiredDataUrl(image),
                         "detail",
-                        CLASSIFICATION_IMAGE_DETAIL));
+                        transportProperties.classificationImageDetail()));
         List<Map<String, Object>> input = List.of(
                 Map.of(
                         "role",
@@ -533,6 +684,23 @@ public class OpenAiRestClient implements AiProvider {
             String referenceEvidence,
             Map<String, Object> classifierSignal,
             boolean candidateTrigger) {
+        return adjudicateImage(
+                prepareImage(bytes, imageContentType),
+                text,
+                ocrText,
+                referenceEvidence,
+                classifierSignal,
+                candidateTrigger);
+    }
+
+    @Override
+    public Map<String, Object> adjudicateImage(
+            PreparedImage image,
+            String text,
+            String ocrText,
+            String referenceEvidence,
+            Map<String, Object> classifierSignal,
+            boolean candidateTrigger) {
         Set<String> allowedCandidateIds = candidateIds(referenceEvidence);
         boolean classifierPolicyTrigger =
                 AiAnalysisService.classifierRequiresAdjudication(classifierSignal);
@@ -543,8 +711,8 @@ public class OpenAiRestClient implements AiProvider {
                 Map.of("type", RESPONSE_INPUT_TEXT_TYPE, "text", context),
                 Map.of(
                         "type", RESPONSE_INPUT_IMAGE_TYPE,
-                        "image_url", dataUrl(bytes, imageContentType),
-                        "detail", ADJUDICATION_IMAGE_DETAIL));
+                        "image_url", requiredDataUrl(image),
+                        "detail", transportProperties.adjudicationImageDetail()));
         List<Map<String, Object>> input = List.of(
                 Map.of("role", DEVELOPER_ROLE, "content", IMAGE_ADJUDICATION_PROMPT),
                 Map.of("role", USER_ROLE, "content", userContent));
@@ -581,7 +749,8 @@ public class OpenAiRestClient implements AiProvider {
     }
 
     private Map<String, Object> moderation(Map<String, Object> payload) {
-        return normalizeModerationResponse(post(MODERATIONS_ENDPOINT, payload));
+        return normalizeModerationResponse(
+                post(MODERATIONS_ENDPOINT, payload, "moderation"));
     }
 
     private Map<String, Object> normalizeModerationResponse(JsonNode response) {
@@ -665,9 +834,10 @@ public class OpenAiRestClient implements AiProvider {
             ContentType contentType, List<Map<String, Object>> input) {
         Map<String, Object> payload = classificationPayload(contentType, input);
 
-        JsonNode response = post(RESPONSES_ENDPOINT, payload);
+        JsonNode response = post(RESPONSES_ENDPOINT, payload, "classification");
         String responseModel = requireResponseModel(response, properties.customModel());
         Map<String, Object> usage = OpenAiTokenUsage.from(response, responseModel);
+        recordTokenUsage("classification", usage);
         try {
             String outputText = findOutputText(response);
             Map<String, Object> parsed = parseStructuredDecision(outputText, contentType);
@@ -686,10 +856,18 @@ public class OpenAiRestClient implements AiProvider {
             ContentType contentType, List<Map<String, Object>> input) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("model", properties.customModel());
-        payload.put("service_tier", RESPONSE_SERVICE_TIER);
+        payload.put("service_tier", transportProperties.serviceTier());
         payload.put("store", STORE_RESPONSES);
         payload.put("max_output_tokens", CLASSIFICATION_MAX_OUTPUT_TOKENS);
         payload.put("input", input);
+        if (transportProperties.promptCacheKeyEnabled()) {
+            payload.put(
+                    "prompt_cache_key",
+                    promptCacheKey(
+                            "classification",
+                            classificationProfileSha256,
+                            contentType.name()));
+        }
         if (classificationUsesNoReasoning(properties.customModel())) {
             payload.put("reasoning", Map.of("effort", "none"));
         }
@@ -719,10 +897,11 @@ public class OpenAiRestClient implements AiProvider {
             String expectedMode) {
         Map<String, Object> payload = adjudicationPayload(input);
 
-        JsonNode response = post(RESPONSES_ENDPOINT, payload);
+        JsonNode response = post(RESPONSES_ENDPOINT, payload, "adjudication");
         String responseModel = requireResponseModel(
                 response, properties.adjudicationModel());
         Map<String, Object> usage = OpenAiTokenUsage.from(response, responseModel);
+        recordTokenUsage("adjudication", usage);
         try {
             String outputText = findOutputText(response);
             ImageAdjudication parsed =
@@ -742,10 +921,18 @@ public class OpenAiRestClient implements AiProvider {
     private Map<String, Object> adjudicationPayload(List<Map<String, Object>> input) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("model", properties.adjudicationModel());
-        payload.put("service_tier", RESPONSE_SERVICE_TIER);
+        payload.put("service_tier", transportProperties.serviceTier());
         payload.put("store", STORE_RESPONSES);
         payload.put("max_output_tokens", ADJUDICATION_MAX_OUTPUT_TOKENS);
         payload.put("input", input);
+        if (transportProperties.promptCacheKeyEnabled()) {
+            payload.put(
+                    "prompt_cache_key",
+                    promptCacheKey(
+                            "adjudication",
+                            adjudicationProfileSha256,
+                            ContentType.POST.name()));
+        }
         if (properties.adjudicationReasoningEffort() != null
                 && !properties.adjudicationReasoningEffort().isBlank()) {
             payload.put(
@@ -909,11 +1096,31 @@ public class OpenAiRestClient implements AiProvider {
         }
     }
 
-    private JsonNode post(String uri, Map<String, Object> payload) {
+    private JsonNode post(
+            String uri,
+            Map<String, Object> payload,
+            String stage) {
         if (!properties.configured()) {
             throw new OpenAiResponseException("OPENAI_API_KEY is not configured");
         }
+        if (AiRequestDeadline.boundedWaitMillis(
+                        Duration.ofSeconds(properties.timeoutSeconds()).toMillis())
+                <= 0) {
+            throw new OpenAiResponseException(
+                    "moderation request deadline expired before provider admission");
+        }
+        String model = String.valueOf(payload.getOrDefault("model", "unavailable"));
+        return admissionController.execute(
+                model, stage, () -> executePost(uri, payload, stage));
+    }
+
+    private JsonNode executePost(
+            String uri,
+            Map<String, Object> payload,
+            String stage) {
         String clientRequestId = UUID.randomUUID().toString();
+        long started = System.nanoTime();
+        String outcome = "success";
         try {
             JsonNode body = client.post()
                     .uri(uri)
@@ -927,19 +1134,24 @@ public class OpenAiRestClient implements AiProvider {
                         "OpenAI returned an empty response endpoint={} clientRequestId={}",
                         uri,
                         clientRequestId);
+                outcome = "empty_response";
                 throw new OpenAiResponseException("OpenAI returned an empty response");
             }
             return body;
         } catch (RestClientResponseException exception) {
+            outcome = "http_error";
             logHttpError(uri, clientRequestId, exception);
             throw new OpenAiResponseException("OpenAI returned an HTTP error", exception);
         } catch (RestClientException exception) {
+            outcome = "network_error";
             log.error(
                     "OpenAI network request failed endpoint={} clientRequestId={} error={}",
                     uri,
                     clientRequestId,
                     sanitizeLogValue(exception.getMessage()));
             throw new OpenAiResponseException("OpenAI network request failed", exception);
+        } finally {
+            recordProviderRequest(stage, outcome, System.nanoTime() - started);
         }
     }
 
@@ -1180,6 +1392,116 @@ public class OpenAiRestClient implements AiProvider {
 
     private String dataUrl(byte[] bytes, String contentType) {
         return "data:" + contentType + ";base64," + Base64.getEncoder().encodeToString(bytes);
+    }
+
+    private String requiredDataUrl(PreparedImage image) {
+        return image.dataUrl() == null || image.dataUrl().isBlank()
+                ? dataUrl(image.bytes(), image.contentType())
+                : image.dataUrl();
+    }
+
+    private static String promptCacheKey(
+            String stage,
+            String governedProfileSha256,
+            String contentType) {
+        return "moderation-" + sha256(String.join(
+                        "|",
+                        "prompt-cache-key-v1",
+                        stage,
+                        governedProfileSha256,
+                        contentType))
+                .substring(0, 48);
+    }
+
+    private static String configuredProfileSha256(
+            String defaultProfileSha256,
+            boolean defaultConfiguration,
+            String... governedOverrides) {
+        if (defaultConfiguration) {
+            return defaultProfileSha256;
+        }
+        return sha256(String.join(
+                "\n",
+                "configured-profile-v1",
+                "defaultProfileSha256=" + defaultProfileSha256,
+                String.join("\n", governedOverrides)));
+    }
+
+    private void registerPoolMetrics() {
+        if (meterRegistry == null) {
+            return;
+        }
+        Gauge.builder(
+                        "moderation.ai.http.pool.connections",
+                        connectionManager,
+                        manager -> manager.getTotalStats().getLeased())
+                .description("OpenAI pooled HTTP connections")
+                .tag("state", "leased")
+                .register(meterRegistry);
+        Gauge.builder(
+                        "moderation.ai.http.pool.connections",
+                        connectionManager,
+                        manager -> manager.getTotalStats().getAvailable())
+                .description("OpenAI pooled HTTP connections")
+                .tag("state", "available")
+                .register(meterRegistry);
+        Gauge.builder(
+                        "moderation.ai.http.pool.connections",
+                        connectionManager,
+                        manager -> manager.getTotalStats().getPending())
+                .description("OpenAI pooled HTTP connections")
+                .tag("state", "pending")
+                .register(meterRegistry);
+        Gauge.builder(
+                        "moderation.ai.http.pool.connections",
+                        connectionManager,
+                        manager -> manager.getTotalStats().getMax())
+                .description("OpenAI pooled HTTP connections")
+                .tag("state", "max")
+                .register(meterRegistry);
+    }
+
+    private void recordProviderRequest(String stage, String outcome, long nanos) {
+        if (meterRegistry != null) {
+            Timer.builder("moderation.ai.provider.request.duration")
+                    .description("OpenAI HTTP request duration")
+                    .tag("stage", stage)
+                    .tag("outcome", outcome)
+                    .register(meterRegistry)
+                    .record(Duration.ofNanos(nanos));
+        }
+    }
+
+    private void recordTokenUsage(String stage, Map<String, Object> usage) {
+        if (meterRegistry == null) {
+            return;
+        }
+        Map<String, String> tokenTypes = Map.of(
+                "inputTokens", "input",
+                "cachedInputTokens", "cached_input",
+                "cacheWriteTokens", "cache_write",
+                "outputTokens", "output",
+                "reasoningTokens", "reasoning");
+        tokenTypes.forEach((field, tokenType) -> {
+            Object value = usage.get(field);
+            if (value instanceof Number number && number.longValue() > 0) {
+                Counter.builder("moderation.ai.provider.tokens")
+                        .description("OpenAI provider tokens reported by usage type")
+                        .tag("stage", stage)
+                        .tag("type", tokenType)
+                        .register(meterRegistry)
+                        .increment(number.doubleValue());
+            }
+        });
+    }
+
+    @PreDestroy
+    public void close() {
+        try {
+            httpClient.close();
+        } catch (IOException exception) {
+            log.warn("Could not close OpenAI HTTP client cleanly");
+        }
     }
 
     private static String truncate(String value, int length) {

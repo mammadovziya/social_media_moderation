@@ -48,14 +48,41 @@ public class ReferenceAssetIndex {
         return new ExactSearchResult(
                 current.revision(),
                 !current.assets().isEmpty(),
-                exactCandidates(current, normalizedSha));
+                exactCandidates(current, normalizedSha),
+                current);
     }
 
     public SearchResult findCandidates(String sha256, String fullPdq, String maskedPdq) {
+        normalizeFingerprint(sha256, "SHA-256");
+        PdqHashValue.parse(fullPdq);
+        PdqHashValue.parse(maskedPdq);
+        return findCandidates(currentIndex(), sha256, fullPdq, maskedPdq);
+    }
+
+    SearchResult findCandidates(
+            ExactSearchResult exactSearch,
+            String sha256,
+            String fullPdq,
+            String maskedPdq) {
+        CachedIndex snapshot = exactSearch.snapshot != null
+                ? exactSearch.snapshot
+                : currentIndex();
+        if (snapshot.revision() != exactSearch.revision()) {
+            throw new IllegalStateException(
+                    "Exact and perceptual reference searches must use one revision");
+        }
+        return findCandidates(snapshot, sha256, fullPdq, maskedPdq);
+    }
+
+    void prewarm() {
+        currentIndex();
+    }
+
+    private SearchResult findCandidates(
+            CachedIndex current, String sha256, String fullPdq, String maskedPdq) {
         String normalizedSha = normalizeFingerprint(sha256, "SHA-256");
         PdqHashValue fullTarget = PdqHashValue.parse(fullPdq);
         PdqHashValue maskedTarget = PdqHashValue.parse(maskedPdq);
-        CachedIndex current = currentIndex();
 
         List<ModerationReferenceAsset> exact = exactCandidates(current, normalizedSha);
         List<Candidate> perceptual = new ArrayList<>();
@@ -201,15 +228,43 @@ public class ReferenceAssetIndex {
         }
     }
 
-    public record ExactSearchResult(
-            long revision,
-            boolean hasReferences,
-            List<ModerationReferenceAsset> exactSha256Candidates) {
-        public ExactSearchResult {
+    public static final class ExactSearchResult {
+        private final long revision;
+        private final boolean hasReferences;
+        private final List<ModerationReferenceAsset> exactSha256Candidates;
+        private final CachedIndex snapshot;
+
+        public ExactSearchResult(
+                long revision,
+                boolean hasReferences,
+                List<ModerationReferenceAsset> exactSha256Candidates) {
+            this(revision, hasReferences, exactSha256Candidates, null);
+        }
+
+        private ExactSearchResult(
+                long revision,
+                boolean hasReferences,
+                List<ModerationReferenceAsset> exactSha256Candidates,
+                CachedIndex snapshot) {
             if (revision < 0) {
                 throw new IllegalArgumentException("Reference revision must not be negative");
             }
-            exactSha256Candidates = List.copyOf(exactSha256Candidates);
+            this.revision = revision;
+            this.hasReferences = hasReferences;
+            this.exactSha256Candidates = List.copyOf(exactSha256Candidates);
+            this.snapshot = snapshot;
+        }
+
+        public long revision() {
+            return revision;
+        }
+
+        public boolean hasReferences() {
+            return hasReferences;
+        }
+
+        public List<ModerationReferenceAsset> exactSha256Candidates() {
+            return exactSha256Candidates;
         }
 
         ModerationReferenceAsset authoritativeExactMatch() {

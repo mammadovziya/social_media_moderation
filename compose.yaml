@@ -19,6 +19,9 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+    cpus: "${POSTGRES_CPUS:-1.0}"
+    mem_limit: "${POSTGRES_MEMORY_LIMIT:-1g}"
+    pids_limit: ${POSTGRES_PIDS_LIMIT:-256}
 
   gateway:
     build:
@@ -33,14 +36,21 @@ services:
       OPENAI_MODERATION_MODEL: ${OPENAI_MODERATION_MODEL:-omni-moderation-2024-09-26}
       OPENAI_MODERATION_PROFILE_SHA256: ${OPENAI_MODERATION_PROFILE_SHA256:-25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073}
       OPENAI_CUSTOM_MODEL: ${OPENAI_CUSTOM_MODEL:-gpt-5.4-mini}
-      OPENAI_CLASSIFICATION_PROMPT_BUNDLE_SHA256: ${OPENAI_CLASSIFICATION_PROMPT_BUNDLE_SHA256:-92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba}
-      OPENAI_CLASSIFICATION_PROFILE_SHA256: ${OPENAI_CLASSIFICATION_PROFILE_SHA256:-4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216}
+      OPENAI_CLASSIFICATION_PROMPT_BUNDLE_SHA256: ${OPENAI_CLASSIFICATION_PROMPT_BUNDLE_SHA256:-89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8}
+      OPENAI_CLASSIFICATION_PROFILE_SHA256: ${OPENAI_CLASSIFICATION_PROFILE_SHA256:-d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d}
       OPENAI_ADJUDICATION_MODEL: ${OPENAI_ADJUDICATION_MODEL:-gpt-5.6-terra}
       OPENAI_ADJUDICATION_REASONING_EFFORT: ${OPENAI_ADJUDICATION_REASONING_EFFORT:-medium}
       OPENAI_ADJUDICATION_PROMPT_SHA256: ${OPENAI_ADJUDICATION_PROMPT_SHA256:-d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505}
-      OPENAI_ADJUDICATION_PROFILE_SHA256: ${OPENAI_ADJUDICATION_PROFILE_SHA256:-d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa}
+      OPENAI_ADJUDICATION_PROFILE_SHA256: ${OPENAI_ADJUDICATION_PROFILE_SHA256:-9efc6b244bba4ab2cd0ab0747e7a9fbf8f83d4479cf1310cdbbdeb5c0e3e3eef}
       OPENAI_TIMEOUT_SECONDS: ${OPENAI_TIMEOUT_SECONDS:-30}
       UPSTREAM_TIMEOUT_SECONDS: ${UPSTREAM_TIMEOUT_SECONDS:-45}
+      MODERATION_FINALIZATION_RESERVE_MS: ${MODERATION_FINALIZATION_RESERVE_MS:-3000}
+      GATEWAY_HTTP_MAX_CONNECTIONS: ${GATEWAY_HTTP_MAX_CONNECTIONS:-128}
+      GATEWAY_HTTP_MAX_CONNECTIONS_PER_ROUTE: ${GATEWAY_HTTP_MAX_CONNECTIONS_PER_ROUTE:-64}
+      GATEWAY_HTTP_CONNECTION_REQUEST_TIMEOUT_MS: ${GATEWAY_HTTP_CONNECTION_REQUEST_TIMEOUT_MS:-1000}
+      GATEWAY_HTTP_CONNECT_TIMEOUT_MS: ${GATEWAY_HTTP_CONNECT_TIMEOUT_MS:-3000}
+      GATEWAY_HTTP_KEEP_ALIVE_SECONDS: ${GATEWAY_HTTP_KEEP_ALIVE_SECONDS:-30}
+      GATEWAY_HTTP_IDLE_CONNECTION_EVICT_SECONDS: ${GATEWAY_HTTP_IDLE_CONNECTION_EVICT_SECONDS:-30}
       BLOCKED_TERMS_FILE: /app/config/blocked_terms.txt
       RESTRICTED_POLITICAL_ENTITIES_FILE: /app/config/restricted_political_entities.txt
       MODERATION_INTERNAL_RESPONSE_TOKEN: ${MODERATION_INTERNAL_RESPONSE_TOKEN:-}
@@ -63,12 +73,15 @@ services:
       start_period: 120s
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:mode=1777
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+    cpus: "${GATEWAY_CPUS:-1.5}"
+    mem_limit: "${GATEWAY_MEMORY_LIMIT:-1g}"
+    pids_limit: ${GATEWAY_PIDS_LIMIT:-256}
 
   media-service:
     build:
@@ -91,6 +104,11 @@ services:
       OCR_MAX_SPANS: ${OCR_MAX_SPANS:-256}
       OCR_MIN_CONFIDENCE: ${OCR_MIN_CONFIDENCE:-45.0}
       OCR_MAX_CONCURRENT: ${OCR_MAX_CONCURRENT:-2}
+      MEDIA_ANALYSIS_MAX_CONCURRENT: ${MEDIA_ANALYSIS_MAX_CONCURRENT:-4}
+      MEDIA_PDQ_MAX_CONCURRENT: ${MEDIA_PDQ_MAX_CONCURRENT:-2}
+      MEDIA_ACQUIRE_TIMEOUT_MILLIS: ${MEDIA_ACQUIRE_TIMEOUT_MILLIS:-30000}
+      MEDIA_RESULT_CACHE_MAX_ENTRIES: ${MEDIA_RESULT_CACHE_MAX_ENTRIES:-512}
+      MEDIA_RESULT_CACHE_TTL_SECONDS: ${MEDIA_RESULT_CACHE_TTL_SECONDS:-3600}
       AI_WORK_IDEMPOTENCY_CLEANUP_ENABLED: ${AI_WORK_IDEMPOTENCY_CLEANUP_ENABLED:-true}
       AI_WORK_IDEMPOTENCY_CLEANUP_INTERVAL_MILLIS: ${AI_WORK_IDEMPOTENCY_CLEANUP_INTERVAL_MILLIS:-300000}
       AI_WORK_IDEMPOTENCY_CLEANUP_BATCH_SIZE: ${AI_WORK_IDEMPOTENCY_CLEANUP_BATCH_SIZE:-500}
@@ -122,12 +140,15 @@ services:
       start_period: 120s
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:mode=1777
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+    cpus: "${MEDIA_CPUS:-2.0}"
+    mem_limit: "${MEDIA_MEMORY_LIMIT:-3g}"
+    pids_limit: ${MEDIA_PIDS_LIMIT:-512}
 
   visual-retrieval:
     build:
@@ -152,12 +173,15 @@ services:
       start_period: 30s
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:mode=1777
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+    cpus: "${VISUAL_CPUS:-2.0}"
+    mem_limit: "${VISUAL_MEMORY_LIMIT:-2g}"
+    pids_limit: ${VISUAL_PIDS_LIMIT:-256}
 
   ai-service:
     build:
@@ -165,11 +189,24 @@ services:
       dockerfile: services/ai/Dockerfile
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_MODERATION_MODEL: ${OPENAI_MODERATION_MODEL:-omni-moderation-2024-09-26}
       OPENAI_CUSTOM_MODEL: ${OPENAI_CUSTOM_MODEL:-gpt-5.4-mini}
       OPENAI_ADJUDICATION_MODEL: ${OPENAI_ADJUDICATION_MODEL:-gpt-5.6-terra}
       OPENAI_ADJUDICATION_REASONING_EFFORT: ${OPENAI_ADJUDICATION_REASONING_EFFORT:-medium}
+      OPENAI_SERVICE_TIER: ${OPENAI_SERVICE_TIER:-default}
+      OPENAI_CLASSIFICATION_IMAGE_DETAIL: ${OPENAI_CLASSIFICATION_IMAGE_DETAIL:-high}
+      OPENAI_ADJUDICATION_IMAGE_DETAIL: ${OPENAI_ADJUDICATION_IMAGE_DETAIL:-original}
+      OPENAI_PROMPT_CACHE_KEY_ENABLED: ${OPENAI_PROMPT_CACHE_KEY_ENABLED:-true}
       OPENAI_TIMEOUT_SECONDS: ${OPENAI_TIMEOUT_SECONDS:-30}
+      OPENAI_MAX_CONNECTIONS: ${OPENAI_MAX_CONNECTIONS:-32}
+      OPENAI_MAX_CONNECTIONS_PER_ROUTE: ${OPENAI_MAX_CONNECTIONS_PER_ROUTE:-32}
+      OPENAI_CONNECTION_REQUEST_TIMEOUT_MILLIS: ${OPENAI_CONNECTION_REQUEST_TIMEOUT_MILLIS:-500}
+      OPENAI_IDLE_CONNECTION_EVICT_SECONDS: ${OPENAI_IDLE_CONNECTION_EVICT_SECONDS:-30}
+      OPENAI_MAX_CONCURRENT_REQUESTS: ${OPENAI_MAX_CONCURRENT_REQUESTS:-32}
+      OPENAI_MAX_CONCURRENT_REQUESTS_PER_MODEL: ${OPENAI_MAX_CONCURRENT_REQUESTS_PER_MODEL:-16}
+      OPENAI_MAX_QUEUED_REQUESTS: ${OPENAI_MAX_QUEUED_REQUESTS:-64}
+      OPENAI_ADMISSION_TIMEOUT_MILLIS: ${OPENAI_ADMISSION_TIMEOUT_MILLIS:-250}
       MAX_IMAGE_BYTES: ${MAX_IMAGE_BYTES:-8388608}
       MAX_IMAGE_REQUEST_BYTES: ${MAX_IMAGE_REQUEST_BYTES:-9437184}
     expose:
@@ -182,12 +219,102 @@ services:
       start_period: 120s
     read_only: true
     tmpfs:
-      - /tmp
+      - /tmp:mode=1777
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+    cpus: "${AI_CPUS:-1.5}"
+    mem_limit: "${AI_MEMORY_LIMIT:-2g}"
+    pids_limit: ${AI_PIDS_LIMIT:-256}
+
+  fake-openai:
+    profiles: ["performance"]
+    build:
+      context: ./tests/performance/fake-openai
+      dockerfile: Dockerfile
+    environment:
+      FAKE_OPENAI_DELAY_MS: ${FAKE_OPENAI_DELAY_MS:-50}
+      FAKE_OPENAI_ERROR_EVERY: ${FAKE_OPENAI_ERROR_EVERY:-0}
+      FAKE_OPENAI_ERROR_STATUS: ${FAKE_OPENAI_ERROR_STATUS:-429}
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)"
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: "${FAKE_OPENAI_CPUS:-1.0}"
+    mem_limit: "${FAKE_OPENAI_MEMORY_LIMIT:-256m}"
+    pids_limit: ${FAKE_OPENAI_PIDS_LIMIT:-128}
+
+  k6:
+    profiles: ["load"]
+    image: grafana/k6:0.57.0
+    restart: "no"
+    command: ["run", "/scripts/moderation.js"]
+    environment:
+      BASE_URL: http://gateway:8000
+      WORKLOAD: ${PERF_WORKLOAD:-mixed}
+      RATE: ${PERF_RATE:-10}
+      DURATION: ${PERF_DURATION:-2m}
+      PRE_ALLOCATED_VUS: ${PERF_PRE_ALLOCATED_VUS:-50}
+      MAX_VUS: ${PERF_MAX_VUS:-100}
+      REQUEST_TIMEOUT: ${PERF_REQUEST_TIMEOUT:-75s}
+      P95_THRESHOLD: ${PERF_P95_THRESHOLD:-p(95)<5000}
+    volumes:
+      - ./tests/performance:/scripts:ro
+    depends_on:
+      gateway:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: "${K6_CPUS:-1.0}"
+    mem_limit: "${K6_MEMORY_LIMIT:-512m}"
+    pids_limit: ${K6_PIDS_LIMIT:-256}
+
+  prometheus:
+    profiles: ["observability"]
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-7d}
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - moderation-prometheus-data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: "${PROMETHEUS_CPUS:-0.5}"
+    mem_limit: "${PROMETHEUS_MEMORY_LIMIT:-512m}"
+    pids_limit: ${PROMETHEUS_PIDS_LIMIT:-128}
 
 volumes:
   moderation-db-data:
+  moderation-prometheus-data:

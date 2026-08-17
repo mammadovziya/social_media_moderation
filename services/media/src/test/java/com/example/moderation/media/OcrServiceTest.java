@@ -14,10 +14,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class OcrServiceTest {
+    private static final String TEST_RUNTIME_PROFILE = "test-tsv";
+
     @Test
     void tesseractRuntimeProfileUsesTheReportedBinaryVersion() {
         assertThat(TesseractOcrEngine.runtimeProfile("tesseract 5.3.4"))
@@ -33,7 +36,7 @@ class OcrServiceTest {
     @Test
     void disabledOcrDoesNotCallTheEngine() {
         OcrEngine engine = mock(OcrEngine.class);
-        OcrService service = new OcrService(properties(false, 20_000, 512, 2), engine);
+        OcrService service = service(properties(false, 20_000, 512, 2), engine);
 
         assertThat(service.ready()).isTrue();
         assertThat(service.readinessStatus()).isEqualTo("disabled");
@@ -47,7 +50,7 @@ class OcrServiceTest {
     @Test
     void returnsNormalizedTextConfidenceDigestAndBoundedSpans() throws Exception {
         OcrEngine engine = mock(OcrEngine.class);
-        when(engine.ready("aze+eng+rus+tur", Duration.ofSeconds(10))).thenReturn(true);
+        markReady(engine);
         when(engine.extract(
                         image,
                         "aze+eng+rus+tur",
@@ -58,8 +61,8 @@ class OcrServiceTest {
                         List.of(new OcrSpan(
                                 "  Salam\t Bakı\n\uFB01kir\f  ", 92.5, 3, 4, 30, 30)),
                         false,
-                        "test-tsv"));
-        OcrService service = new OcrService(properties(true, 20_000, 512, 2), engine);
+                        TEST_RUNTIME_PROFILE));
+        OcrService service = service(properties(true, 20_000, 512, 2), engine);
 
         Map<String, Object> response = service.analyze(image).asMap();
 
@@ -85,10 +88,10 @@ class OcrServiceTest {
     @Test
     void blankOutputReturnsNoText() throws Exception {
         OcrEngine engine = mock(OcrEngine.class);
-        when(engine.ready("aze+eng+rus+tur", Duration.ofSeconds(10))).thenReturn(true);
+        markReady(engine);
         when(engine.extract(image, "aze+eng+rus+tur", Duration.ofSeconds(10), 20_000, 512))
-                .thenReturn(OcrDocument.empty());
-        OcrService service = new OcrService(properties(true, 20_000, 512, 2), engine);
+                .thenReturn(new OcrDocument(List.of(), false, TEST_RUNTIME_PROFILE));
+        OcrService service = service(properties(true, 20_000, 512, 2), engine);
 
         assertThat(service.analyze(image).asMap())
                 .containsEntry("status", "no_text")
@@ -99,13 +102,13 @@ class OcrServiceTest {
     @Test
     void exposesLowConfidenceAsIncompletePolicyEvidence() throws Exception {
         OcrEngine engine = mock(OcrEngine.class);
-        when(engine.ready("aze+eng+rus+tur", Duration.ofSeconds(10))).thenReturn(true);
+        markReady(engine);
         when(engine.extract(image, "aze+eng+rus+tur", Duration.ofSeconds(10), 20_000, 512))
                 .thenReturn(new OcrDocument(
                         List.of(new OcrSpan("unclear", 30.0, 1, 1, 8, 8)),
                         false,
-                        "test-tsv"));
-        OcrService service = new OcrService(properties(true, 20_000, 512, 2), engine);
+                        TEST_RUNTIME_PROFILE));
+        OcrService service = service(properties(true, 20_000, 512, 2), engine);
 
         assertThat(service.analyze(image).asMap())
                 .containsEntry("status", "ok")
@@ -117,13 +120,13 @@ class OcrServiceTest {
     @Test
     void propagatesTruncationAsIncompletePolicyEvidence() throws Exception {
         OcrEngine engine = mock(OcrEngine.class);
-        when(engine.ready("aze+eng+rus+tur", Duration.ofSeconds(10))).thenReturn(true);
+        markReady(engine);
         when(engine.extract(image, "aze+eng+rus+tur", Duration.ofSeconds(10), 20_000, 512))
                 .thenReturn(new OcrDocument(
                         List.of(new OcrSpan("partial", 90.0, 1, 1, 8, 8)),
                         true,
-                        "test-tsv"));
-        OcrService service = new OcrService(properties(true, 20_000, 512, 2), engine);
+                        TEST_RUNTIME_PROFILE));
+        OcrService service = service(properties(true, 20_000, 512, 2), engine);
 
         assertThat(service.analyze(image).asMap())
                 .containsEntry("status", "ok")
@@ -134,10 +137,10 @@ class OcrServiceTest {
     @Test
     void engineFailureDoesNotFailTheMediaRequest() throws Exception {
         OcrEngine engine = mock(OcrEngine.class);
-        when(engine.ready("aze+eng+rus+tur", Duration.ofSeconds(10))).thenReturn(true);
+        markReady(engine);
         when(engine.extract(image, "aze+eng+rus+tur", Duration.ofSeconds(10), 20_000, 512))
                 .thenThrow(new java.io.IOException("failed"));
-        OcrService service = new OcrService(properties(true, 20_000, 512, 2), engine);
+        OcrService service = service(properties(true, 20_000, 512, 2), engine);
 
         assertThat(service.analyze(image).asMap())
                 .containsEntry("status", "error")
@@ -147,7 +150,7 @@ class OcrServiceTest {
     @Test
     void enabledOcrIsNotReadyWhenTheEngineIsMissing() throws Exception {
         OcrEngine engine = mock(OcrEngine.class);
-        OcrService service = new OcrService(properties(true, 20_000, 512, 2), engine);
+        OcrService service = service(properties(true, 20_000, 512, 2), engine);
 
         assertThat(service.ready()).isFalse();
         assertThat(service.readinessStatus()).isEqualTo("unavailable");
@@ -161,7 +164,7 @@ class OcrServiceTest {
         OcrEngine engine = mock(OcrEngine.class);
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        when(engine.ready("aze+eng+rus+tur", Duration.ofSeconds(10))).thenReturn(true);
+        markReady(engine);
         when(engine.extract(image, "aze+eng+rus+tur", Duration.ofSeconds(10), 20_000, 512))
                 .thenAnswer(invocation -> {
                     entered.countDown();
@@ -169,9 +172,9 @@ class OcrServiceTest {
                     return new OcrDocument(
                             List.of(new OcrSpan("first", 90, 1, 1, 5, 5)),
                             false,
-                            "test-tsv");
+                            TEST_RUNTIME_PROFILE);
                 });
-        OcrService service = new OcrService(properties(true, 20_000, 512, 1), engine);
+        OcrService service = service(properties(true, 20_000, 512, 1), engine);
         AtomicReference<OcrResult> first = new AtomicReference<>();
         Thread thread = Thread.ofVirtual().start(() -> first.set(service.analyze(image)));
 
@@ -180,6 +183,56 @@ class OcrServiceTest {
         release.countDown();
         thread.join(2_000);
         assertThat(first.get().status()).isEqualTo("ok");
+    }
+
+    @Test
+    void waitsForAnOcrSlotWhenItBecomesAvailableBeforeTheCallerDeadline() throws Exception {
+        OcrEngine engine = mock(OcrEngine.class);
+        CountDownLatch firstEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        AtomicInteger calls = new AtomicInteger();
+        markReady(engine);
+        when(engine.extract(image, "aze+eng+rus+tur", Duration.ofSeconds(10), 20_000, 512))
+                .thenAnswer(invocation -> {
+                    if (calls.incrementAndGet() == 1) {
+                        firstEntered.countDown();
+                        releaseFirst.await(2, TimeUnit.SECONDS);
+                    }
+                    return new OcrDocument(
+                            List.of(new OcrSpan("text", 90, 1, 1, 5, 5)),
+                            false,
+                            TEST_RUNTIME_PROFILE);
+                });
+        OcrService service = service(properties(true, 20_000, 512, 1), engine, 1_000);
+        Thread first = Thread.ofVirtual().start(() -> service.analyze(image));
+
+        assertThat(firstEntered.await(1, TimeUnit.SECONDS)).isTrue();
+        Thread releaser = Thread.ofVirtual().start(() -> {
+            try {
+                Thread.sleep(50);
+                releaseFirst.countDown();
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        OcrResult second = service.analyze(
+                image,
+                new ModerationDeadline(System.currentTimeMillis() + 1_000));
+
+        first.join(2_000);
+        releaser.join(2_000);
+        assertThat(second.status()).isEqualTo("ok");
+        assertThat(calls).hasValue(2);
+    }
+
+    @Test
+    void exposesTheEngineProfileCapturedByReadiness() {
+        OcrEngine engine = mock(OcrEngine.class);
+        markReady(engine);
+
+        OcrService service = service(properties(true, 20_000, 512, 2), engine);
+
+        assertThat(service.runtimeProfile()).isEqualTo(TEST_RUNTIME_PROFILE);
     }
 
     @Test
@@ -268,5 +321,22 @@ class OcrServiceTest {
                 maxSpans,
                 45.0,
                 maxConcurrent);
+    }
+
+    private static void markReady(OcrEngine engine) {
+        when(engine.ready("aze+eng+rus+tur", Duration.ofSeconds(10))).thenReturn(true);
+        when(engine.runtimeProfile()).thenReturn(TEST_RUNTIME_PROFILE);
+    }
+
+    private static OcrService service(MediaProperties properties, OcrEngine engine) {
+        return service(properties, engine, 25);
+    }
+
+    private static OcrService service(
+            MediaProperties properties, OcrEngine engine, long admissionTimeoutMillis) {
+        return new OcrService(
+                properties,
+                new MediaPerformanceProperties(4, 2, admissionTimeoutMillis, 32, 60),
+                engine);
     }
 }

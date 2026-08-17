@@ -64,4 +64,70 @@ class AiPropertiesTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("between 1 and 300");
     }
+
+    @Test
+    void validatesAndNormalizesOpenAiTransportConfiguration() {
+        OpenAiTransportProperties defaults = OpenAiTransportProperties.defaults();
+
+        org.assertj.core.api.Assertions.assertThat(defaults.baseUrl())
+                .isEqualTo("https://api.openai.com/v1");
+        org.assertj.core.api.Assertions.assertThat(defaults.serviceTier())
+                .isEqualTo("default");
+        org.assertj.core.api.Assertions.assertThat(defaults.classificationImageDetail())
+                .isEqualTo("high");
+        org.assertj.core.api.Assertions.assertThat(defaults.adjudicationImageDetail())
+                .isEqualTo("original");
+        org.assertj.core.api.Assertions.assertThat(defaults.promptCacheKeyEnabled())
+                .isTrue();
+
+        OpenAiTransportProperties fakeProvider = new OpenAiTransportProperties(
+                "http://127.0.0.1:9876/v1/",
+                "priority",
+                "low",
+                "high",
+                true,
+                8,
+                4,
+                100,
+                10,
+                6,
+                3,
+                12,
+                50);
+        org.assertj.core.api.Assertions.assertThat(fakeProvider.baseUrl())
+                .isEqualTo("http://127.0.0.1:9876/v1");
+
+        assertThatThrownBy(() -> new OpenAiTransportProperties(
+                        "file:///tmp/fake-openai",
+                        "default",
+                        "high",
+                        "original",
+                        true,
+                        8,
+                        8,
+                        100,
+                        10,
+                        8,
+                        4,
+                        8,
+                        50))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("base URL");
+        assertThatThrownBy(() -> new OpenAiTransportProperties(
+                        "https://user:secret@api.openai.com/v1",
+                        "default",
+                        "high",
+                        "original",
+                        true,
+                        8,
+                        8,
+                        100,
+                        10,
+                        8,
+                        4,
+                        8,
+                        50))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("base URL");
+    }
 }

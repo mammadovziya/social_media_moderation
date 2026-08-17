@@ -3,68 +3,56 @@ package com.example.moderation.media;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
 import java.util.UUID;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.MediaType;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.ResourceAccessException;
-import org.springframework.web.client.RestClient;
-import org.springframework.web.client.RestClientResponseException;
 
 @Component
 class VisualRetrievalHttpClient {
-    private final RestClient client;
+    private final HttpClient client;
+    private final URI baseUrl;
+    private final String authToken;
+    private final Duration readTimeout;
     private final ObjectMapper objectMapper;
     private final int maxSnapshotBytes;
     private final String expectedDescriptorVersion;
     private final String expectedCandidateSelectionVersion;
 
-    @Autowired
     VisualRetrievalHttpClient(
             VisualRetrievalProperties properties, ObjectMapper objectMapper) {
-        this(
-                createClient(properties),
-                objectMapper,
-                properties.maxSnapshotBytes(),
-                properties.descriptorVersion(),
-                properties.candidateSelectionVersion());
-    }
-
-    VisualRetrievalHttpClient(
-            RestClient client, ObjectMapper objectMapper, int maxSnapshotBytes) {
-        this(
-                client,
-                objectMapper,
-                maxSnapshotBytes,
-                VisualRetrievalProperties.SUPPORTED_DESCRIPTOR_VERSION,
-                VisualRetrievalProperties.SUPPORTED_CANDIDATE_SELECTION_VERSION);
-    }
-
-    VisualRetrievalHttpClient(
-            RestClient client,
-            ObjectMapper objectMapper,
-            int maxSnapshotBytes,
-            String expectedDescriptorVersion,
-            String expectedCandidateSelectionVersion) {
-        this.client = client;
+        this.client = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofMillis(properties.connectTimeoutMillis()))
+                .version(HttpClient.Version.HTTP_1_1)
+                .build();
+        this.baseUrl = properties.url();
+        this.authToken = properties.authToken();
+        this.readTimeout = Duration.ofMillis(properties.readTimeoutMillis());
         this.objectMapper = objectMapper;
-        this.maxSnapshotBytes = maxSnapshotBytes;
-        this.expectedDescriptorVersion = expectedDescriptorVersion;
-        this.expectedCandidateSelectionVersion = expectedCandidateSelectionVersion;
+        this.maxSnapshotBytes = properties.maxSnapshotBytes();
+        this.expectedDescriptorVersion = properties.descriptorVersion();
+        this.expectedCandidateSelectionVersion = properties.candidateSelectionVersion();
     }
 
     boolean ready() {
         try {
-            ReadyResponse response = client.get()
-                    .uri("/ready")
-                    .retrieve()
-                    .body(ReadyResponse.class);
+            HttpResponse<byte[]> raw = send(request("/ready", ModerationDeadline.none())
+                    .GET()
+                    .build(), ModerationDeadline.none());
+            if (raw.statusCode() != 200) {
+                return false;
+            }
+            ReadyResponse response = decode(raw, ReadyResponse.class);
             return response != null
                     && "ready".equals(response.status())
                     && expectedDescriptorVersion.equals(response.algorithmVersion())
@@ -79,23 +67,35 @@ class VisualRetrievalHttpClient {
             long revision,
             String descriptorVersion,
             List<VisualReferenceDescriptor> descriptors) {
+        return refresh(revision, descriptorVersion, descriptors, ModerationDeadline.none());
+    }
+
+    String refresh(
+            long revision,
+            String descriptorVersion,
+            List<VisualReferenceDescriptor> descriptors,
+            ModerationDeadline deadline) {
         List<ReferenceDescriptorPayload> references = descriptors.stream()
                 .map(descriptor -> new ReferenceDescriptorPayload(
                         descriptor.asset().externalId(), descriptorPayload(descriptor)))
                 .toList();
-        RefreshRequest request = new RefreshRequest(Long.toString(revision), references);
+        RefreshRequest payload = new RefreshRequest(Long.toString(revision), references);
         try {
-            byte[] encoded = objectMapper.writeValueAsBytes(request);
+            byte[] encoded = objectMapper.writeValueAsBytes(payload);
             if (encoded.length > maxSnapshotBytes) {
                 throw new VisualRetrievalUnavailableException(
                         "visual reference snapshot exceeds its byte limit");
             }
-            RefreshResponse response = client.post()
-                    .uri("/internal/v1/indexes/refresh")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(encoded)
-                    .retrieve()
-                    .body(RefreshResponse.class);
+            HttpRequest request = request("/internal/v1/indexes/refresh", deadline)
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(encoded))
+                    .build();
+            HttpResponse<byte[]> raw = send(request, deadline);
+            if (raw.statusCode() < 200 || raw.statusCode() >= 300) {
+                throwIfCallerDeadlineTimeout(raw, deadline);
+                throw unavailable(raw.statusCode());
+            }
+            RefreshResponse response = decode(raw, RefreshResponse.class);
             int referenceCount = new HashSet<>(descriptors.stream()
                             .map(descriptor -> descriptor.asset().externalId())
                             .toList())
@@ -116,8 +116,8 @@ class VisualRetrievalHttpClient {
             return response.snapshotDigest();
         } catch (VisualRetrievalUnavailableException exception) {
             throw exception;
-        } catch (ResourceAccessException | RestClientResponseException exception) {
-            throw unavailable(exception);
+        } catch (MediaDeadlineExceededException exception) {
+            throw exception;
         } catch (Exception exception) {
             throw new VisualRetrievalUnavailableException(
                     "could not encode visual reference snapshot", exception);
@@ -133,6 +133,28 @@ class VisualRetrievalHttpClient {
             String channel,
             List<ExclusionBox> exclusionBoxes,
             int topK) {
+        return query(
+                imageBytes,
+                filename,
+                mimeType,
+                revision,
+                descriptorVersion,
+                channel,
+                exclusionBoxes,
+                topK,
+                ModerationDeadline.none());
+    }
+
+    QueryResponse query(
+            byte[] imageBytes,
+            String filename,
+            String mimeType,
+            long revision,
+            String descriptorVersion,
+            String channel,
+            List<ExclusionBox> exclusionBoxes,
+            int topK,
+            ModerationDeadline deadline) {
         MultipartPayload payload;
         try {
             payload = multipartQuery(
@@ -149,24 +171,28 @@ class VisualRetrievalHttpClient {
                     "could not encode visual query", exception);
         }
         try {
-            QueryResponse response = client.post()
-                    .uri("/internal/v1/query")
-                    .contentType(MediaType.parseMediaType(payload.contentType()))
-                    .contentLength(payload.body().length)
-                    .body(payload.body())
-                    .retrieve()
-                    .body(QueryResponse.class);
+            HttpRequest request = request("/internal/v1/query", deadline)
+                    .header("Content-Type", payload.contentType())
+                    .POST(payload.publisher())
+                    .build();
+            HttpResponse<byte[]> raw = send(request, deadline);
+            if (raw.statusCode() == 409) {
+                throw new MissingRevisionException(revision, null);
+            }
+            if (raw.statusCode() < 200 || raw.statusCode() >= 300) {
+                throwIfCallerDeadlineTimeout(raw, deadline);
+                throw unavailable(raw.statusCode());
+            }
+            QueryResponse response = decode(raw, QueryResponse.class);
             if (response == null) {
                 throw new VisualRetrievalUnavailableException(
                         "visual retrieval service returned an empty response");
             }
             return response;
-        } catch (RestClientResponseException exception) {
-            if (exception.getStatusCode().value() == 409) {
-                throw new MissingRevisionException(revision, exception);
-            }
-            throw unavailable(exception);
-        } catch (ResourceAccessException exception) {
+        } catch (VisualRetrievalUnavailableException
+                | MediaDeadlineExceededException exception) {
+            throw exception;
+        } catch (RuntimeException exception) {
             throw unavailable(exception);
         }
     }
@@ -188,24 +214,29 @@ class VisualRetrievalHttpClient {
                 channel,
                 exclusionJson);
         String boundary = unusedBoundary(imageBytes, fields);
-        ByteArrayOutputStream output =
-                new ByteArrayOutputStream(Math.addExact(imageBytes.length, 4096));
-        writeField(output, boundary, "revision", fields.get(0));
-        writeField(output, boundary, "topK", fields.get(1));
-        writeField(output, boundary, "descriptorVersion", fields.get(2));
-        writeField(output, boundary, "channel", fields.get(3));
-        writeField(output, boundary, "exclusionBoxes", fields.get(4));
-        writeAscii(output, "--" + boundary + "\r\n");
+        ByteArrayOutputStream prefix = new ByteArrayOutputStream(4096);
+        writeField(prefix, boundary, "revision", fields.get(0));
+        writeField(prefix, boundary, "topK", fields.get(1));
+        writeField(prefix, boundary, "descriptorVersion", fields.get(2));
+        writeField(prefix, boundary, "channel", fields.get(3));
+        writeField(prefix, boundary, "exclusionBoxes", fields.get(4));
+        writeAscii(prefix, "--" + boundary + "\r\n");
         writeAscii(
-                output,
+                prefix,
                 "Content-Disposition: form-data; name=\"image\"; filename=\""
                         + safeFilename(filename)
                         + "\"\r\n");
-        writeAscii(output, "Content-Type: " + safeImageMimeType(mimeType) + "\r\n\r\n");
-        output.writeBytes(imageBytes);
-        writeAscii(output, "\r\n--" + boundary + "--\r\n");
+        writeAscii(prefix, "Content-Type: " + safeImageMimeType(mimeType) + "\r\n\r\n");
+        byte[] suffix = ("\r\n--" + boundary + "--\r\n")
+                .getBytes(StandardCharsets.US_ASCII);
+        ArrayList<HttpRequest.BodyPublisher> parts = new ArrayList<>(3);
+        parts.add(HttpRequest.BodyPublishers.ofByteArray(prefix.toByteArray()));
+        parts.add(HttpRequest.BodyPublishers.ofByteArray(imageBytes));
+        parts.add(HttpRequest.BodyPublishers.ofByteArray(suffix));
         return new MultipartPayload(
-                output.toByteArray(), "multipart/form-data; boundary=" + boundary);
+                HttpRequest.BodyPublishers.concat(
+                        parts.toArray(HttpRequest.BodyPublisher[]::new)),
+                "multipart/form-data; boundary=" + boundary);
     }
 
     private static void writeField(
@@ -266,6 +297,70 @@ class VisualRetrievalHttpClient {
         };
     }
 
+    private HttpRequest.Builder request(String path, ModerationDeadline deadline) {
+        deadline.check();
+        HttpRequest.Builder builder = HttpRequest.newBuilder(baseUrl.resolve(path))
+                .timeout(deadline.boundedBy(readTimeout))
+                .header("Accept", "application/json");
+        if (!authToken.isEmpty()) {
+            builder.header("X-Internal-Token", authToken);
+        }
+        deadline.headerValue().ifPresent(value ->
+                builder.header(ModerationDeadline.HEADER, Long.toString(value)));
+        if (deadline.traceparent() != null) {
+            builder.header("traceparent", deadline.traceparent());
+        }
+        return builder;
+    }
+
+    private HttpResponse<byte[]> send(
+            HttpRequest request, ModerationDeadline deadline) {
+        try {
+            return client.send(request, HttpResponse.BodyHandlers.ofByteArray());
+        } catch (HttpTimeoutException exception) {
+            if (deadline.present() && deadline.remainingMillis() == 0) {
+                throw new MediaDeadlineExceededException(exception);
+            }
+            throw unavailable(exception);
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            if (deadline.present()) {
+                throw new MediaDeadlineExceededException(exception);
+            }
+            throw unavailable(exception);
+        } catch (IOException exception) {
+            throw unavailable(exception);
+        }
+    }
+
+    private <T> T decode(HttpResponse<byte[]> response, Class<T> responseType) {
+        try {
+            return objectMapper.readValue(response.body(), responseType);
+        } catch (IOException exception) {
+            throw new VisualRetrievalUnavailableException(
+                    "visual retrieval returned invalid JSON", exception);
+        }
+    }
+
+    private void throwIfCallerDeadlineTimeout(
+            HttpResponse<byte[]> response, ModerationDeadline deadline) {
+        if (!deadline.present() || response.statusCode() != 504) {
+            return;
+        }
+        try {
+            JsonNode envelope = objectMapper.readTree(response.body());
+            if (envelope != null
+                    && "processing_timeout".equals(
+                            envelope.path("error").path("code").asText())) {
+                throw new MediaDeadlineExceededException();
+            }
+        } catch (MediaDeadlineExceededException exception) {
+            throw exception;
+        } catch (IOException ignored) {
+            // An unrecognized 504 remains a dependency failure, not a caller timeout.
+        }
+    }
+
     private DescriptorPayload descriptorPayload(VisualReferenceDescriptor descriptor) {
         return new DescriptorPayload(
                 descriptor.schemaVersion(),
@@ -307,19 +402,6 @@ class VisualRetrievalHttpClient {
         }
     }
 
-    private static RestClient createClient(VisualRetrievalProperties properties) {
-        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-        requestFactory.setConnectTimeout(Duration.ofMillis(properties.connectTimeoutMillis()));
-        requestFactory.setReadTimeout(Duration.ofMillis(properties.readTimeoutMillis()));
-        RestClient.Builder builder = RestClient.builder()
-                .baseUrl(properties.url().toString())
-                .requestFactory(requestFactory);
-        if (!properties.authToken().isEmpty()) {
-            builder.defaultHeader("X-Internal-Token", properties.authToken());
-        }
-        return builder.build();
-    }
-
     private static boolean isSha256(String value) {
         return value != null && value.matches("[0-9a-f]{64}");
     }
@@ -327,6 +409,11 @@ class VisualRetrievalHttpClient {
     private static VisualRetrievalUnavailableException unavailable(Exception exception) {
         return new VisualRetrievalUnavailableException(
                 "visual retrieval service is unavailable", exception);
+    }
+
+    private static VisualRetrievalUnavailableException unavailable(int statusCode) {
+        return new VisualRetrievalUnavailableException(
+                "visual retrieval service returned HTTP " + statusCode);
     }
 
     record RefreshRequest(String revision, List<ReferenceDescriptorPayload> references) {}
@@ -398,7 +485,8 @@ class VisualRetrievalHttpClient {
             String candidateSelectionVersion,
             int loadedRevisions) {}
 
-    private record MultipartPayload(byte[] body, String contentType) {}
+    private record MultipartPayload(
+            HttpRequest.BodyPublisher publisher, String contentType) {}
 
     static final class MissingRevisionException extends VisualRetrievalUnavailableException {
         MissingRevisionException(long revision, Throwable cause) {

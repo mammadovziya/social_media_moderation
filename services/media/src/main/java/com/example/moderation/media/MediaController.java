@@ -12,6 +12,7 @@ import org.springframework.http.MediaType;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
@@ -26,6 +27,8 @@ public class MediaController {
     private final PdqHashRepository repository;
     private final OcrService ocr;
     private final VisualReferenceIndex visualRetrieval;
+    private final MediaAnalysisCoordinator coordinator;
+    private final MediaStageMetrics metrics;
 
     public MediaController(
             MediaProperties properties,
@@ -33,13 +36,17 @@ public class MediaController {
             PdqHashService pdq,
             PdqHashRepository repository,
             OcrService ocr,
-            VisualReferenceIndex visualRetrieval) {
+            VisualReferenceIndex visualRetrieval,
+            MediaAnalysisCoordinator coordinator,
+            MediaStageMetrics metrics) {
         this.properties = properties;
         this.decoder = decoder;
         this.pdq = pdq;
         this.repository = repository;
         this.ocr = ocr;
         this.visualRetrieval = visualRetrieval;
+        this.coordinator = coordinator;
+        this.metrics = metrics;
     }
 
     @GetMapping("/healthz")
@@ -58,10 +65,15 @@ public class MediaController {
                     HttpStatus.SERVICE_UNAVAILABLE,
                     "visual retrieval is not ready");
         }
+        if (!repository.databaseReady()) {
+            throw new ResponseStatusException(
+                    HttpStatus.SERVICE_UNAVAILABLE,
+                    "database is not ready");
+        }
         return Map.of(
                 "status", "ready",
                 "hashAlgorithm", "pdq-256",
-                "observedHashCount", repository.observedHashCount(),
+                "observedHashCount", repository.cachedObservedHashCount(),
                 "ocr", Map.of("status", ocr.readinessStatus()),
                 "visualRetrieval", Map.of("status", "ready"));
     }
@@ -72,7 +84,30 @@ public class MediaController {
             produces = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, Object> analyze(
             @RequestParam @NotBlank @Size(max = 128) String contentId,
-            @RequestParam MultipartFile image)
+            @RequestParam MultipartFile image,
+            @RequestHeader(
+                            name = ModerationDeadline.HEADER,
+                            required = false)
+                    Long deadlineEpochMillis,
+            @RequestHeader(name = "traceparent", required = false) String traceparent)
+            throws IOException {
+        ModerationDeadline deadline;
+        try {
+            deadline = new ModerationDeadline(deadlineEpochMillis, traceparent);
+        } catch (IllegalArgumentException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST, "moderation deadline is invalid", exception);
+        }
+        return metrics.timeIo(
+                "request_total", () -> doAnalyze(contentId, image, deadline));
+    }
+
+    Map<String, Object> analyze(String contentId, MultipartFile image) throws IOException {
+        return analyze(contentId, image, null, null);
+    }
+
+    private Map<String, Object> doAnalyze(
+            String contentId, MultipartFile image, ModerationDeadline deadline)
             throws IOException {
         if (image.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "empty image");
@@ -81,25 +116,36 @@ public class MediaController {
             throw new ResponseStatusException(
                     HttpStatus.PAYLOAD_TOO_LARGE, "image exceeds size limit");
         }
-        byte[] bytes = image.getBytes();
         try {
-            DecodedImage decoded = decoder.decode(bytes);
-            PdqHashService.Preflight preflight = pdq.preflight(bytes);
+            deadline.check();
+            byte[] bytes = image.getBytes();
+            metrics.recordAmount("upload.bytes", bytes.length);
+            DecodedImage decoded = metrics.time("decode", () -> decoder.decode(bytes));
+            metrics.recordAmount(
+                    "decoded.pixels",
+                    (long) decoded.image().getWidth() * decoded.image().getHeight());
+            deadline.check();
+            PdqHashService.Preflight preflight = metrics.time(
+                    "sha256_exact_preflight", () -> pdq.preflight(bytes));
             if (preflight.hasAuthoritativeExactMatch()) {
-                PdqHashService.Analysis evidence = pdq.analyzeAuthoritativeExact(
-                        bytes, contentId, decoded.format(), preflight);
+                metrics.increment("authoritative_exact");
+                PdqHashService.Analysis evidence = metrics.time(
+                        "authoritative_exact_evidence",
+                        () -> pdq.analyzeAuthoritativeExact(
+                                bytes.length, contentId, decoded.format(), preflight));
                 return response(
                         decoded,
                         evidence,
                         OcrResult.disabled(),
                         PdqHashService.AUTHORITATIVE_SHA256_EXACT_PATH);
             }
-            OcrResult ocrResult = ocr.analyze(decoded.image());
-            PdqHashService.Analysis evidence =
-                    pdq.analyze(
-                            decoded.image(), bytes, contentId, ocrResult, decoded.format());
+            PdqHashService.CompletedAnalysis completed = coordinator.analyze(
+                    decoded, bytes, contentId, preflight, deadline);
             return response(
-                    decoded, evidence, ocrResult, PdqHashService.FULL_ANALYSIS_PATH);
+                    decoded,
+                    completed.analysis(),
+                    completed.ocrResult(),
+                    PdqHashService.FULL_ANALYSIS_PATH);
         } catch (InvalidImageException exception) {
             throw new ResponseStatusException(
                     HttpStatus.UNPROCESSABLE_ENTITY, exception.getMessage(), exception);
@@ -107,6 +153,16 @@ public class MediaController {
             throw new ResponseStatusException(
                     HttpStatus.SERVICE_UNAVAILABLE,
                     "visual retrieval is unavailable",
+                    exception);
+        } catch (MediaDeadlineExceededException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.GATEWAY_TIMEOUT,
+                    "moderation deadline expired",
+                    exception);
+        } catch (MediaCapacityExceededException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.SERVICE_UNAVAILABLE,
+                    "media analysis capacity is temporarily exhausted",
                     exception);
         }
     }
