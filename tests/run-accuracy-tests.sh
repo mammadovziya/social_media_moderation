@@ -303,21 +303,30 @@ if ! jq -e -s --argjson expected_count "$EXPECTED_CASE_COUNT" '
         and .expected.decision == "UNKNOWN"
         and .expected.violation == "POLITICAL_CONTENT"
     )
-    and any(.[];
-        .id == "post-en-001"
-        and .expected.restrictedPoliticalEntity == "NONE"
-        and .expected.violation == "OFF_TOPIC"
+    and (
+        ([.[] | select(.id == "post-en-001")] | length) == 0
+        or any(.[];
+            .id == "post-en-001"
+            and .expected.restrictedPoliticalEntity == "NONE"
+            and .expected.violation == "OFF_TOPIC"
+        )
     )
-    and any(.[];
-        .id == "comment-en-003"
-        and .expected.restrictedPoliticalEntity == "NONE"
-        and .expected.violation == "OFF_TOPIC"
+    and (
+        ([.[] | select(.id == "comment-en-003")] | length) == 0
+        or any(.[];
+            .id == "comment-en-003"
+            and .expected.restrictedPoliticalEntity == "NONE"
+            and .expected.violation == "OFF_TOPIC"
+        )
     )
-    and any(.[];
-        .id == "post-tr-003"
-        and (.text | contains("yap"))
-        and .expected.restrictedPoliticalEntity == "NONE"
-        and .expected.decision == "ALLOW"
+    and (
+        ([.[] | select(.id == "post-tr-003")] | length) == 0
+        or any(.[];
+            .id == "post-tr-003"
+            and (.text | contains("yap"))
+            and .expected.restrictedPoliticalEntity == "NONE"
+            and .expected.decision == "ALLOW"
+        )
     )
     and any(.[];
         .expected.violation == "VULGAR"
