@@ -3,6 +3,7 @@ package com.example.moderation.gateway;
 import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -17,7 +18,11 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.web.servlet.MockMvc;
 
 @SpringBootTest(
-        properties = "moderation.blocked-terms-file=src/test/resources/blocked_terms.txt")
+        properties = {
+            "moderation.blocked-terms-file=src/test/resources/blocked_terms.txt",
+            "moderation.restricted-political-entities-file=src/test/resources/restricted_political_entities.txt",
+            "ai-work-idempotency.security.allow-unauthenticated=true"
+        })
 @AutoConfigureMockMvc
 class OpenApiDocumentationTest {
     @Autowired
@@ -140,6 +145,11 @@ class OpenApiDocumentationTest {
                                         "$.components.schemas.ModerationResponse"
                                                 + ".properties.decision.enum")
                                 .value(contains("ALLOW", "BLOCK", "UNKNOWN")))
+                .andExpect(
+                        jsonPath(
+                                        "$.components.schemas.ModerationResponse"
+                                                + ".properties.violation.enum")
+                                .value(hasItem("POLITICAL_CONTENT")))
                 .andExpect(
                         jsonPath("$.components.schemas.ApiError.required")
                                 .value(contains("error", "message", "requestId")))

@@ -29,7 +29,9 @@ import org.springframework.web.client.HttpClientErrorException;
         properties = {
             "moderation.max-image-bytes=3",
             "moderation.blocked-terms-file=src/test/resources/blocked_terms.txt",
-            "moderation.internal-response-token=test-internal-token-0123456789-ABCDEFGHIJKL"
+            "moderation.restricted-political-entities-file=src/test/resources/restricted_political_entities.txt",
+            "moderation.internal-response-token=test-internal-token-0123456789-ABCDEFGHIJKL",
+            "ai-work-idempotency.security.allow-unauthenticated=true"
         })
 @AutoConfigureMockMvc
 class GatewayErrorResponseTest {

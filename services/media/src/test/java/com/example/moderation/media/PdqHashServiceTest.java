@@ -261,6 +261,98 @@ class PdqHashServiceTest {
     }
 
     @Test
+    void authoritativeShaPreflightPersistsTruthfulEvidenceWithoutOcrOrPdq() {
+        byte[] original = "authoritative-upload".getBytes(StandardCharsets.UTF_8);
+        ModerationReferenceAsset exact = reference(
+                18L,
+                "exact-fast-18",
+                DecisionBasis.EXACT_ASSET,
+                "0".repeat(64),
+                null);
+        when(referenceAssetIndex.findExactSha256(anyString()))
+                .thenReturn(new ReferenceAssetIndex.ExactSearchResult(
+                        73L, true, List.of(exact)));
+
+        PdqHashService.Preflight preflight = service.preflight(original);
+        PdqHashService.Analysis analysis = service.analyzeAuthoritativeExact(
+                original, "post-fast-18", "png", preflight);
+
+        assertThat(preflight.sha256()).hasSize(64);
+        assertThat(preflight.hasAuthoritativeExactMatch()).isTrue();
+        assertThat(analysis.identity())
+                .containsEntry("sha256", preflight.sha256())
+                .containsEntry("exactMatchFound", true);
+        assertThat(analysis.pdq())
+                .containsEntry(
+                        "processingPath",
+                        PdqHashService.AUTHORITATIVE_SHA256_EXACT_PATH)
+                .containsEntry("executionStatus", "not_invoked")
+                .containsEntry("qualityAccepted", false)
+                .containsEntry("candidateFound", true)
+                .containsEntry("algorithm", "pdq-256")
+                .doesNotContainKeys("hash", "quality", "maskedHash", "maskedQuality");
+        assertThat(analysis.pdq().get("authoritativeExactMatch"))
+                .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
+                .containsEntry("referenceId", "exact-fast-18")
+                .containsEntry("policyVersion", "image-policy-v1")
+                .containsEntry("exactSha256", true);
+
+        verify(referenceAssetIndex).findExactSha256(preflight.sha256());
+        verify(referenceAssetIndex, never())
+                .findCandidates(anyString(), anyString(), anyString());
+        verify(visualReferenceIndex, never()).findCandidates(
+                org.mockito.ArgumentMatchers.any(byte[].class),
+                anyString(),
+                org.mockito.ArgumentMatchers.any(),
+                anyInt(),
+                anyInt());
+        verify(repository, never()).save(anyString(), anyString(), anyInt());
+        ArgumentCaptor<MediaEvidence> evidence = ArgumentCaptor.forClass(MediaEvidence.class);
+        verify(repository).saveEvidence(evidence.capture());
+        assertThat(evidence.getValue())
+                .extracting(
+                        MediaEvidence::processingPath,
+                        MediaEvidence::pdqHash,
+                        MediaEvidence::pdqQuality,
+                        MediaEvidence::ocrStatus,
+                        MediaEvidence::ocrEngine,
+                        MediaEvidence::pdqImplementationCommit,
+                        MediaEvidence::authoritativeReferenceId,
+                        MediaEvidence::authoritativePolicyVersion,
+                        MediaEvidence::referenceAssetRevision)
+                .containsExactly(
+                        PdqHashService.AUTHORITATIVE_SHA256_EXACT_PATH,
+                        null,
+                        null,
+                        "not_invoked",
+                        "not_invoked",
+                        null,
+                        "exact-fast-18",
+                        "image-policy-v1",
+                        73L);
+    }
+
+    @Test
+    void exactAnalysisRejectsAPreflightForDifferentBytes() {
+        ModerationReferenceAsset exact = reference(
+                19L,
+                "exact-fast-19",
+                DecisionBasis.EXACT_ASSET,
+                "0".repeat(64),
+                null);
+        when(referenceAssetIndex.findExactSha256(anyString()))
+                .thenReturn(new ReferenceAssetIndex.ExactSearchResult(
+                        1L, true, List.of(exact)));
+        PdqHashService.Preflight preflight = service.preflight(new byte[] {1});
+
+        assertThatThrownBy(() -> service.analyzeAuthoritativeExact(
+                        new byte[] {2}, "post-fast-19", "png", preflight))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("SHA-256 preflight does not belong to the uploaded bytes");
+        verify(repository, never()).saveEvidence(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
     void exactShaForTextDependentReferenceStillRequiresAdjudication() {
         ModerationReferenceAsset textDependent = reference(
                 9L,

@@ -26,6 +26,7 @@ endorsement, or severity is materially uncertain. <category> must be one of the
 non-none categories below. Never return allow_<category>, block_none, or
 unknown_none. Domain, financial-risk, financial-privacy, impersonation, or
 political uncertainty alone never changes safetyDisposition from allow_none.
+Restricted-political-entity classification is also independent of safety.
 
 - self_harm: self-directed harm, suicidal intent, or facilitation.
 - sexual_minors: sexual exploitation or sexual content involving minors.
@@ -91,8 +92,9 @@ Classify claim type, not truth. An opinion or factual claim alone is not unsafe.
 4. Financial risk
 
 - none: no governed financial-risk signal.
-- potentially_misleading: a material claim appears absolute, unsupported,
-  fabricated, or likely to mislead, but does not clearly fit a stronger class.
+- potentially_misleading: a material claim has affirmative signs of deceptive
+  or fabricated presentation, false attribution, internal inconsistency, or
+  materially misleading framing, but does not clearly fit a stronger class.
 - guaranteed_return: profit, principal safety, or a specific return is presented
   as guaranteed or impossible to lose.
 - investment_scam: deceptive investment solicitation, advance-fee scheme,
@@ -111,6 +113,19 @@ Choose the most specific applicable risk. guaranteed_return, investment_scam,
 pump_and_dump, market_manipulation, and phishing are decisive policy risks.
 potentially_misleading is not a declaration that a claim is false, and
 paid_promotion is a disclosure signal rather than an automatic safety block.
+
+A retrospective report of an observed public price move, return, or the
+author's own realized or unrealized profit or loss is factual_claim with
+financialRisk=none by default. This remains true when it includes a percentage,
+currency amount, short time period, enthusiasm, or emphatic punctuation. The
+absence of a citation or independent verification alone is not evidence of
+potentially_misleading. Apply a governed risk only when current content adds
+affirmative evidence such as a guarantee or future-profit promise, a request to
+buy, invest, transfer money, follow a signal, or contact the author, deceptive
+promotion or sponsorship, fabricated attribution, material internal
+inconsistency, scam, phishing, or manipulation. For example, "Apple shares rose
+20% today and my portfolio gained $200" is factual_claim with financialRisk=none;
+"buy Apple now and you are guaranteed 20% today" is guaranteed_return.
 
 5. Financial privacy
 
@@ -148,6 +163,36 @@ publicly identified institutional wallet are not automatically clear exposure.
   financial connection.
 - uncertain: relatedness or the connection is materially unclear.
 
+8. Restricted political entity
+
+Classify restrictedPoliticalEntity independently from politicalContext. This is
+a content-presence policy, not sentiment analysis: criticism, praise, neutral
+reporting, quotation, satire, and republication all count when the current post
+materially mentions or depicts a restricted entity. Evaluate currentText,
+currentOcrText, and current visible image content together.
+
+- president: a material mention or depiction of a national/state president,
+  the national/state presidency as an office, or an official presidential role.
+- minister: a material mention or depiction of a government minister in that
+  governmental capacity. Do not treat a religious minister as government.
+- yap: a material mention or depiction of Azerbaijan's YAP / New Azerbaijan
+  Party, including its full name, translated names, established abbreviations,
+  and party-identifying symbols or logos.
+- multiple: two or more of president, minister, and yap are materially present.
+- possible: a restricted entity is plausibly present but its identity or sense
+  cannot be resolved reliably from the current evidence.
+- none: no restricted entity is materially present.
+
+Understand aliases, translations, abbreviations, inflection, possessive/case
+suffixes, transliteration, and contextual references across Azerbaijani,
+English, Russian, and Turkish, without relying on a list of current officeholder
+names. Exclude corporate, association, university, and sports-club presidents;
+religious ministers; the ordinary lowercase Turkish verb "yap" (do/make); and
+unrelated words or letter sequences that merely contain those letters. A bare
+ambiguous title with insufficient national/state context is possible, not a
+confirmed category. Do not infer a restricted entity from spelling alone.
+
 Return only the exact strict-schema keys and enum values: safetyDisposition,
-domain, financialClaim, financialRisk, financialPrivacy, impersonation, and
-politicalContext. Return no explanation or additional fields.
+domain, financialClaim, financialRisk, financialPrivacy, impersonation,
+restrictedPoliticalEntity, and politicalContext. Return no explanation or
+additional fields.

@@ -27,8 +27,45 @@ class ReferenceAssetIndexTest {
         assertThatThrownBy(() -> index.findCandidates("z".repeat(64), ZERO_HASH, ZERO_HASH))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("SHA-256 must contain 64 hexadecimal characters");
+        assertThatThrownBy(() -> index.findExactSha256("z".repeat(64)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("SHA-256 must contain 64 hexadecimal characters");
 
         verifyNoInteractions(repository);
+    }
+
+    @Test
+    void exactOnlyLookupBindsTheAuthoritativeMatchToTheObservedRevision() {
+        ModerationReferenceAsset authoritative = asset(
+                7L,
+                "authoritative-7",
+                DecisionBasis.EXACT_ASSET,
+                Severity.HIGH,
+                ZERO_HASH,
+                null,
+                null,
+                false);
+        ModerationReferenceAsset textDependent = asset(
+                8L,
+                "text-dependent-8",
+                DecisionBasis.TEXT_DEPENDENT,
+                Severity.CRITICAL,
+                ZERO_HASH,
+                null,
+                null,
+                false);
+        when(repository.referenceAssetsRevision()).thenReturn(42L);
+        when(repository.loadReferenceAssetsSnapshot())
+                .thenReturn(new PdqHashRepository.ReferenceAssetsSnapshot(
+                        42L, List.of(textDependent, authoritative)));
+
+        ReferenceAssetIndex.ExactSearchResult result = index.findExactSha256(ZERO_HASH);
+
+        assertThat(result.revision()).isEqualTo(42L);
+        assertThat(result.hasReferences()).isTrue();
+        assertThat(result.exactSha256Candidates())
+                .containsExactly(authoritative, textDependent);
+        assertThat(result.authoritativeExactMatch()).isEqualTo(authoritative);
     }
 
     @Test

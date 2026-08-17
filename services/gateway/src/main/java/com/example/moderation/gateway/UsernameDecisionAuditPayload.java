@@ -3,7 +3,7 @@ package com.example.moderation.gateway;
 /**
  * One audited handle decision sent to the media service.
  *
- * <p>Field names and value domains mirror {@code username-decision-provenance-v2}. The handle is
+ * <p>Field names and value domains mirror {@code username-decision-provenance-v4}. The handle is
  * the complete subject of this moderation decision; no account identifier is carried.
  */
 record UsernameDecisionAuditPayload(
@@ -24,6 +24,11 @@ record UsernameDecisionAuditPayload(
         String financialRisk,
         String financialPrivacy,
         String impersonation,
+        String restrictedPoliticalEntity,
+        String localRestrictedPoliticalEntity,
+        String restrictedPoliticalRegistryDigest,
+        String blockedTermsDigest,
+        String provenanceSchemaVersion,
         String policyVersion,
         String handleStructureVersion,
         String handleStructureSha256,
@@ -39,11 +44,14 @@ record UsernameDecisionAuditPayload(
         String verdictSource,
         int latencyMs) {
 
+    static final String PROVENANCE_SCHEMA_VERSION = "username-decision-provenance-v4";
+
     /** Which layer produced the terminal result. */
     enum DecidingLayer {
         STRUCTURE,
         PROTECTED_NAME,
         BLOCKED_TERM,
+        RESTRICTED_POLITICAL_ENTITY,
         FINANCIAL_PRIVACY,
         CLASSIFIER,
         ANALYZER_UNAVAILABLE

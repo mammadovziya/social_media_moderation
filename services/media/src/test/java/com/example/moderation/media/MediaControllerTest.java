@@ -2,14 +2,20 @@ package com.example.moderation.media;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.awt.image.BufferedImage;
+import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.web.server.ResponseStatusException;
@@ -36,6 +42,14 @@ class MediaControllerTest {
     private final VisualReferenceIndex visualRetrieval = mock(VisualReferenceIndex.class);
     private final MediaController controller =
             new MediaController(properties, decoder, pdq, repository, ocr, visualRetrieval);
+
+    @BeforeEach
+    void defaultToTheFullAnalysisPath() {
+        when(pdq.preflight(any(byte[].class)))
+                .thenReturn(new PdqHashService.Preflight(
+                        "a".repeat(64),
+                        new ReferenceAssetIndex.ExactSearchResult(0, false, List.of())));
+    }
 
     @Test
     void addsOcrResultAfterTheImageWasDecoded() throws Exception {
@@ -78,6 +92,68 @@ class MediaControllerTest {
         assertThat(ocrResponse.get("maxConcurrent")).isEqualTo(2);
         verify(ocr).analyze(decodedImage);
         verify(pdq).analyze(decodedImage, upload.getBytes(), "post-1", ocrResult, "png");
+    }
+
+    @Test
+    void authoritativeShaMatchRunsOnlyAfterSafeDecodeAndSkipsOcrAndPdq() throws Exception {
+        byte[] bytes = new byte[] {7, 8, 9};
+        BufferedImage decodedImage =
+                new BufferedImage(24, 12, BufferedImage.TYPE_INT_RGB);
+        MockMultipartFile upload =
+                new MockMultipartFile("image", "blocked.png", "image/png", bytes);
+        when(decoder.decode(bytes))
+                .thenReturn(new ImageDecoder.DecodedImage(decodedImage, "png"));
+        ModerationReferenceAsset exact = new ModerationReferenceAsset(
+                8L,
+                "exact-8",
+                ModerationReferenceAsset.DecisionBasis.EXACT_ASSET,
+                "unsafe_content",
+                ModerationReferenceAsset.Severity.HIGH,
+                "image-policy-v1",
+                "b".repeat(64),
+                null,
+                null,
+                null,
+                false);
+        PdqHashService.Preflight preflight = new PdqHashService.Preflight(
+                "b".repeat(64),
+                new ReferenceAssetIndex.ExactSearchResult(17, true, List.of(exact)));
+        when(pdq.preflight(bytes)).thenReturn(preflight);
+        when(pdq.analyzeAuthoritativeExact(bytes, "post-exact", "png", preflight))
+                .thenReturn(new PdqHashService.Analysis(
+                        Map.of(
+                                "sha256", "b".repeat(64),
+                                "exactMatchFound", true),
+                        Map.of(
+                                "processingPath",
+                                PdqHashService.AUTHORITATIVE_SHA256_EXACT_PATH,
+                                "candidateFound",
+                                true)));
+
+        Map<String, Object> response = controller.analyze("post-exact", upload);
+
+        assertThat(response).containsEntry("status", "ok");
+        Map<?, ?> ocrResponse = (Map<?, ?>) response.get("ocr");
+        assertThat(ocrResponse.get("status")).isEqualTo("disabled");
+        assertThat(ocrResponse.get("executionStatus")).isEqualTo("not_invoked");
+        assertThat(ocrResponse.get("confidenceAccepted")).isEqualTo(false);
+        assertThat(ocrResponse.get("truncated")).isEqualTo(false);
+        assertThat(ocrResponse.get("engine")).asString().isNotBlank();
+        Map<?, ?> imageResponse = (Map<?, ?>) response.get("image");
+        assertThat(imageResponse.get("processingPath"))
+                .isEqualTo(PdqHashService.AUTHORITATIVE_SHA256_EXACT_PATH);
+        assertThat(imageResponse.get("width")).isEqualTo(24);
+        assertThat(imageResponse.get("height")).isEqualTo(12);
+        assertThat(imageResponse.get("format")).isEqualTo("png");
+        assertThat(imageResponse.get("decoderProfileVersion"))
+                .isEqualTo(ImageDecoder.DECODER_PROFILE_VERSION);
+        InOrder boundedOrder = inOrder(decoder, pdq);
+        boundedOrder.verify(decoder).decode(bytes);
+        boundedOrder.verify(pdq).preflight(bytes);
+        boundedOrder.verify(pdq)
+                .analyzeAuthoritativeExact(bytes, "post-exact", "png", preflight);
+        verifyNoInteractions(ocr);
+        verify(pdq, never()).analyze(any(), any(), any(), any(), any());
     }
 
     @Test

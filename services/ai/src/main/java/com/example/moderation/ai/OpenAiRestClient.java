@@ -66,16 +66,16 @@ public class OpenAiRestClient implements AiProvider {
     private static final String USERNAME_ANALYSIS_PROMPT =
             loadPrompt("/prompts/username-analysis-v1.txt");
     private static final String IMAGE_ADJUDICATION_PROMPT =
-            loadPrompt("/prompts/image-adjudication-v4.txt");
+            loadPrompt("/prompts/image-adjudication-v5.txt");
     private static final String IMAGE_CLASSIFICATION_CONTEXT_PROMPT =
             loadPrompt("/prompts/image-classification-context-v1.txt");
     private static final String IMAGE_ADJUDICATION_PROMPT_VERSION =
-            "image-adjudication-v4";
+            "image-adjudication-v5";
     private static final String MODERATION_PROFILE_VERSION = "moderation-profile-v2";
     private static final String CLASSIFICATION_PROFILE_VERSION =
-            "classification-profile-v11";
+            "classification-profile-v13";
     private static final String IMAGE_ADJUDICATION_PROFILE_VERSION =
-            "image-adjudication-profile-v10";
+            "image-adjudication-profile-v11";
     private static final int CLASSIFICATION_MAX_OUTPUT_TOKENS = 320;
     private static final int ADJUDICATION_MAX_OUTPUT_TOKENS = 800;
     private static final int MAX_CONTEXT_CHARS = 20_000;
@@ -115,6 +115,7 @@ public class OpenAiRestClient implements AiProvider {
             "financialRisk",
             "financialPrivacy",
             "impersonation",
+            "restrictedPoliticalEntity",
             "politicalContext",
             "model");
     private static final List<String> CLASSIFICATION_REASONING_NONE_MODELS = List.of(
@@ -168,10 +169,12 @@ public class OpenAiRestClient implements AiProvider {
             List.of("none", "possible", "clear");
     private static final List<String> IMPERSONATION_VALUES =
             List.of("none", "possible", "clear");
+    private static final List<String> RESTRICTED_POLITICAL_ENTITY_VALUES = List.of(
+            "none", "president", "minister", "yap", "multiple", "possible");
     private static final List<String> POLITICAL_CONTEXT_VALUES = List.of(
             "none", "investment_relevant", "general_politics", "uncertain");
     private static final String CLASSIFICATION_PROMPT_BUNDLE_SHA256 = sha256(
-            "classification-prompts-v7|post="
+            "classification-prompts-v9|post="
                     + sha256(POST_ANALYSIS_PROMPT)
                     + "|comment="
                     + sha256(COMMENT_ANALYSIS_PROMPT)
@@ -300,7 +303,7 @@ public class OpenAiRestClient implements AiProvider {
                     + "output=zero-or-more-" + RESPONSE_REASONING_ITEM_TYPE + "+exactly-one-"
                     + RESPONSE_MESSAGE_ITEM_TYPE + "(" + RESPONSE_COMPLETED_STATUS + ",role="
                     + ASSISTANT_ROLE + ",content=exactly-one-" + RESPONSE_OUTPUT_TEXT_TYPE + ")",
-            "outputParser=strict-duplicate-detection;fail-on-trailing-tokens;exact-schema-fields-enums;image-adjudication-cross-field-contract-v4"));
+            "outputParser=strict-duplicate-detection;fail-on-trailing-tokens;exact-schema-fields-enums;image-adjudication-cross-field-contract-v5"));
 
     private final OpenAiProperties properties;
     private final RestClient client;
@@ -1008,6 +1011,11 @@ public class OpenAiRestClient implements AiProvider {
                 schemaProperties, required, "financialPrivacy", FINANCIAL_PRIVACY_VALUES);
         addEnumProperty(
                 schemaProperties, required, "impersonation", IMPERSONATION_VALUES);
+        addEnumProperty(
+                schemaProperties,
+                required,
+                "restrictedPoliticalEntity",
+                RESTRICTED_POLITICAL_ENTITY_VALUES);
         if (contentType != ContentType.USERNAME) {
             addEnumProperty(
                     schemaProperties, required, "politicalContext", POLITICAL_CONTEXT_VALUES);
@@ -1048,6 +1056,11 @@ public class OpenAiRestClient implements AiProvider {
         addEnumProperty(
                 schemaProperties, required, "impersonation", IMPERSONATION_VALUES);
         addEnumProperty(
+                schemaProperties,
+                required,
+                "restrictedPoliticalEntity",
+                RESTRICTED_POLITICAL_ENTITY_VALUES);
+        addEnumProperty(
                 schemaProperties, required, "politicalContext", POLITICAL_CONTEXT_VALUES);
         addEnumProperty(
                 schemaProperties,
@@ -1059,6 +1072,7 @@ public class OpenAiRestClient implements AiProvider {
                         "financial_privacy",
                         "financial_risk",
                         "impersonation",
+                        "restricted_political_entity",
                         "off_topic",
                         "evidence_unavailable"));
         addEnumProperty(

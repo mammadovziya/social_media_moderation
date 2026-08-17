@@ -6,12 +6,12 @@ import org.junit.jupiter.api.Test;
 
 class ModerationPropertiesTest {
     @Test
-    void rejectsUnknownThresholdsThatCouldDisableTheSafetyGuard() {
+    void rejectsScoreBlockThresholdsOutsideTheProbabilityRange() {
         for (double value : new double[] {-0.01, 1.01, Double.NaN, Double.POSITIVE_INFINITY}) {
             assertThatThrownBy(() ->
                             properties(value, 8_388_608, 9_437_184, 30, "http://ai"))
                     .isInstanceOf(IllegalArgumentException.class)
-                    .hasMessageContaining("MODERATION_UNKNOWN_THRESHOLD");
+                    .hasMessageContaining("MODERATION_SCORE_BLOCK_THRESHOLD");
         }
     }
 
@@ -62,15 +62,16 @@ class ModerationPropertiesTest {
                         "unsafe model id",
                         "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                         "gpt-4o-mini",
-                        "644044f7960b05e48529003e03f6b69f3dd932a31d6e39d7b4e01d57f5aa9f7e",
-                        "de5d6be741ee1f30bfff85de54c71133ad541593083e7d857ff04c028dee0289",
+                        "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba",
+                        "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216",
                         "gpt-5.6-terra",
                         "medium",
-                        "image-adjudication-v4",
-                        "20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8",
-                        "07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef",
+                        "image-adjudication-v5",
+                        "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505",
+                        "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa",
                         30,
                         "./config/blocked_terms.txt",
+                        "./config/restricted_political_entities.txt",
                         ""))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("OPENAI_MODERATION_MODEL");
@@ -103,15 +104,16 @@ class ModerationPropertiesTest {
                         "omni-moderation-2024-09-26",
                         "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                         "gpt-5.6-terra",
-                        "644044f7960b05e48529003e03f6b69f3dd932a31d6e39d7b4e01d57f5aa9f7e",
-                        "de5d6be741ee1f30bfff85de54c71133ad541593083e7d857ff04c028dee0289",
+                        "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba",
+                        "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216",
                         "gpt-5.6-terra",
                         "medium",
-                        "image-adjudication-v4",
-                        "20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8",
-                        "07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef",
+                        "image-adjudication-v5",
+                        "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505",
+                        "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa",
                         30,
                         "./config/blocked_terms.txt",
+                        "./config/restricted_political_entities.txt",
                         "unsafe\ntoken"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("MODERATION_INTERNAL_RESPONSE_TOKEN");
@@ -149,15 +151,16 @@ class ModerationPropertiesTest {
                 "omni-moderation-2024-09-26",
                 "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                 "gpt-5.6-terra",
-                "644044f7960b05e48529003e03f6b69f3dd932a31d6e39d7b4e01d57f5aa9f7e",
-                "de5d6be741ee1f30bfff85de54c71133ad541593083e7d857ff04c028dee0289",
+                "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba",
+                "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216",
                 "gpt-5.6-terra",
                 "medium",
-                "image-adjudication-v4",
-                "20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8",
-                "07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef",
+                "image-adjudication-v5",
+                "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505",
+                "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa",
                 30,
                 blockedTermsFile,
+                "./config/restricted_political_entities.txt",
                 "");
     }
 }

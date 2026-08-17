@@ -38,17 +38,23 @@ moderation:
   max-image-bytes: ${MAX_IMAGE_BYTES:8388608}
   max-image-request-bytes: ${MAX_IMAGE_REQUEST_BYTES:9437184}
   upstream-timeout-seconds: ${UPSTREAM_TIMEOUT_SECONDS:45}
-  unknown-threshold: ${MODERATION_UNKNOWN_THRESHOLD:0.70}
+  moderation-score-block-threshold: ${MODERATION_SCORE_BLOCK_THRESHOLD:0.15}
   expected-moderation-model: ${OPENAI_MODERATION_MODEL:omni-moderation-2024-09-26}
   expected-moderation-profile-sha256: ${OPENAI_MODERATION_PROFILE_SHA256:25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073}
   expected-classification-model: ${OPENAI_CUSTOM_MODEL:gpt-5.4-mini}
-  expected-classification-prompt-bundle-sha256: ${OPENAI_CLASSIFICATION_PROMPT_BUNDLE_SHA256:644044f7960b05e48529003e03f6b69f3dd932a31d6e39d7b4e01d57f5aa9f7e}
-  expected-classification-profile-sha256: ${OPENAI_CLASSIFICATION_PROFILE_SHA256:de5d6be741ee1f30bfff85de54c71133ad541593083e7d857ff04c028dee0289}
+  expected-classification-prompt-bundle-sha256: ${OPENAI_CLASSIFICATION_PROMPT_BUNDLE_SHA256:92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba}
+  expected-classification-profile-sha256: ${OPENAI_CLASSIFICATION_PROFILE_SHA256:4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216}
   expected-adjudication-model: ${OPENAI_ADJUDICATION_MODEL:gpt-5.6-terra}
   expected-adjudication-reasoning-effort: ${OPENAI_ADJUDICATION_REASONING_EFFORT:medium}
-  expected-adjudication-prompt-version: image-adjudication-v4
-  expected-adjudication-prompt-sha256: ${OPENAI_ADJUDICATION_PROMPT_SHA256:20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8}
-  expected-adjudication-profile-sha256: ${OPENAI_ADJUDICATION_PROFILE_SHA256:07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef}
+  expected-adjudication-prompt-version: image-adjudication-v5
+  expected-adjudication-prompt-sha256: ${OPENAI_ADJUDICATION_PROMPT_SHA256:d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505}
+  expected-adjudication-profile-sha256: ${OPENAI_ADJUDICATION_PROFILE_SHA256:d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa}
   expected-open-ai-timeout-seconds: ${OPENAI_TIMEOUT_SECONDS:30}
   blocked-terms-file: ${BLOCKED_TERMS_FILE:${user.dir}/config/blocked_terms.txt}
+  restricted-political-entities-file: ${RESTRICTED_POLITICAL_ENTITIES_FILE:${user.dir}/config/restricted_political_entities.txt}
   internal-response-token: ${MODERATION_INTERNAL_RESPONSE_TOKEN:}
+
+ai-work-idempotency:
+  security:
+    internal-token: ${AI_WORK_IDEMPOTENCY_INTERNAL_TOKEN:}
+    allow-unauthenticated: ${AI_WORK_IDEMPOTENCY_ALLOW_UNAUTHENTICATED:false}

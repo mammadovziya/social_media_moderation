@@ -3,6 +3,11 @@ package com.example.moderation.gateway;
 import com.example.moderation.gateway.api.ContentType;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -21,12 +26,15 @@ public class AnalyzerClients {
     private final RestClient mediaClient;
     private final RestClient aiClient;
     private final ObjectMapper objectMapper;
+    private final AiWorkIdempotencySecurityProperties aiWorkSecurity;
 
     public AnalyzerClients(
             RestClient.Builder builder,
             ModerationProperties properties,
+            AiWorkIdempotencySecurityProperties aiWorkSecurity,
             ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
+        this.aiWorkSecurity = aiWorkSecurity;
         this.mediaClient = builder.clone()
                 .baseUrl(properties.mediaServiceUrl())
                 .requestFactory(requestFactory(properties))
@@ -176,19 +184,125 @@ public class AnalyzerClients {
                 .toBodilessEntity();
     }
 
-    private String boundedJson(Map<String, Object> value) {
+    @SuppressWarnings("unchecked")
+    public AiWorkClaim claimAiWork(
+            AiWorkIdentity identity,
+            String ownerToken,
+            int leaseSeconds,
+            int completedTtlSeconds,
+            int failedCooldownSeconds) {
+        Map<String, Object> response = authenticatedAiWorkRequest(
+                        mediaClient.post().uri("/internal/v1/idempotency/ai-work/claim"),
+                        aiWorkSecurity)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of(
+                        "keySha256", identity.keySha256(),
+                        "requestSha256", identity.requestSha256(),
+                        "configurationSha256", identity.configurationSha256(),
+                        "workType", identity.workType().name(),
+                        "ownerToken", ownerToken,
+                        "leaseSeconds", leaseSeconds,
+                        "completedTtlSeconds", completedTtlSeconds,
+                        "failedCooldownSeconds", failedCooldownSeconds))
+                .retrieve()
+                .body(Map.class);
+        if (response == null) {
+            throw new IllegalStateException("AI work coordinator returned no claim");
+        }
+        AiWorkClaimStatus status;
         try {
-            String json = objectMapper.writeValueAsString(adjudicationEvidence(value));
-            if (json.length() > 20_000) {
-                throw new IllegalStateException("bounded media evidence exceeded 20000 characters");
-            }
-            return json;
-        } catch (JsonProcessingException exception) {
-            throw new IllegalStateException("could not serialize media evidence", exception);
+            status = AiWorkClaimStatus.valueOf(String.valueOf(response.get("status")));
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalStateException("AI work coordinator returned an invalid status", exception);
+        }
+        Object rawResult = response.get("result");
+        Map<String, Object> result = rawResult instanceof Map<?, ?> map
+                ? (Map<String, Object>) map
+                : Map.of();
+        Object rawRetry = response.get("retryAfterMillis");
+        long retryAfterMillis = rawRetry instanceof Number number
+                ? Math.max(0, number.longValue())
+                : 0;
+        return new AiWorkClaim(status, Map.copyOf(result), retryAfterMillis);
+    }
+
+    public void completeAiWork(
+            String keySha256, String ownerToken, Map<String, Object> result) {
+        authenticatedAiWorkRequest(
+                        mediaClient.post().uri("/internal/v1/idempotency/ai-work/complete"),
+                        aiWorkSecurity)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of(
+                        "keySha256", keySha256,
+                        "ownerToken", ownerToken,
+                        "result", result))
+                .retrieve()
+                .toBodilessEntity();
+    }
+
+    public void failAiWork(String keySha256, String ownerToken) {
+        authenticatedAiWorkRequest(
+                        mediaClient.post().uri("/internal/v1/idempotency/ai-work/fail"),
+                        aiWorkSecurity)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(Map.of("keySha256", keySha256, "ownerToken", ownerToken))
+                .retrieve()
+                .toBodilessEntity();
+    }
+
+    static RestClient.RequestBodySpec authenticatedAiWorkRequest(
+            RestClient.RequestBodySpec request,
+            AiWorkIdempotencySecurityProperties security) {
+        aiWorkAuthenticationHeaders(security).forEach(request::header);
+        return request;
+    }
+
+    static Map<String, String> aiWorkAuthenticationHeaders(
+            AiWorkIdempotencySecurityProperties security) {
+        if (!security.authenticationEnabled()) {
+            return Map.of();
+        }
+        return Map.of(
+                AiWorkIdempotencySecurityProperties.HEADER_NAME,
+                security.internalToken());
+    }
+
+    private String boundedJson(Map<String, Object> value) {
+        String json = new String(
+                canonicalReferenceEvidence(value), StandardCharsets.UTF_8);
+        if (json.length() > 20_000) {
+            throw new IllegalStateException("bounded media evidence exceeded 20000 characters");
+        }
+        return json;
+    }
+
+    /**
+     * Canonical digest of the exact bounded evidence object sent to image adjudication. Object
+     * keys are sorted recursively while candidate-list order remains significant.
+     */
+    public static String referenceEvidenceSha256(Map<String, Object> value) {
+        try {
+            return HexFormat.of().formatHex(
+                    MessageDigest.getInstance("SHA-256")
+                            .digest(canonicalReferenceEvidence(value)));
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is not available", exception);
         }
     }
 
-    private Map<String, Object> adjudicationEvidence(Map<String, Object> source) {
+    private static byte[] canonicalReferenceEvidence(Map<String, Object> value) {
+        try {
+            return new ObjectMapper()
+                    .writer()
+                    .with(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
+                    .writeValueAsBytes(adjudicationEvidence(value));
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException(
+                    "could not canonicalize media evidence", exception);
+        }
+    }
+
+    private static Map<String, Object> adjudicationEvidence(Map<String, Object> source) {
         if (source == null) {
             return Map.of();
         }
@@ -333,5 +447,17 @@ public class AnalyzerClients {
         public String getFilename() {
             return filename;
         }
+    }
+
+    public record AiWorkClaim(
+            AiWorkClaimStatus status,
+            Map<String, Object> result,
+            long retryAfterMillis) {}
+
+    public enum AiWorkClaimStatus {
+        OWNER,
+        WAIT,
+        COMPLETED,
+        FAILED
     }
 }

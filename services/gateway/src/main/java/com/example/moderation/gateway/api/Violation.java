@@ -16,6 +16,7 @@ public enum Violation {
     SPAM_SCAM,
     VULGAR,
     IMPERSONATION,
+    POLITICAL_CONTENT,
     OFF_TOPIC,
     FINANCIAL_PRIVACY,
     FINANCIAL_RISK,
@@ -46,6 +47,7 @@ public enum Violation {
             case "spam_scam" -> SPAM_SCAM;
             case "vulgar" -> VULGAR;
             case "impersonation", "reserved_username" -> IMPERSONATION;
+            case "political_content" -> POLITICAL_CONTENT;
             case "off_topic", "not_investment" -> OFF_TOPIC;
             case "financial_privacy" -> FINANCIAL_PRIVACY;
             case "financial_risk" -> FINANCIAL_RISK;

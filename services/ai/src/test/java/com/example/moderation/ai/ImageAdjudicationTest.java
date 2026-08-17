@@ -29,6 +29,54 @@ class ImageAdjudicationTest {
     }
 
     @Test
+    void acceptsRestrictedPoliticalEntityBlocksAndPossibleUnknown() {
+        for (String value : List.of("president", "minister", "yap", "multiple")) {
+            ImageAdjudication result = restrictedPoliticalEntity(
+                    "block", value, "restricted_political_entity");
+            assertThatCode(() -> result.validate(Set.of(), "classifier_block_recheck"))
+                    .doesNotThrowAnyException();
+        }
+
+        ImageAdjudication possible = restrictedPoliticalEntity(
+                "unknown", "possible", "restricted_political_entity");
+        assertThatCode(() -> possible.validate(Set.of(), "classifier_block_recheck"))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void possibleRestrictedPoliticalEntityPrecedesOffTopic() {
+        ImageAdjudication result = new ImageAdjudication(
+                "classifier_block_recheck",
+                "unknown",
+                "allow",
+                "none",
+                "off_topic",
+                "none",
+                "none",
+                "none",
+                "none",
+                "possible",
+                "uncertain",
+                "restricted_political_entity",
+                "inconclusive",
+                "insufficient",
+                "insufficient_evidence",
+                List.of());
+
+        assertThatCode(() -> result.validate(Set.of(), "classifier_block_recheck"))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void rejectsAllowWhenARestrictedPoliticalEntityIsConfirmed() {
+        ImageAdjudication result = restrictedPoliticalEntity(
+                "allow", "president", "none");
+
+        assertThatThrownBy(() -> result.validate(Set.of(), "classifier_block_recheck"))
+                .isInstanceOf(OpenAiRestClient.OpenAiResponseException.class);
+    }
+
+    @Test
     void overallBlockCanOverrideAnIndependentUnknownSafetySignal() {
         ImageAdjudication result = new ImageAdjudication(
                 "classifier_block_recheck",
@@ -39,6 +87,7 @@ class ImageAdjudicationTest {
                 "factual_claim",
                 "none",
                 "clear",
+                "none",
                 "none",
                 "none",
                 "financial_privacy",
@@ -59,6 +108,7 @@ class ImageAdjudicationTest {
                 "unknown",
                 "none",
                 "investment_related",
+                "none",
                 "none",
                 "none",
                 "none",
@@ -97,6 +147,7 @@ class ImageAdjudicationTest {
                 "clear",
                 "none",
                 "none",
+                "none",
                 "financial_risk",
                 "confirmed",
                 "current_text",
@@ -113,6 +164,7 @@ class ImageAdjudicationTest {
                 "none",
                 "clear",
                 "none",
+                "none",
                 "impersonation",
                 "confirmed",
                 "current_text",
@@ -128,6 +180,7 @@ class ImageAdjudicationTest {
                 "none",
                 "none",
                 "clear",
+                "none",
                 "none",
                 "off_topic",
                 "confirmed",
@@ -192,6 +245,7 @@ class ImageAdjudicationTest {
                 "none",
                 "none",
                 "none",
+                "none",
                 "rejected",
                 "current_text",
                 "current_content_safe",
@@ -232,6 +286,7 @@ class ImageAdjudicationTest {
                 "none",
                 "none",
                 "none",
+                "none",
                 "rejected",
                 "current_visual",
                 "reference_only_similarity",
@@ -253,6 +308,7 @@ class ImageAdjudicationTest {
                 "uncertain",
                 "possible",
                 "possible",
+                "possible",
                 "uncertain",
                 "evidence_unavailable",
                 "inconclusive",
@@ -270,6 +326,7 @@ class ImageAdjudicationTest {
                 "uncertain",
                 "uncertain",
                 "uncertain",
+                "possible",
                 "possible",
                 "possible",
                 "uncertain",
@@ -373,6 +430,7 @@ class ImageAdjudicationTest {
                 "none",
                 "none",
                 "none",
+                "none",
                 "rejected",
                 "current_text",
                 "current_content_safe",
@@ -395,6 +453,7 @@ class ImageAdjudicationTest {
                 "none",
                 "none",
                 "none",
+                "none",
                 "rejected",
                 "current_text",
                 "current_content_safe",
@@ -408,6 +467,7 @@ class ImageAdjudicationTest {
                 "block",
                 "hate",
                 "investment_related",
+                "none",
                 "none",
                 "none",
                 "none",
@@ -437,6 +497,7 @@ class ImageAdjudicationTest {
                 financialRisk,
                 financialPrivacy,
                 impersonation,
+                "none",
                 "uncertain",
                 finalReason,
                 "inconclusive",
@@ -463,10 +524,38 @@ class ImageAdjudicationTest {
                 financialPrivacy,
                 impersonation,
                 "none",
+                "none",
                 finalReason,
                 "confirmed",
                 "current_text",
                 "current_policy_violation",
+                List.of());
+    }
+
+    private static ImageAdjudication restrictedPoliticalEntity(
+            String action, String restrictedPoliticalEntity, String finalReason) {
+        boolean unknown = "unknown".equals(action);
+        boolean block = "block".equals(action);
+        return new ImageAdjudication(
+                "classifier_block_recheck",
+                action,
+                "allow",
+                "none",
+                "investment_related",
+                "none",
+                "none",
+                "none",
+                "none",
+                restrictedPoliticalEntity,
+                "general_politics",
+                finalReason,
+                unknown ? "inconclusive" : block ? "confirmed" : "rejected",
+                unknown ? "insufficient" : "current_text",
+                unknown
+                        ? "insufficient_evidence"
+                        : block
+                                ? "current_policy_violation"
+                                : "current_content_safe",
                 List.of());
     }
 }

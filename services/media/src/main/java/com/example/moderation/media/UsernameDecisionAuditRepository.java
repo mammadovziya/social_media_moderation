@@ -36,6 +36,10 @@ class UsernameDecisionAuditRepository {
                             financial_risk,
                             financial_privacy,
                             impersonation,
+                            restricted_political_entity,
+                            local_restricted_political_entity,
+                            restricted_political_registry_digest,
+                            blocked_terms_digest,
                             policy_version,
                             handle_structure_version,
                             handle_structure_sha256,
@@ -69,6 +73,10 @@ class UsernameDecisionAuditRepository {
                             :financialRisk,
                             :financialPrivacy,
                             :impersonation,
+                            :restrictedPoliticalEntity,
+                            :localRestrictedPoliticalEntity,
+                            :restrictedPoliticalRegistryDigest,
+                            :blockedTermsDigest,
                             :policyVersion,
                             :handleStructureVersion,
                             :handleStructureSha256,
@@ -103,6 +111,19 @@ class UsernameDecisionAuditRepository {
                 .param("financialRisk", event.financialRisk(), Types.VARCHAR)
                 .param("financialPrivacy", event.financialPrivacy(), Types.VARCHAR)
                 .param("impersonation", event.impersonation(), Types.VARCHAR)
+                .param(
+                        "restrictedPoliticalEntity",
+                        event.restrictedPoliticalEntity(),
+                        Types.VARCHAR)
+                .param(
+                        "localRestrictedPoliticalEntity",
+                        event.localRestrictedPoliticalEntity(),
+                        Types.VARCHAR)
+                .param(
+                        "restrictedPoliticalRegistryDigest",
+                        event.restrictedPoliticalRegistryDigest(),
+                        Types.CHAR)
+                .param("blockedTermsDigest", event.blockedTermsDigest(), Types.CHAR)
                 .param("policyVersion", event.policyVersion())
                 .param("handleStructureVersion", event.handleStructureVersion())
                 .param("handleStructureSha256", event.handleStructureSha256(), Types.CHAR)
@@ -130,7 +151,7 @@ class UsernameDecisionAuditRepository {
                 .param("verdictSource", event.verdictSource())
                 .param(
                         "provenanceSchemaVersion",
-                        UsernameDecisionAuditRequest.PROVENANCE_SCHEMA_VERSION)
+                        event.resolvedProvenanceSchemaVersion())
                 .param("latencyMs", event.latencyMs())
                 .update(keys, "id");
         if (inserted != 1) {

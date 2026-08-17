@@ -22,7 +22,7 @@ public record ImageDecisionAuditRequest(
         @NotBlank @Size(max = 64) @Pattern(regexp = "[A-Z][A-Z0-9_]*") String violation,
         @Size(max = 64)
                 @Pattern(regexp =
-                        "NONE|KNOWN_IMAGE|SAFETY|FINANCIAL_PRIVACY|FINANCIAL_RISK|IMPERSONATION|OFF_TOPIC|EVIDENCE_UNAVAILABLE|ANALYZER_ERROR")
+                        "NONE|KNOWN_IMAGE|SAFETY|FINANCIAL_PRIVACY|FINANCIAL_RISK|IMPERSONATION|POLITICAL_CONTENT|OFF_TOPIC|EVIDENCE_UNAVAILABLE|ANALYZER_ERROR")
                 String finalReason,
         @Size(max = 64)
                 @Pattern(regexp = "INVESTMENT_RELATED|INVESTMENT_ADJACENT|OFF_TOPIC|UNCERTAIN")
@@ -44,16 +44,27 @@ public record ImageDecisionAuditRequest(
         @Size(max = 64)
                 @Pattern(regexp = "NONE|INVESTMENT_RELEVANT|GENERAL_POLITICS|UNCERTAIN")
                 String politicalContext,
+        @Size(max = 64)
+                @Pattern(regexp = "NONE|PRESIDENT|MINISTER|YAP|MULTIPLE|POSSIBLE")
+                String restrictedPoliticalEntity,
+        @Size(max = 64)
+                @Pattern(regexp = "PRESIDENT|MINISTER|YAP|MULTIPLE|POSSIBLE")
+                String localRestrictedPoliticalEntity,
+        Boolean localPolicyTerminal,
+        @Size(max = 64) @Pattern(regexp = "VULGAR|POLITICAL_CONTENT|OTHER")
+                String localPolicyViolation,
         @NotNull @Pattern(regexp =
                         "EXACT_MATCH|SIMILAR_CANDIDATE|MATCHED|NOT_MATCHED|LOW_QUALITY|UNAVAILABLE")
                 String imageMatch,
         @NotBlank @Size(max = 64) String policyVersion,
         @NotNull @Pattern(regexp = "[0-9a-f]{64}") String policyWordListsDigest,
+        @Pattern(regexp = "[0-9a-f]{64}") String restrictedPoliticalRegistryDigest,
         @Size(max = 128) @Pattern(regexp = "\\S(?:.*\\S)?") String exactReferenceId,
         @NotNull @Size(max = 10)
                 List<@NotBlank @Size(max = 128) String> candidateIds,
         @NotNull Boolean classifierProposedBlock,
-        @NotNull @Pattern(regexp = "image-decision-provenance-v2|image-decision-provenance-v3")
+        @NotNull @Pattern(regexp =
+                        "image-decision-provenance-v2|image-decision-provenance-v3|image-decision-provenance-v4")
                 String provenanceSchemaVersion,
         @NotNull @Pattern(regexp = "ok|error|not_required|unavailable")
                 String moderationStatus,
@@ -124,7 +135,8 @@ public record ImageDecisionAuditRequest(
                 @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9._:+/@~-]{0,127}")
                 String candidateSelectionVersion,
         @NotNull @Size(max = 64)
-                @Pattern(regexp = "(?:image-decision-config-v1|image-decision-config-v2|unavailable)")
+                @Pattern(regexp =
+                        "(?:image-decision-config-v1|image-decision-config-v2|image-decision-config-v3|unavailable)")
                 String decisionConfigurationVersion,
         @NotNull @Size(max = 64)
                 @Pattern(regexp = "(?:[0-9a-f]{64}|unavailable)")
@@ -327,14 +339,18 @@ public record ImageDecisionAuditRequest(
                 && "unavailable".equals(decisionConfigurationVersion)
                 && "unavailable".equals(decisionConfigurationDigest)
                 && "unavailable".equals(decisionConfigurationSnapshot);
-        String expectedConfigurationVersion = "image-decision-provenance-v3"
-                        .equals(provenanceSchemaVersion)
-                ? "image-decision-config-v2"
-                : "image-decision-config-v1";
-        String expectedImplementationIdentity = "image-decision-provenance-v3"
-                        .equals(provenanceSchemaVersion)
-                ? "gateway-image-policy-runtime-v2"
-                : "gateway-image-policy-runtime-v1";
+        String expectedConfigurationVersion =
+                "image-decision-provenance-v4".equals(provenanceSchemaVersion)
+                        ? "image-decision-config-v3"
+                        : "image-decision-provenance-v3".equals(provenanceSchemaVersion)
+                                ? "image-decision-config-v2"
+                                : "image-decision-config-v1";
+        String expectedImplementationIdentity =
+                "image-decision-provenance-v4".equals(provenanceSchemaVersion)
+                        ? "gateway-image-policy-runtime-v3"
+                        : "image-decision-provenance-v3".equals(provenanceSchemaVersion)
+                                ? "gateway-image-policy-runtime-v2"
+                                : "gateway-image-policy-runtime-v1";
         boolean actual = isActualValue(pdqAlgorithmVersion)
                 && isActualValue(decoderProfileVersion)
                 && !"unavailable".equals(configuredModerationModel)
@@ -351,9 +367,10 @@ public record ImageDecisionAuditRequest(
         return unavailable || actual;
     }
 
-    @AssertTrue(message = "v3 policy signals must be complete and coherent")
+    @AssertTrue(message = "current policy signals must be complete and coherent")
     public boolean isPolicySignalsCoherent() {
-        if (!"image-decision-provenance-v3".equals(provenanceSchemaVersion)) {
+        boolean v4 = "image-decision-provenance-v4".equals(provenanceSchemaVersion);
+        if (!v4 && !"image-decision-provenance-v3".equals(provenanceSchemaVersion)) {
             return true;
         }
         if (finalReason == null
@@ -366,7 +383,10 @@ public record ImageDecisionAuditRequest(
         boolean policyModelEvaluated = "ok".equals(classificationStatus)
                 || "ok".equals(adjudicationStatus);
         if (policyModelEvaluated
-                && (domain == null || financialClaim == null || politicalContext == null)) {
+                && (domain == null
+                        || financialClaim == null
+                        || politicalContext == null
+                        || (v4 && restrictedPoliticalEntity == null))) {
             return false;
         }
         if ((policyModelEvaluated || "SAFETY".equals(finalReason))
@@ -399,6 +419,48 @@ public record ImageDecisionAuditRequest(
                 && expected.violation().equals(violation);
     }
 
+    @AssertTrue(message = "local policy evidence must bind to a no-model terminal path")
+    public boolean isLocalPolicyEvidenceCoherent() {
+        if (!"image-decision-provenance-v4".equals(provenanceSchemaVersion)) {
+            return !Boolean.TRUE.equals(localPolicyTerminal)
+                    && localPolicyViolation == null
+                    && localRestrictedPoliticalEntity == null
+                    && restrictedPoliticalRegistryDigest == null;
+        }
+        if (localPolicyTerminal == null || restrictedPoliticalRegistryDigest == null) {
+            return false;
+        }
+        if (!Boolean.TRUE.equals(localPolicyTerminal)) {
+            return localPolicyViolation == null;
+        }
+        return "not_required".equals(moderationStatus)
+                && "not_required".equals(classificationStatus)
+                && "not_required".equals(adjudicationStatus)
+                && "not_invoked".equals(aiConfigurationStatus)
+                && (localPolicyViolation != null || "CLEAR".equals(financialPrivacy));
+    }
+
+    @AssertTrue(message = "local political evidence must match the effective axis")
+    public boolean isLocalRestrictedPoliticalEvidenceCoherent() {
+        if (!"image-decision-provenance-v4".equals(provenanceSchemaVersion)) {
+            return localRestrictedPoliticalEntity == null;
+        }
+        if (localRestrictedPoliticalEntity == null) {
+            return true;
+        }
+        if (restrictedPoliticalEntity == null) {
+            return false;
+        }
+        if ("POSSIBLE".equals(localRestrictedPoliticalEntity)) {
+            return true;
+        }
+        if ("MULTIPLE".equals(localRestrictedPoliticalEntity)) {
+            return "MULTIPLE".equals(restrictedPoliticalEntity);
+        }
+        return localRestrictedPoliticalEntity.equals(restrictedPoliticalEntity)
+                || "MULTIPLE".equals(restrictedPoliticalEntity);
+    }
+
     private boolean isSafetySignalCoherent() {
         if (safetyAction == null) {
             return "NONE".equals(safety);
@@ -424,6 +486,14 @@ public record ImageDecisionAuditRequest(
     }
 
     private PolicyOutcome reducedPolicyOutcome() {
+        if (Boolean.TRUE.equals(localPolicyTerminal)
+                && ("VULGAR".equals(localPolicyViolation)
+                        || "OTHER".equals(localPolicyViolation))) {
+            return new PolicyOutcome(
+                    "BLOCK",
+                    localPolicyViolation,
+                    "SAFETY");
+        }
         if ("BLOCK".equals(safetyAction)) {
             return new PolicyOutcome("BLOCK", safety, "SAFETY");
         }
@@ -435,6 +505,21 @@ public record ImageDecisionAuditRequest(
         }
         if ("CLEAR".equals(impersonation)) {
             return new PolicyOutcome("BLOCK", "IMPERSONATION", "IMPERSONATION");
+        }
+        if (Boolean.TRUE.equals(localPolicyTerminal)
+                && "POLITICAL_CONTENT".equals(localPolicyViolation)) {
+            return new PolicyOutcome(
+                    "BLOCK", "POLITICAL_CONTENT", "POLITICAL_CONTENT");
+        }
+        if ("image-decision-provenance-v4".equals(provenanceSchemaVersion)) {
+            if (isConfirmedRestrictedPoliticalEntity(restrictedPoliticalEntity)) {
+                return new PolicyOutcome(
+                        "BLOCK", "POLITICAL_CONTENT", "POLITICAL_CONTENT");
+            }
+            if ("POSSIBLE".equals(restrictedPoliticalEntity)) {
+                return new PolicyOutcome(
+                        "UNKNOWN", "POLITICAL_CONTENT", "POLITICAL_CONTENT");
+            }
         }
         if ("OFF_TOPIC".equals(domain)) {
             return new PolicyOutcome("BLOCK", "OFF_TOPIC", "OFF_TOPIC");
@@ -488,6 +573,13 @@ public record ImageDecisionAuditRequest(
         return "POTENTIALLY_MISLEADING".equals(risk)
                 || "PAID_PROMOTION".equals(risk)
                 || "UNCERTAIN".equals(risk);
+    }
+
+    private static boolean isConfirmedRestrictedPoliticalEntity(String entity) {
+        return "PRESIDENT".equals(entity)
+                || "MINISTER".equals(entity)
+                || "YAP".equals(entity)
+                || "MULTIPLE".equals(entity);
     }
 
     private String financialRiskViolation() {
@@ -549,9 +641,14 @@ public record ImageDecisionAuditRequest(
                 financialPrivacy,
                 impersonation,
                 politicalContext,
+                restrictedPoliticalEntity,
+                localRestrictedPoliticalEntity,
+                Boolean.TRUE.equals(localPolicyTerminal),
+                localPolicyViolation,
                 imageMatch,
                 policyVersion,
                 policyWordListsDigest,
+                restrictedPoliticalRegistryDigest,
                 exactReferenceId,
                 candidateIds,
                 classifierProposedBlock,

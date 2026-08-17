@@ -60,3 +60,13 @@ visual-retrieval:
   read-timeout-millis: ${VISUAL_READ_TIMEOUT_MILLIS:30000}
   max-references: ${VISUAL_MAX_REFERENCES:256}
   max-snapshot-bytes: ${VISUAL_MAX_SNAPSHOT_BYTES:67108864}
+
+ai-work-idempotency:
+  cleanup:
+    enabled: ${AI_WORK_IDEMPOTENCY_CLEANUP_ENABLED:true}
+    interval-millis: ${AI_WORK_IDEMPOTENCY_CLEANUP_INTERVAL_MILLIS:300000}
+    batch-size: ${AI_WORK_IDEMPOTENCY_CLEANUP_BATCH_SIZE:500}
+    stale-in-progress-seconds: ${AI_WORK_IDEMPOTENCY_STALE_IN_PROGRESS_SECONDS:86400}
+  security:
+    internal-token: ${AI_WORK_IDEMPOTENCY_INTERNAL_TOKEN:}
+    allow-unauthenticated: ${AI_WORK_IDEMPOTENCY_ALLOW_UNAUTHENTICATED:false}

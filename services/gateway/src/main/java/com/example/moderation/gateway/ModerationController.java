@@ -17,6 +17,7 @@ import com.example.moderation.gateway.api.Impersonation;
 import com.example.moderation.gateway.api.ModerationRequest;
 import com.example.moderation.gateway.api.ModerationResponse;
 import com.example.moderation.gateway.api.PoliticalContext;
+import com.example.moderation.gateway.api.RestrictedPoliticalEntity;
 import com.example.moderation.gateway.api.Safety;
 import com.example.moderation.gateway.api.Violation;
 import io.swagger.v3.oas.annotations.Hidden;
@@ -40,8 +41,9 @@ import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.List;
+import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -69,11 +71,11 @@ public class ModerationController {
     private static final int MAX_AI_CONFIGURATION_SNAPSHOT_CHARS = 2048;
     private static final String IMAGE_TEXT_LABEL = "Image text:\n";
     private static final String PROVENANCE_SCHEMA_VERSION =
-            "image-decision-provenance-v3";
+            "image-decision-provenance-v4";
     private static final String DECISION_CONFIGURATION_VERSION =
-            "image-decision-config-v2";
+            "image-decision-config-v3";
     private static final String DECISION_IMPLEMENTATION_IDENTITY =
-            "gateway-image-policy-runtime-v2";
+            "gateway-image-policy-runtime-v3";
     private static final String AI_CONFIGURATION_SCHEMA_VERSION =
             "ai-configuration-v1";
     private static final String AI_VALIDATION_STATUS_KEY =
@@ -97,16 +99,22 @@ public class ModerationController {
     private final ModerationProperties properties;
     private final FinancialPrivacyScanner financialPrivacyScanner;
     private final ReloadingBlockedTerms blockedTerms;
+    private final ReloadingRestrictedPoliticalEntities restrictedPoliticalEntities;
+    private final AiWorkCoordinator aiWorkCoordinator;
 
     public ModerationController(
             AnalyzerClients clients,
             ModerationProperties properties,
             FinancialPrivacyScanner financialPrivacyScanner,
-            ReloadingBlockedTerms blockedTerms) {
+            ReloadingBlockedTerms blockedTerms,
+            ReloadingRestrictedPoliticalEntities restrictedPoliticalEntities,
+            AiWorkCoordinator aiWorkCoordinator) {
         this.clients = clients;
         this.properties = properties;
         this.financialPrivacyScanner = financialPrivacyScanner;
         this.blockedTerms = blockedTerms;
+        this.restrictedPoliticalEntities = restrictedPoliticalEntities;
+        this.aiWorkCoordinator = aiWorkCoordinator;
     }
 
     @Hidden
@@ -119,14 +127,18 @@ public class ModerationController {
     @GetMapping("/readyz")
     public Map<String, Object> ready() {
         blockedTerms.snapshot();
+        restrictedPoliticalEntities.snapshot();
         boolean localPolicy = blockedTerms.reloadHealthy();
+        boolean politicalRegistry = restrictedPoliticalEntities.reloadHealthy();
         boolean media = clients.mediaReady();
         boolean ai = clients.aiReady();
-        if (!localPolicy || !media || !ai) {
+        if (!localPolicy || !politicalRegistry || !media || !ai) {
             throw new ResponseStatusException(
                     HttpStatus.SERVICE_UNAVAILABLE,
                     "workers not ready: localPolicy="
                             + localPolicy
+                            + ", politicalRegistry="
+                            + politicalRegistry
                             + ", media="
                             + media
                             + ", ai="
@@ -412,10 +424,17 @@ public class ModerationController {
             return moderateHandle(contentId, text, requestId, startedAt);
         }
         ReloadingBlockedTerms.Snapshot blockedTermsSnapshot = blockedTerms.snapshot();
-        Violation localViolation =
-                blockedTermsSnapshot.matches(text) || blockedTermsSnapshot.matches(quotedText)
-                        ? Violation.OTHER
-                        : Violation.NONE;
+        ReloadingRestrictedPoliticalEntities.Snapshot politicalRegistrySnapshot =
+                restrictedPoliticalEntities.snapshot();
+        Violation localViolation = ReloadingBlockedTerms.strongestViolation(
+                blockedTermsSnapshot.violation(text),
+                blockedTermsSnapshot.violation(quotedText));
+        RestrictedPoliticalEntity localRestrictedPoliticalEntity =
+                ReloadingRestrictedPoliticalEntities.merge(
+                        politicalRegistrySnapshot.entity(text),
+                        politicalRegistrySnapshot.entity(quotedText));
+        localViolation = withConfirmedPoliticalViolation(
+                localViolation, localRestrictedPoliticalEntity);
         FinancialPrivacy localFinancialPrivacy = financialPrivacy(
                 financialPrivacyScanner.scan(visibleCurrentText(text, quotedText)));
         if ((image == null && localViolation != Violation.NONE)
@@ -423,7 +442,11 @@ public class ModerationController {
                         && localFinancialPrivacy == FinancialPrivacy.CLEAR)
                 || (image == null && localFinancialPrivacy == FinancialPrivacy.CLEAR)) {
             ModerationResponse response = localTerminalBlock(
-                    contentId, type, localViolation, localFinancialPrivacy);
+                    contentId,
+                    type,
+                    localViolation,
+                    localFinancialPrivacy,
+                    localRestrictedPoliticalEntity);
             int latencyMs = (int) Math.min(
                     600_000,
                     java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
@@ -459,18 +482,29 @@ public class ModerationController {
                     ? "upload"
                     : image.getOriginalFilename();
             media = analyzeMedia(bytes, filename, imageContentType, contentId, requestId);
+            boolean mediaEnvelopeValid = validMediaEnvelope(media);
+            List<String> localPolicyOcrSegments = mediaEnvelopeValid
+                    ? blocklistOcrSegments(media)
+                    : List.of();
             FinancialPrivacy ocrFinancialPrivacy = financialPrivacy(
                     financialPrivacyScanner.scan(currentOcrText(media)));
             localFinancialPrivacy = strongestPrivacy(
                     localFinancialPrivacy,
                     ocrFinancialPrivacy);
-            if (blockedTermsSnapshot.matches(blocklistOcrText(media))) {
-                localViolation = Violation.OTHER;
+            for (String localPolicyOcrSegment : localPolicyOcrSegments) {
+                localViolation = ReloadingBlockedTerms.strongestViolation(
+                        localViolation,
+                        blockedTermsSnapshot.violation(localPolicyOcrSegment));
+                localRestrictedPoliticalEntity = ReloadingRestrictedPoliticalEntities.merge(
+                        localRestrictedPoliticalEntity,
+                        politicalRegistrySnapshot.entity(localPolicyOcrSegment));
             }
+            localViolation = withConfirmedPoliticalViolation(
+                    localViolation, localRestrictedPoliticalEntity);
             ai = localViolation != Violation.NONE
                             || localFinancialPrivacy == FinancialPrivacy.CLEAR
                     ? localPolicyAiNotRequired()
-                    : !validMediaEnvelope(media)
+                    : !mediaEnvelopeValid
                     ? unavailableAi()
                     : DecisionPolicy.hasAuthoritativeExactMatch(media)
                             ? exactAssetAiNotRequired()
@@ -496,7 +530,9 @@ public class ModerationController {
                 type,
                 localViolation,
                 localFinancialPrivacy,
-                properties.unknownThreshold());
+                properties.moderationScoreBlockThreshold());
+        result = applyLocalRestrictedPoliticalEntity(
+                result, localRestrictedPoliticalEntity);
         Map<String, Object> moderation = DecisionPolicy.nestedMap(ai, "moderation");
         Map<String, Object> classification = DecisionPolicy.nestedMap(ai, "classification");
         Map<String, Object> adjudication = DecisionPolicy.nestedMap(ai, "adjudication");
@@ -525,8 +561,11 @@ public class ModerationController {
                     classification,
                     adjudication,
                     signals,
+                    localViolation,
+                    localRestrictedPoliticalEntity,
                     localFinancialPrivacy,
                     blockedTermsSnapshot.semanticSha256(),
+                    politicalRegistrySnapshot.semanticSha256(),
                     latencyMs);
         }
         log.info(
@@ -568,6 +607,8 @@ public class ModerationController {
                 signals == null ? localFinancialPrivacy : signals.financialPrivacy(),
                 signals == null ? impersonationFor(result) : signals.impersonation(),
                 signals == null ? null : signals.politicalContext(),
+                effectiveRestrictedPoliticalEntity(
+                        signals, localRestrictedPoliticalEntity),
                 match,
                 imageMatchScore,
                 image == null || shouldSuppressOcr(signals, localFinancialPrivacy)
@@ -620,17 +661,34 @@ public class ModerationController {
                     HttpStatus.BAD_REQUEST, structure.reason().message());
         }
         String normalized = structure.normalized();
-        Map<String, Object> localEvidence = Map.of("skeleton", structure.skeleton());
+        ReloadingBlockedTerms.Snapshot blockedTermsSnapshot = blockedTerms.snapshot();
+        ReloadingRestrictedPoliticalEntities.Snapshot politicalRegistrySnapshot =
+                restrictedPoliticalEntities.snapshot();
+        RestrictedPoliticalEntity localRestrictedPoliticalEntity =
+                politicalRegistrySnapshot.entity(normalized);
+        Map<String, Object> localEvidenceBuilder = new java.util.LinkedHashMap<>();
+        localEvidenceBuilder.put("skeleton", structure.skeleton());
+        localEvidenceBuilder.put(
+                "restrictedPoliticalRegistryDigest",
+                politicalRegistrySnapshot.semanticSha256());
+        localEvidenceBuilder.put(
+                "blockedTermsDigest", blockedTermsSnapshot.semanticSha256());
+        if (localRestrictedPoliticalEntity != RestrictedPoliticalEntity.NONE) {
+            localEvidenceBuilder.put(
+                    "localRestrictedPoliticalEntity",
+                    localRestrictedPoliticalEntity.name());
+        }
+        Map<String, Object> localEvidence = Map.copyOf(localEvidenceBuilder);
 
         // Free local checks first. Neither needs stored state, so neither should cost a round trip.
-        ReloadingBlockedTerms.Snapshot blockedTermsSnapshot = blockedTerms.snapshot();
-        if (blockedTermsSnapshot.matches(normalized)) {
+        Violation blockedTermViolation = blockedTermsSnapshot.violation(normalized);
+        if (blockedTermViolation != Violation.NONE) {
             return finishHandle(
                     contentId,
                     requestId,
                     normalized,
                     localEvidence,
-                    new DecisionPolicy.Result(Decision.BLOCK, Violation.OTHER),
+                    new DecisionPolicy.Result(Decision.BLOCK, blockedTermViolation),
                     UsernameDecisionAuditPayload.DecidingLayer.BLOCKED_TERM,
                     null,
                     FinancialPrivacy.NONE,
@@ -657,8 +715,29 @@ public class ModerationController {
                     UsernameDecisionAuditPayload.VerdictSource.NOT_INVOKED,
                     startedAt);
         }
+        if (PolicySignals.isConfirmedRestrictedPoliticalEntity(
+                localRestrictedPoliticalEntity)) {
+            return finishHandle(
+                    contentId,
+                    requestId,
+                    normalized,
+                    localEvidence,
+                    new DecisionPolicy.Result(
+                            Decision.BLOCK,
+                            Violation.POLITICAL_CONTENT,
+                            FinalReason.POLITICAL_CONTENT),
+                    UsernameDecisionAuditPayload.DecidingLayer.RESTRICTED_POLITICAL_ENTITY,
+                    null,
+                    localFinancialPrivacy,
+                    null,
+                    UsernameDecisionAuditPayload.VerdictSource.NOT_INVOKED,
+                    startedAt);
+        }
 
-        Map<String, Object> evidence = handleEvidence(normalized, requestId);
+        Map<String, Object> handleEvidence = handleEvidence(normalized, requestId);
+        Map<String, Object> combinedEvidence = new java.util.LinkedHashMap<>(handleEvidence);
+        combinedEvidence.putAll(localEvidence);
+        Map<String, Object> evidence = Map.copyOf(combinedEvidence);
         if (!"ok".equals(evidence.get("status"))) {
             return finishHandle(
                     contentId,
@@ -716,7 +795,9 @@ public class ModerationController {
                 ContentType.USERNAME,
                 Violation.NONE,
                 localFinancialPrivacy,
-                properties.unknownThreshold());
+                properties.moderationScoreBlockThreshold());
+        result = applyLocalRestrictedPoliticalEntity(
+                result, localRestrictedPoliticalEntity);
         PolicySignals signals = effectivePolicySignals(
                 DecisionPolicy.nestedMap(ai, "classification"),
                 Map.of(),
@@ -770,14 +851,15 @@ public class ModerationController {
     }
 
     /**
-     * Caches a complete verdict so a retry of the same handle is idempotent and free. A failure
-     * here is not a decision failure: the cache is an optimization, never evidence.
+     * Keeps the established username cache behavior separate from the content verdict cache.
+     * Cache persistence is an optimization and never changes an otherwise valid decision.
      */
     private void cacheHandleVerdict(
             String handle, Map<String, Object> ai, String requestId) {
         Map<String, Object> classification = DecisionPolicy.nestedMap(ai, "classification");
         Map<String, Object> moderation = DecisionPolicy.nestedMap(ai, "moderation");
-        if (!"ok".equals(classification.get("status")) || !"ok".equals(moderation.get("status"))) {
+        if (!"ok".equals(classification.get("status"))
+                || !"ok".equals(moderation.get("status"))) {
             return;
         }
         try {
@@ -786,27 +868,13 @@ public class ModerationController {
                     properties.expectedClassificationModel(),
                     properties.expectedClassificationPromptBundleSha256(),
                     properties.expectedClassificationProfileSha256(),
-                    withoutUsage(ai));
+                    ConfigurationBoundAiWorkCoordinator.withoutUsage(ai));
         } catch (RuntimeException exception) {
             log.warn(
                     "handle verdict cache unavailable requestId={} failureType={}",
                     requestId,
                     exception.getClass().getSimpleName());
         }
-    }
-
-    /** Strips token accounting so a cached verdict can never be replayed as fresh spend. */
-    private static Map<String, Object> withoutUsage(Map<String, Object> ai) {
-        Map<String, Object> copy = new java.util.LinkedHashMap<>(ai);
-        for (String purpose : List.of("moderation", "classification", "adjudication")) {
-            Map<String, Object> signal = DecisionPolicy.nestedMap(ai, purpose);
-            if (!signal.isEmpty()) {
-                Map<String, Object> reduced = new java.util.LinkedHashMap<>(signal);
-                reduced.remove("usage");
-                copy.put(purpose, reduced);
-            }
-        }
-        return copy;
     }
 
     /** Audits, logs, and renders one handle decision. Every terminal path passes through here. */
@@ -881,6 +949,8 @@ public class ModerationController {
                         ? impersonationForHandle(result)
                         : signals.impersonation(),
                 null,
+                effectiveRestrictedPoliticalEntity(
+                        signals, localRestrictedPoliticalEntity(evidence)),
                 null,
                 null,
                 null,
@@ -931,6 +1001,12 @@ public class ModerationController {
                 nameOrNull(signals == null
                         ? impersonationForHandle(result)
                         : signals.impersonation()),
+                nameOrNull(effectiveRestrictedPoliticalEntity(
+                        signals, localRestrictedPoliticalEntity(evidence))),
+                stringOrNull(evidence.get("localRestrictedPoliticalEntity")),
+                stringOrNull(evidence.get("restrictedPoliticalRegistryDigest")),
+                stringOrNull(evidence.get("blockedTermsDigest")),
+                UsernameDecisionAuditPayload.PROVENANCE_SCHEMA_VERSION,
                 DecisionPolicy.POLICY_VERSION,
                 HandlePolicy.PROFILE_VERSION,
                 HandlePolicy.PROFILE_SHA256,
@@ -970,6 +1046,19 @@ public class ModerationController {
         return value == null ? null : value.name();
     }
 
+    private static RestrictedPoliticalEntity localRestrictedPoliticalEntity(
+            Map<String, Object> evidence) {
+        Object value = evidence.get("localRestrictedPoliticalEntity");
+        if (!(value instanceof String name)) {
+            return RestrictedPoliticalEntity.NONE;
+        }
+        try {
+            return RestrictedPoliticalEntity.valueOf(name);
+        } catch (IllegalArgumentException exception) {
+            return RestrictedPoliticalEntity.NONE;
+        }
+    }
+
     private static String stringOrNull(Object value) {
         return value == null || String.valueOf(value).isBlank()
                 ? null
@@ -988,20 +1077,28 @@ public class ModerationController {
             String contentId,
             ContentType type,
             Violation localViolation,
-            FinancialPrivacy localFinancialPrivacy) {
+            FinancialPrivacy localFinancialPrivacy,
+            RestrictedPoliticalEntity localRestrictedPoliticalEntity) {
         DecisionPolicy.Result result;
-        if (localViolation != Violation.NONE && localViolation != Violation.IMPERSONATION) {
+        if (localViolation != Violation.NONE
+                && localViolation != Violation.IMPERSONATION
+                && localViolation != Violation.POLITICAL_CONTENT) {
             result = new DecisionPolicy.Result(Decision.BLOCK, localViolation);
         } else if (localFinancialPrivacy == FinancialPrivacy.CLEAR) {
             result = new DecisionPolicy.Result(
                     Decision.BLOCK,
                     Violation.FINANCIAL_PRIVACY,
                     FinalReason.FINANCIAL_PRIVACY);
-        } else {
+        } else if (localViolation == Violation.IMPERSONATION) {
             result = new DecisionPolicy.Result(
                     Decision.BLOCK,
                     Violation.IMPERSONATION,
                     FinalReason.IMPERSONATION);
+        } else {
+            result = new DecisionPolicy.Result(
+                    Decision.BLOCK,
+                    Violation.POLITICAL_CONTENT,
+                    FinalReason.POLITICAL_CONTENT);
         }
         return new ModerationResponse(
                 contentId,
@@ -1021,11 +1118,72 @@ public class ModerationController {
                         ? Impersonation.CLEAR
                         : impersonationFor(result),
                 null,
+                localRestrictedPoliticalEntity == RestrictedPoliticalEntity.NONE
+                        ? null
+                        : localRestrictedPoliticalEntity,
                 null,
                 null,
                 null,
                 AiUsage.noCalls(),
                 DecisionPolicy.POLICY_VERSION);
+    }
+
+    private static Violation withConfirmedPoliticalViolation(
+            Violation localViolation,
+            RestrictedPoliticalEntity localRestrictedPoliticalEntity) {
+        return ReloadingBlockedTerms.strongestViolation(
+                localViolation,
+                PolicySignals.isConfirmedRestrictedPoliticalEntity(
+                                localRestrictedPoliticalEntity)
+                        ? Violation.POLITICAL_CONTENT
+                        : Violation.NONE);
+    }
+
+    private static RestrictedPoliticalEntity effectiveRestrictedPoliticalEntity(
+            PolicySignals signals,
+            RestrictedPoliticalEntity localRestrictedPoliticalEntity) {
+        RestrictedPoliticalEntity local = localRestrictedPoliticalEntity == null
+                ? RestrictedPoliticalEntity.NONE
+                : localRestrictedPoliticalEntity;
+        if (signals == null) {
+            return local == RestrictedPoliticalEntity.NONE ? null : local;
+        }
+        RestrictedPoliticalEntity remote = signals.restrictedPoliticalEntity();
+        if (local == RestrictedPoliticalEntity.NONE) {
+            return remote;
+        }
+        if (local == RestrictedPoliticalEntity.POSSIBLE) {
+            return remote == RestrictedPoliticalEntity.NONE ? local : remote;
+        }
+        return ReloadingRestrictedPoliticalEntities.merge(local, remote);
+    }
+
+    private static DecisionPolicy.Result applyLocalRestrictedPoliticalEntity(
+            DecisionPolicy.Result result,
+            RestrictedPoliticalEntity localRestrictedPoliticalEntity) {
+        if (localRestrictedPoliticalEntity == null
+                || localRestrictedPoliticalEntity == RestrictedPoliticalEntity.NONE) {
+            return result;
+        }
+        if (result.reason() == FinalReason.KNOWN_IMAGE
+                || result.reason() == FinalReason.ANALYZER_ERROR
+                || result.reason() == FinalReason.EVIDENCE_UNAVAILABLE) {
+            return result;
+        }
+        if (result.decision() == Decision.BLOCK
+                && (result.reason() == FinalReason.SAFETY
+                        || result.reason() == FinalReason.FINANCIAL_PRIVACY
+                        || result.reason() == FinalReason.FINANCIAL_RISK
+                        || result.reason() == FinalReason.IMPERSONATION)) {
+            return result;
+        }
+        return new DecisionPolicy.Result(
+                PolicySignals.isConfirmedRestrictedPoliticalEntity(
+                                localRestrictedPoliticalEntity)
+                        ? Decision.BLOCK
+                        : Decision.UNKNOWN,
+                Violation.POLITICAL_CONTENT,
+                FinalReason.POLITICAL_CONTENT);
     }
 
     private static PolicySignals effectivePolicySignals(
@@ -1141,13 +1299,62 @@ public class ModerationController {
         return limitWithoutSplittingSurrogate(text, MAX_ANALYSIS_TEXT_CHARS);
     }
 
-    private static String blocklistOcrText(Map<String, Object> media) {
+    private static List<String> blocklistOcrSegments(Map<String, Object> media) {
+        if (!validMediaEnvelope(media)) {
+            return List.of();
+        }
         Map<String, Object> ocr = DecisionPolicy.nestedMap(media, "ocr");
         if (!Boolean.TRUE.equals(ocr.get("confidenceAccepted"))
                 || Boolean.TRUE.equals(ocr.get("truncated"))) {
-            return "";
+            return List.of();
         }
-        return currentOcrText(media);
+        Double minimumConfidence = boundedDouble(
+                ocr.get("minConfidenceThreshold"), 0, 100);
+        if (minimumConfidence == null || !(ocr.get("spans") instanceof List<?> spans)) {
+            return List.of();
+        }
+        List<String> acceptedSegments = new ArrayList<>();
+        StringBuilder acceptedSegment = new StringBuilder();
+        int acceptedCharacters = 0;
+        for (Object rawSpan : spans) {
+            if (!(rawSpan instanceof Map<?, ?> span)
+                    || !(span.get("text") instanceof String text)) {
+                return List.of();
+            }
+            Double confidence = boundedDouble(span.get("confidence"), 0, 100);
+            if (confidence == null) {
+                return List.of();
+            }
+            if (confidence < minimumConfidence || text.isBlank()) {
+                if (!acceptedSegment.isEmpty()) {
+                    acceptedSegments.add(acceptedSegment.toString());
+                    acceptedSegment.setLength(0);
+                }
+                continue;
+            }
+            if (!acceptedSegment.isEmpty()) {
+                if (acceptedCharacters >= MAX_ANALYSIS_TEXT_CHARS) {
+                    break;
+                }
+                acceptedSegment.append(' ');
+                acceptedCharacters++;
+            }
+            String limitedText = limitWithoutSplittingSurrogate(
+                    text, MAX_ANALYSIS_TEXT_CHARS - acceptedCharacters);
+            if (limitedText.isEmpty()) {
+                break;
+            }
+            acceptedSegment.append(limitedText);
+            acceptedCharacters += limitedText.length();
+            if (limitedText.length() < text.length()
+                    || acceptedCharacters >= MAX_ANALYSIS_TEXT_CHARS) {
+                break;
+            }
+        }
+        if (!acceptedSegment.isEmpty()) {
+            acceptedSegments.add(acceptedSegment.toString());
+        }
+        return List.copyOf(acceptedSegments);
     }
 
     static boolean validMediaEnvelope(Map<String, Object> media) {
@@ -1202,8 +1409,11 @@ public class ModerationController {
             Map<String, Object> classification,
             Map<String, Object> adjudication,
             PolicySignals signals,
+            Violation localViolation,
+            RestrictedPoliticalEntity localRestrictedPoliticalEntity,
             FinancialPrivacy localFinancialPrivacy,
             String blockedTermsDigest,
+            String politicalRegistryDigest,
             int latencyMs) {
         Map<String, Object> pdq = DecisionPolicy.nestedMap(media, "pdq");
         Map<String, Object> ocr = DecisionPolicy.nestedMap(media, "ocr");
@@ -1226,7 +1436,8 @@ public class ModerationController {
                 decoderProfileVersion,
                 visual,
                 aiConfiguration,
-                blockedTermsDigest);
+                blockedTermsDigest,
+                politicalRegistryDigest);
         String adjudicationStatus = analysisStatus(adjudication);
         String fallback = switch (adjudicationStatus) {
             case "not_required" -> "not_required";
@@ -1249,9 +1460,19 @@ public class ModerationController {
                         : signals.financialPrivacy()),
                 enumName(signals == null ? impersonationFor(result) : signals.impersonation()),
                 enumName(signals == null ? null : signals.politicalContext()),
+                enumName(effectiveRestrictedPoliticalEntity(
+                        signals, localRestrictedPoliticalEntity)),
+                enumName(localRestrictedPoliticalEntity == RestrictedPoliticalEntity.NONE
+                        ? null
+                        : localRestrictedPoliticalEntity),
+                Boolean.TRUE.equals(ai.get(LOCAL_POLICY_TERMINAL_KEY)),
+                enumName(localViolation == null || localViolation == Violation.NONE
+                        ? null
+                        : localViolation),
                 match.name(),
                 DecisionPolicy.POLICY_VERSION,
                 blockedTermsDigest,
+                politicalRegistryDigest,
                 DecisionPolicy.authoritativeExactReferenceId(media),
                 DecisionPolicy.candidateIds(media),
                 "ok".equals(classification.get("status"))
@@ -1505,7 +1726,8 @@ public class ModerationController {
             String decoderProfileVersion,
             VisualProvenance visual,
             AiConfiguration aiConfiguration,
-            String blockedTermsDigest) {
+            String blockedTermsDigest,
+            String politicalRegistryDigest) {
         String pdqAlgorithm = safeProvenanceValue(pdq.get("algorithm"), null);
         String pdqImplementation = safeProvenanceValue(pdq.get("implementation"), null);
         String pdqImplementationCommit = safeProvenanceValue(
@@ -1587,11 +1809,13 @@ public class ModerationController {
                 "policy.referenceAssetVersion="
                         + DecisionPolicy.REFERENCE_ASSET_POLICY_VERSION,
                 "policy.wordListsDigest=" + blockedTermsDigest,
+                "policy.restrictedPoliticalEntitiesDigest=" + politicalRegistryDigest,
                 "privacyScanner.profileVersion="
                         + FinancialPrivacyScanner.PROFILE_VERSION,
                 "privacyScanner.profileSha256="
                         + FinancialPrivacyScanner.PROFILE_SHA256,
-                "gateway.unknownThreshold=" + canonicalDecimal(properties.unknownThreshold()),
+                "gateway.moderationScoreBlockThreshold="
+                        + canonicalDecimal(properties.moderationScoreBlockThreshold()),
                 "gateway.upstreamTimeoutSeconds=" + properties.upstreamTimeoutSeconds(),
                 "gateway.maxAnalysisTextChars=" + MAX_ANALYSIS_TEXT_CHARS,
                 "gateway.maxImageBytes=" + properties.maxImageBytes(),
@@ -1737,9 +1961,13 @@ public class ModerationController {
     }
 
     private static String sha256(String value) {
+        return sha256(value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String sha256(byte[] value) {
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
-                    .digest(value.getBytes(StandardCharsets.UTF_8)));
+                    .digest(value));
         } catch (NoSuchAlgorithmException exception) {
             throw new IllegalStateException("SHA-256 is not available", exception);
         }
@@ -1921,19 +2149,39 @@ public class ModerationController {
             String quotedText,
             String requestId) {
         try {
-            Map<String, Object> response = parentPostText.isBlank()
-                            && authorUsername.isBlank()
-                            && quotedText.isBlank()
-                    ? clients.analyzeText(contentId, type, text)
-                    : clients.analyzeText(
-                            contentId,
-                            type,
-                            text,
-                            parentPostText,
-                            authorUsername,
-                            quotedText);
-            return validatedAiResponse(
-                    response, requestId);
+            java.util.function.Supplier<Map<String, Object>> liveAnalysis = () -> {
+                Map<String, Object> response = parentPostText.isBlank()
+                                && authorUsername.isBlank()
+                                && quotedText.isBlank()
+                        ? clients.analyzeText(contentId, type, text)
+                        : clients.analyzeText(
+                                contentId,
+                                type,
+                                text,
+                                parentPostText,
+                                authorUsername,
+                                quotedText);
+                return validatedAiResponse(response, requestId);
+            };
+            if (type == ContentType.USERNAME) {
+                return liveAnalysis.get();
+            }
+            AiWorkIdentity identity = textAiWorkIdentity(
+                    type,
+                    text,
+                    parentPostText,
+                    authorUsername,
+                    quotedText);
+            Map<String, Object> coordinated =
+                    aiWorkCoordinator.execute(identity, liveAnalysis);
+            Map<String, Object> validated =
+                    validatedCoordinatedAiResponse(coordinated, requestId);
+            if (AiWorkCoordinator.isCacheHit(coordinated)
+                    && !AiWorkCoordinator.isCacheHit(validated)) {
+                log.warn("ignored invalid cached text verdict requestId={}", requestId);
+                return liveAnalysis.get();
+            }
+            return validated;
         } catch (RuntimeException exception) {
             log.error(
                     "text analyzer unavailable requestId={} failureType={}",
@@ -1986,20 +2234,51 @@ public class ModerationController {
             boolean adjudicationAllowed = !requiresAdjudication
                     || DecisionPolicy.hasCompleteRequiredOcr(media);
             Map<String, Object> ocr = DecisionPolicy.nestedMap(media, "ocr");
-            return validatedAiResponse(clients.analyzeImageAi(
-                    bytes,
-                    filename,
-                    imageContentType,
-                    contentId,
-                    type,
-                    text,
-                    ocrText,
-                    String.valueOf(ocr.get("status")),
-                    Boolean.TRUE.equals(ocr.get("confidenceAccepted")),
-                    Boolean.TRUE.equals(ocr.get("truncated")),
-                    media,
-                    requiresAdjudication,
-                    adjudicationAllowed), requestId);
+            java.util.function.Supplier<Map<String, Object>> liveAnalysis =
+                    () -> validatedAiResponse(
+                            clients.analyzeImageAi(
+                                    bytes,
+                                    filename,
+                                    imageContentType,
+                                    contentId,
+                                    type,
+                                    text,
+                                    ocrText,
+                                    String.valueOf(ocr.get("status")),
+                                    Boolean.TRUE.equals(ocr.get("confidenceAccepted")),
+                                    Boolean.TRUE.equals(ocr.get("truncated")),
+                                    media,
+                                    requiresAdjudication,
+                                    adjudicationAllowed),
+                            requestId);
+            AiWorkIdentity identity;
+            try {
+                identity = imageAiWorkIdentity(
+                        bytes,
+                        imageContentType,
+                        type,
+                        text,
+                        ocrText,
+                        media,
+                        requiresAdjudication,
+                        adjudicationAllowed);
+            } catch (RuntimeException exception) {
+                log.warn(
+                        "image cache identity unavailable; continuing live requestId={} failureType={}",
+                        requestId,
+                        exception.getClass().getSimpleName());
+                return liveAnalysis.get();
+            }
+            Map<String, Object> coordinated =
+                    aiWorkCoordinator.execute(identity, liveAnalysis);
+            Map<String, Object> validated =
+                    validatedCoordinatedAiResponse(coordinated, requestId);
+            if (AiWorkCoordinator.isCacheHit(coordinated)
+                    && !AiWorkCoordinator.isCacheHit(validated)) {
+                log.warn("ignored invalid cached image verdict requestId={}", requestId);
+                return liveAnalysis.get();
+            }
+            return validated;
         } catch (RuntimeException exception) {
             log.error(
                     "image analyzer unavailable requestId={} failureType={}",
@@ -2007,6 +2286,77 @@ public class ModerationController {
                     exception.getClass().getSimpleName());
             return unavailableAi();
         }
+    }
+
+    private Map<String, Object> validatedCoordinatedAiResponse(
+            Map<String, Object> coordinated, String requestId) {
+        if (!AiWorkCoordinator.isCacheHit(coordinated)) {
+            return coordinated;
+        }
+        Map<String, Object> replay = new java.util.LinkedHashMap<>(coordinated);
+        replay.remove(AiWorkCoordinator.CACHE_HIT_KEY);
+        Map<String, Object> validated = validatedAiResponse(Map.copyOf(replay), requestId);
+        if ("mismatch".equals(validated.get(AI_VALIDATION_STATUS_KEY))) {
+            return validated;
+        }
+        Map<String, Object> marked = new java.util.LinkedHashMap<>(validated);
+        marked.put(AiWorkCoordinator.CACHE_HIT_KEY, true);
+        return Map.copyOf(marked);
+    }
+
+    private AiWorkIdentity textAiWorkIdentity(
+            ContentType type,
+            String text,
+            String parentPostText,
+            String authorUsername,
+            String quotedText) {
+        List<String> request = List.of(
+                "text-request-v8",
+                type.name(),
+                text,
+                parentPostText,
+                authorUsername,
+                quotedText);
+        return AiWorkIdentity.of(
+                AiWorkIdentity.WorkType.TEXT,
+                request,
+                List.of(
+                        "text-ai-contract-v4",
+                        expectedAiConfiguration().digest()));
+    }
+
+    private AiWorkIdentity imageAiWorkIdentity(
+            byte[] bytes,
+            String imageContentType,
+            ContentType type,
+            String text,
+            String ocrText,
+            Map<String, Object> media,
+            boolean requiresAdjudication,
+            boolean adjudicationAllowed) {
+        Map<String, Object> ocr = DecisionPolicy.nestedMap(media, "ocr");
+        String imageSha256 = sha256(bytes);
+        String referenceEvidenceSha256 =
+                AnalyzerClients.referenceEvidenceSha256(media);
+        List<String> request = List.of(
+                "image-request-v8",
+                type.name(),
+                text,
+                ocrText,
+                String.valueOf(ocr.get("status")),
+                Boolean.toString(Boolean.TRUE.equals(ocr.get("confidenceAccepted"))),
+                Boolean.toString(Boolean.TRUE.equals(ocr.get("truncated"))),
+                imageContentType,
+                imageSha256,
+                referenceEvidenceSha256,
+                Boolean.toString(requiresAdjudication),
+                Boolean.toString(adjudicationAllowed));
+        return AiWorkIdentity.of(
+                AiWorkIdentity.WorkType.IMAGE,
+                request,
+                List.of(
+                        "image-ai-contract-v4",
+                        expectedAiConfiguration().digest()));
     }
 
     private Map<String, Object> validatedAiResponse(
@@ -2178,6 +2528,9 @@ public class ModerationController {
     }
 
     private static AiUsage aiUsage(Map<String, Object> ai) {
+        if (AiWorkCoordinator.isCacheHit(ai)) {
+            return AiUsage.noCalls();
+        }
         List<AiModelUsage> modelCalls = new java.util.ArrayList<>();
         boolean usageComplete = true;
         int freeModerationCalls = 0;

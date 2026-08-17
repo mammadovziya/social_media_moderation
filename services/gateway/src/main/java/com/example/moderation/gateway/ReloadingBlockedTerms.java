@@ -1,5 +1,6 @@
 package com.example.moderation.gateway;
 
+import com.example.moderation.gateway.api.Violation;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
@@ -16,7 +17,7 @@ import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.Locale;
 import java.util.Map;
-import java.util.TreeSet;
+import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
@@ -24,7 +25,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-/** A bounded, literal blocklist that atomically reloads from disk between requests. */
+/**
+ * A bounded, category-aware literal blocklist that atomically reloads from disk between requests.
+ * Bare terms remain backward-compatible and resolve to {@link Violation#OTHER}.
+ */
 @Component
 public final class ReloadingBlockedTerms {
     private static final Logger log = LoggerFactory.getLogger(ReloadingBlockedTerms.class);
@@ -47,8 +51,9 @@ public final class ReloadingBlockedTerms {
         this.file = file.toAbsolutePath().normalize();
         this.current = new AtomicReference<>(loadStable(null));
         log.info(
-                "loaded local blocked terms count={} digest={}",
+                "loaded local blocked terms count={} vulgarCount={} digest={}",
                 current.get().termCount(),
+                current.get().vulgarTermCount(),
                 current.get().semanticSha256());
     }
 
@@ -60,8 +65,9 @@ public final class ReloadingBlockedTerms {
             current.set(loaded);
             if (!loaded.semanticSha256().equals(previous.semanticSha256())) {
                 log.info(
-                        "reloaded local blocked terms count={} digest={}",
+                        "reloaded local blocked terms count={} vulgarCount={} digest={}",
                         loaded.termCount(),
+                        loaded.vulgarTermCount(),
                         loaded.semanticSha256());
             }
             if (lastFailure != null) {
@@ -149,7 +155,7 @@ public final class ReloadingBlockedTerms {
             throw new IllegalStateException("blocked terms file is not valid UTF-8", exception);
         }
 
-        TreeSet<String> terms = new TreeSet<>();
+        TreeMap<String, TermCategory> terms = new TreeMap<>();
         int activeEntries = 0;
         int index = 0;
         for (String sourceLine : decoded.split("\\R", -1)) {
@@ -165,21 +171,47 @@ public final class ReloadingBlockedTerms {
             if (activeEntries > MAX_TERM_COUNT) {
                 throw new IllegalStateException("blocked terms file has too many entries");
             }
-            String term = canonicalTerm(line, index + 1);
-            terms.add(term);
+            ConfiguredTerm configured = configuredTerm(line, index + 1);
+            terms.merge(
+                    configured.term(),
+                    configured.category(),
+                    ReloadingBlockedTerms::strongestCategory);
             index++;
         }
 
         MutableTrieNode trie = new MutableTrieNode();
-        for (String term : terms) {
-            trie.add(term);
+        for (Map.Entry<String, TermCategory> term : terms.entrySet()) {
+            trie.add(term.getKey(), term.getValue().violation());
         }
+        int vulgarTermCount = Math.toIntExact(terms.values().stream()
+                .filter(category -> category == TermCategory.VULGAR)
+                .count());
         return new Snapshot(
                 trie.freeze(),
                 semanticDigest(terms),
                 terms.size(),
+                vulgarTermCount,
                 sourceSha256,
                 sourceVersion);
+    }
+
+    private static ConfiguredTerm configuredTerm(String line, int lineNumber) {
+        int delimiter = line.indexOf('|');
+        if (delimiter < 0) {
+            return new ConfiguredTerm(
+                    TermCategory.OTHER, canonicalTerm(line, lineNumber));
+        }
+        if (delimiter != line.lastIndexOf('|')) {
+            throw invalidLine(lineNumber, "expected CATEGORY|term");
+        }
+        String categoryName = line.substring(0, delimiter).strip();
+        String term = line.substring(delimiter + 1).strip();
+        TermCategory category = switch (categoryName.toUpperCase(Locale.ROOT)) {
+            case "VULGAR" -> TermCategory.VULGAR;
+            case "POLITICAL_CONTENT" -> TermCategory.POLITICAL_CONTENT;
+            default -> throw invalidLine(lineNumber, "unknown term category");
+        };
+        return new ConfiguredTerm(category, canonicalTerm(term, lineNumber));
     }
 
     private static String canonicalTerm(String value, int lineNumber) {
@@ -203,30 +235,34 @@ public final class ReloadingBlockedTerms {
         return String.join(" ", words);
     }
 
-    private static boolean containsMatch(TrieNode root, String text) {
+    private static Violation findViolation(TrieNode root, String text) {
+        Violation strongest = Violation.NONE;
         int previous = -1;
         for (int start = 0; start < text.length(); ) {
             int current = text.codePointAt(start);
             if (Character.isLetterOrDigit(current)
-                    && (previous < 0 || !isWordCodePoint(previous))
-                    && matchesFrom(root, text, start)) {
-                return true;
+                    && (previous < 0 || !isWordCodePoint(previous))) {
+                strongest = strongestViolation(strongest, violationFrom(root, text, start));
+                if (strongest == Violation.VULGAR) {
+                    return strongest;
+                }
             }
             previous = current;
             start += Character.charCount(current);
         }
-        return false;
+        return strongest;
     }
 
-    private static boolean matchesFrom(TrieNode root, String text, int start) {
+    private static Violation violationFrom(TrieNode root, String text, int start) {
         TrieNode node = root;
+        Violation strongest = Violation.NONE;
         int offset = start;
         while (offset < text.length()) {
             int codePoint = text.codePointAt(offset);
             if (isSeparator(codePoint)) {
                 node = node.separator();
                 if (node == null) {
-                    return false;
+                    return strongest;
                 }
                 do {
                     offset += Character.charCount(codePoint);
@@ -238,17 +274,20 @@ public final class ReloadingBlockedTerms {
             } else {
                 node = node.literals().get(codePoint);
                 if (node == null) {
-                    return false;
+                    return strongest;
                 }
                 offset += Character.charCount(codePoint);
             }
-            if (node.terminal()
+            if (node.terminalViolation() != Violation.NONE
                     && (offset >= text.length()
                             || !isWordCodePoint(text.codePointAt(offset)))) {
-                return true;
+                strongest = strongestViolation(strongest, node.terminalViolation());
+                if (strongest == Violation.VULGAR) {
+                    return strongest;
+                }
             }
         }
-        return false;
+        return strongest;
     }
 
     private static boolean isWordCodePoint(int codePoint) {
@@ -288,12 +327,13 @@ public final class ReloadingBlockedTerms {
         return IGNORED_CHARACTER.matcher(normalized).replaceAll("");
     }
 
-    private static String semanticDigest(Iterable<String> terms) {
+    private static String semanticDigest(Map<String, TermCategory> terms) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            updateDigest(digest, "blocked-terms/v1");
-            for (String term : terms) {
-                updateDigest(digest, term);
+            updateDigest(digest, "blocked-terms/v2");
+            for (Map.Entry<String, TermCategory> term : terms.entrySet()) {
+                updateDigest(digest, term.getValue().name());
+                updateDigest(digest, term.getKey());
             }
             return HexFormat.of().formatHex(digest.digest());
         } catch (NoSuchAlgorithmException exception) {
@@ -320,6 +360,51 @@ public final class ReloadingBlockedTerms {
                 "invalid blocked terms line " + lineNumber + ": " + reason);
     }
 
+    static Violation strongestViolation(Violation first, Violation second) {
+        Violation left = first == null ? Violation.NONE : first;
+        Violation right = second == null ? Violation.NONE : second;
+        return violationPriority(right) > violationPriority(left) ? right : left;
+    }
+
+    private static int violationPriority(Violation violation) {
+        return switch (violation) {
+            case VULGAR -> 3;
+            case POLITICAL_CONTENT -> 2;
+            case OTHER -> 1;
+            case NONE -> 0;
+            default -> throw new IllegalArgumentException(
+                    "unsupported local blocked-term violation: " + violation);
+        };
+    }
+
+    private static TermCategory strongestCategory(TermCategory first, TermCategory second) {
+        return first.priority() >= second.priority() ? first : second;
+    }
+
+    private enum TermCategory {
+        OTHER(Violation.OTHER, 1),
+        POLITICAL_CONTENT(Violation.POLITICAL_CONTENT, 2),
+        VULGAR(Violation.VULGAR, 3);
+
+        private final Violation violation;
+        private final int priority;
+
+        TermCategory(Violation violation, int priority) {
+            this.violation = violation;
+            this.priority = priority;
+        }
+
+        private Violation violation() {
+            return violation;
+        }
+
+        private int priority() {
+            return priority;
+        }
+    }
+
+    private record ConfiguredTerm(TermCategory category, String term) {}
+
     private record SourceVersion(long size, java.nio.file.attribute.FileTime modified, Object key) {
         private static SourceVersion from(BasicFileAttributes attributes) {
             return new SourceVersion(
@@ -334,14 +419,17 @@ public final class ReloadingBlockedTerms {
         }
     }
 
-    private record TrieNode(Map<Integer, TrieNode> literals, TrieNode separator, boolean terminal) {}
+    private record TrieNode(
+            Map<Integer, TrieNode> literals,
+            TrieNode separator,
+            Violation terminalViolation) {}
 
     private static final class MutableTrieNode {
         private final Map<Integer, MutableTrieNode> literals = new HashMap<>();
         private MutableTrieNode separator;
-        private boolean terminal;
+        private Violation terminalViolation = Violation.NONE;
 
-        private void add(String canonicalTerm) {
+        private void add(String canonicalTerm, Violation violation) {
             MutableTrieNode node = this;
             for (int offset = 0; offset < canonicalTerm.length(); ) {
                 int codePoint = canonicalTerm.codePointAt(offset);
@@ -356,7 +444,7 @@ public final class ReloadingBlockedTerms {
                 }
                 offset += Character.charCount(codePoint);
             }
-            node.terminal = true;
+            node.terminalViolation = strongestViolation(node.terminalViolation, violation);
         }
 
         private TrieNode freeze() {
@@ -367,7 +455,7 @@ public final class ReloadingBlockedTerms {
             return new TrieNode(
                     Map.copyOf(immutableLiterals),
                     separator == null ? null : separator.freeze(),
-                    terminal);
+                    terminalViolation);
         }
     }
 
@@ -375,6 +463,7 @@ public final class ReloadingBlockedTerms {
         private final TrieNode trie;
         private final String semanticSha256;
         private final int termCount;
+        private final int vulgarTermCount;
         private final String sourceSha256;
         private final SourceVersion sourceVersion;
 
@@ -382,11 +471,13 @@ public final class ReloadingBlockedTerms {
                 TrieNode trie,
                 String semanticSha256,
                 int termCount,
+                int vulgarTermCount,
                 String sourceSha256,
                 SourceVersion sourceVersion) {
             this.trie = trie;
             this.semanticSha256 = semanticSha256;
             this.termCount = termCount;
+            this.vulgarTermCount = vulgarTermCount;
             this.sourceSha256 = sourceSha256;
             this.sourceVersion = sourceVersion;
         }
@@ -398,16 +489,21 @@ public final class ReloadingBlockedTerms {
                             trie,
                             semanticSha256,
                             termCount,
+                            vulgarTermCount,
                             sourceSha256,
                             replacement);
         }
 
         boolean matches(String text) {
+            return violation(text) != Violation.NONE;
+        }
+
+        Violation violation(String text) {
             if (text == null || text.isBlank()) {
-                return false;
+                return Violation.NONE;
             }
             String normalized = normalize(text);
-            return containsMatch(trie, normalized);
+            return findViolation(trie, normalized);
         }
 
         String semanticSha256() {
@@ -416,6 +512,10 @@ public final class ReloadingBlockedTerms {
 
         int termCount() {
             return termCount;
+        }
+
+        int vulgarTermCount() {
+            return vulgarTermCount;
         }
     }
 }

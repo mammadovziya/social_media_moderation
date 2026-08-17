@@ -16,6 +16,9 @@ import pdqhashing.types.HashAndQuality;
 public class PdqHashService {
     static final String REFERENCE_COMMIT =
             "baefb4ed67b6cdc1d4c82dbaef858d50866ac424";
+    static final String FULL_ANALYSIS_PATH = "FULL_ANALYSIS";
+    static final String AUTHORITATIVE_SHA256_EXACT_PATH =
+            "AUTHORITATIVE_SHA256_EXACT";
 
     private final MediaProperties properties;
     private final PdqHashRepository repository;
@@ -35,6 +38,86 @@ public class PdqHashService {
         this.referenceAssetIndex = referenceAssetIndex;
         this.visualReferenceIndex = visualReferenceIndex;
         this.textMasker = textMasker;
+    }
+
+    /**
+     * Computes the upload identity and resolves only byte-exact active references.
+     *
+     * <p>This method is intentionally called only after the upload has passed bounded image
+     * decoding. A current-policy {@code EXACT_ASSET} reference is terminal; every other result
+     * continues through OCR, PDQ, and visual retrieval.
+     */
+    public Preflight preflight(byte[] originalBytes) {
+        String sha256 = sha256(originalBytes);
+        return new Preflight(sha256, referenceAssetIndex.findExactSha256(sha256));
+    }
+
+    public Analysis analyzeAuthoritativeExact(
+            byte[] originalBytes,
+            String contentId,
+            String detectedFormat,
+            Preflight preflight) {
+        String observedSha256 = sha256(originalBytes);
+        if (!observedSha256.equals(preflight.sha256())) {
+            throw new IllegalArgumentException(
+                    "SHA-256 preflight does not belong to the uploaded bytes");
+        }
+        ModerationReferenceAsset authoritative = preflight.authoritativeExactMatch();
+        if (authoritative == null) {
+            throw new IllegalArgumentException(
+                    "An authoritative exact reference is required for the SHA-256 fast path");
+        }
+
+        List<Map<String, Object>> exactCandidates = preflight.search()
+                .exactSha256Candidates()
+                .stream()
+                .map(asset -> candidateMap(asset, 0, "SHA256"))
+                .limit(properties.pdqCandidateLimit())
+                .toList();
+
+        Map<String, Object> identity = new LinkedHashMap<>();
+        identity.put("sha256", observedSha256);
+        identity.put("algorithm", "sha-256");
+        identity.put("exactMatchFound", true);
+        identity.put("candidates", exactCandidates);
+
+        Map<String, Object> pdq = new LinkedHashMap<>();
+        pdq.put("processingPath", AUTHORITATIVE_SHA256_EXACT_PATH);
+        pdq.put("executionStatus", "not_invoked");
+        pdq.put("qualityAccepted", false);
+        pdq.put("maskedQualityAccepted", false);
+        pdq.put("maskApplied", false);
+        pdq.put("maskedRegionCount", 0);
+        pdq.put("candidateFound", true);
+        pdq.put("candidates", exactCandidates);
+        pdq.put("hasComparison", preflight.search().hasReferences());
+        putNotInvokedVisualEvidence(pdq);
+        putConfiguredEvidence(pdq);
+        pdq.put("authoritativeExactMatch", candidateMap(authoritative, 0, "SHA256"));
+
+        repository.saveEvidence(new MediaEvidence(
+                contentId,
+                observedSha256,
+                originalBytes.length,
+                detectedFormat,
+                AUTHORITATIVE_SHA256_EXACT_PATH,
+                null,
+                null,
+                null,
+                null,
+                0,
+                "not_invoked",
+                null,
+                null,
+                false,
+                false,
+                "not_invoked",
+                exactCandidates.size(),
+                null,
+                authoritative.externalId(),
+                authoritative.policyVersion(),
+                preflight.search().revision()));
+        return new Analysis(Map.copyOf(identity), Map.copyOf(pdq));
     }
 
     public Analysis analyze(
@@ -102,6 +185,8 @@ public class PdqHashService {
         identity.put("candidates", exactCandidates);
 
         Map<String, Object> pdq = new LinkedHashMap<>();
+        pdq.put("processingPath", FULL_ANALYSIS_PATH);
+        pdq.put("executionStatus", "ok");
         pdq.put("hash", full.hash());
         pdq.put("quality", full.quality());
         pdq.put("qualityAccepted", fullQualityAccepted);
@@ -118,19 +203,9 @@ public class PdqHashService {
         pdq.put("visualAlgorithmVersion", visualSearch.descriptorVersion());
         pdq.put("visualDescriptorVersion", visualSearch.descriptorVersion());
         pdq.put("candidateSelectionVersion", visualSearch.candidateSelectionVersion());
-        pdq.put("visualCandidateLimit", visualReferenceIndex.candidateLimit());
-        pdq.put("visualConnectTimeoutMillis", visualReferenceIndex.connectTimeoutMillis());
-        pdq.put("visualReadTimeoutMillis", visualReferenceIndex.readTimeoutMillis());
-        pdq.put("visualMaxReferences", visualReferenceIndex.maxReferences());
-        pdq.put("visualMaxSnapshotBytes", visualReferenceIndex.maxSnapshotBytes());
         pdq.put("visualDistinctiveGeometry", visualSearch.distinctiveGeometry());
         pdq.put("visualDistinctiveInlierLead", visualSearch.distinctiveInlierLead());
-        pdq.put("distanceThreshold", properties.pdqDistanceThreshold());
-        pdq.put("qualityThreshold", properties.pdqQualityThreshold());
-        pdq.put("candidateLimit", properties.pdqCandidateLimit());
-        pdq.put("algorithm", "pdq-256");
-        pdq.put("implementation", "meta-threat-exchange-java");
-        pdq.put("implementationCommit", REFERENCE_COMMIT);
+        putConfiguredEvidence(pdq);
         ModerationReferenceAsset authoritativeExact = search.authoritativeExactMatch();
         if (authoritativeExact != null) {
             pdq.put(
@@ -142,6 +217,7 @@ public class PdqHashService {
                 sha256,
                 originalBytes.length,
                 detectedFormat,
+                FULL_ANALYSIS_PATH,
                 full.hash(),
                 full.quality(),
                 masked.hash(),
@@ -154,8 +230,35 @@ public class PdqHashService {
                 ocrResult.truncated(),
                 ocrResult.engine(),
                 adjudicationCandidates.size(),
-                REFERENCE_COMMIT));
+                REFERENCE_COMMIT,
+                null,
+                null,
+                null));
         return new Analysis(Map.copyOf(identity), Map.copyOf(pdq));
+    }
+
+    private void putConfiguredEvidence(Map<String, Object> pdq) {
+        pdq.put("distanceThreshold", properties.pdqDistanceThreshold());
+        pdq.put("qualityThreshold", properties.pdqQualityThreshold());
+        pdq.put("candidateLimit", properties.pdqCandidateLimit());
+        pdq.put("algorithm", "pdq-256");
+        pdq.put("implementation", "meta-threat-exchange-java");
+        pdq.put("implementationCommit", REFERENCE_COMMIT);
+        pdq.put("visualCandidateLimit", visualReferenceIndex.candidateLimit());
+        pdq.put("visualConnectTimeoutMillis", visualReferenceIndex.connectTimeoutMillis());
+        pdq.put("visualReadTimeoutMillis", visualReferenceIndex.readTimeoutMillis());
+        pdq.put("visualMaxReferences", visualReferenceIndex.maxReferences());
+        pdq.put("visualMaxSnapshotBytes", visualReferenceIndex.maxSnapshotBytes());
+    }
+
+    private static void putNotInvokedVisualEvidence(Map<String, Object> pdq) {
+        pdq.put("visualReferenceRevision", "not_invoked");
+        pdq.put("visualReferenceSnapshotDigest", "not_invoked");
+        pdq.put("visualAlgorithmVersion", "not_invoked");
+        pdq.put("visualDescriptorVersion", "not_invoked");
+        pdq.put("candidateSelectionVersion", "not_invoked");
+        pdq.put("visualDistinctiveGeometry", false);
+        pdq.put("visualDistinctiveInlierLead", 0);
     }
 
     public PdqHash compute(BufferedImage source) {
@@ -282,6 +385,27 @@ public class PdqHashService {
     }
 
     public record PdqHash(String hash, int quality) {}
+
+    public record Preflight(
+            String sha256, ReferenceAssetIndex.ExactSearchResult search) {
+        public Preflight {
+            if (sha256 == null || !sha256.matches("[0-9a-f]{64}")) {
+                throw new IllegalArgumentException(
+                        "SHA-256 must contain 64 lowercase hexadecimal characters");
+            }
+            if (search == null) {
+                throw new IllegalArgumentException("Exact reference search is required");
+            }
+        }
+
+        public ModerationReferenceAsset authoritativeExactMatch() {
+            return search.authoritativeExactMatch();
+        }
+
+        public boolean hasAuthoritativeExactMatch() {
+            return authoritativeExactMatch() != null;
+        }
+    }
 
     public record Analysis(Map<String, Object> identity, Map<String, Object> pdq) {
         public Analysis {

@@ -1,0 +1,4 @@
+PRESIDENT|Test National President
+MINISTER|Test Full Minister Name
+MINISTER_CANDIDATE|Test Minister
+YAP|Test New Azerbaijan Party

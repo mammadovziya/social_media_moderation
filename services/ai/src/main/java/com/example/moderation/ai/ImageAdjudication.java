@@ -15,6 +15,7 @@ record ImageAdjudication(
         String financialRisk,
         String financialPrivacy,
         String impersonation,
+        String restrictedPoliticalEntity,
         String politicalContext,
         String finalReason,
         String candidateDisposition,
@@ -30,6 +31,8 @@ record ImageAdjudication(
             "phishing");
     private static final Set<String> UNCERTAIN_FINANCIAL_RISKS =
             Set.of("potentially_misleading", "paid_promotion", "uncertain");
+    private static final Set<String> CONFIRMED_RESTRICTED_POLITICAL_ENTITIES =
+            Set.of("president", "minister", "yap", "multiple");
 
     ImageAdjudication {
         candidateIds = candidateIds == null ? List.of() : List.copyOf(candidateIds);
@@ -93,6 +96,13 @@ record ImageAdjudication(
         if ("clear".equals(impersonation)) {
             return new PolicyOutcome("block", "impersonation");
         }
+        if (CONFIRMED_RESTRICTED_POLITICAL_ENTITIES.contains(
+                restrictedPoliticalEntity)) {
+            return new PolicyOutcome("block", "restricted_political_entity");
+        }
+        if ("possible".equals(restrictedPoliticalEntity)) {
+            return new PolicyOutcome("unknown", "restricted_political_entity");
+        }
         if ("off_topic".equals(domain)) {
             return new PolicyOutcome("block", "off_topic");
         }
@@ -128,6 +138,7 @@ record ImageAdjudication(
         result.put("financialRisk", financialRisk);
         result.put("financialPrivacy", financialPrivacy);
         result.put("impersonation", impersonation);
+        result.put("restrictedPoliticalEntity", restrictedPoliticalEntity);
         result.put("politicalContext", politicalContext);
         result.put("finalReason", finalReason);
         result.put("candidateDisposition", candidateDisposition);

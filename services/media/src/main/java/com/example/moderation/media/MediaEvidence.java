@@ -5,10 +5,11 @@ record MediaEvidence(
         String sha256,
         int byteLength,
         String detectedFormat,
+        String processingPath,
         String pdqHash,
-        int pdqQuality,
+        Integer pdqQuality,
         String maskedPdqHash,
-        int maskedPdqQuality,
+        Integer maskedPdqQuality,
         int maskedRegionCount,
         String ocrStatus,
         String ocrDigest,
@@ -17,4 +18,7 @@ record MediaEvidence(
         boolean ocrTruncated,
         String ocrEngine,
         int candidateCount,
-        String pdqImplementationCommit) {}
+        String pdqImplementationCommit,
+        String authoritativeReferenceId,
+        String authoritativePolicyVersion,
+        Long referenceAssetRevision) {}

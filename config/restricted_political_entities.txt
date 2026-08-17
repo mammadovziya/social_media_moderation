@@ -1,0 +1,101 @@
+# Restricted political entity alias registry.
+#
+# Format: PRESIDENT|alias, MINISTER|alias, MINISTER_CANDIDATE|alias, or YAP|alias. Matching is exact whole-phrase,
+# case-insensitive, and NFKC-normalized. Punctuation, symbols, whitespace, and underscores act as
+# phrase separators. Bare or ambiguous titles do not belong here; the semantic classifier handles
+# them as POSSIBLE or a contextual confirmed entity.
+#
+# Roster provenance (verified 2026-08-13):
+# - Presidency biography: https://president.az/az/pages/view/president/biography
+# - Cabinet roster: https://nk.gov.az/az/nazirler-kabineti/azerbaycan-respublikasi-nazirler-kabineti
+# - Cabinet roster (Russian):
+#   https://nk.gov.az/ru/nazirler-kabineti/azerbaycan-respublikasi-nazirler-kabineti
+#
+# Only ministers are included below; the Prime Minister, deputy prime ministers, committee chairs,
+# and other non-minister offices are intentionally excluded. Update this file as an atomic
+# replacement when the official roster changes. Invalid reloads keep the last valid registry and
+# make the gateway unready.
+
+PRESIDENT|İlham Əliyev
+PRESIDENT|İlham Heydər oğlu Əliyev
+PRESIDENT|Ilham Aliyev
+PRESIDENT|Ilham Heydar oglu Aliyev
+PRESIDENT|Ильхам Алиев
+PRESIDENT|Ильхам Гейдар оглу Алиев
+
+MINISTER_CANDIDATE|Vilayət Eyvazov
+MINISTER|Vilayət Süleyman oğlu Eyvazov
+MINISTER_CANDIDATE|Rəşad İsmayılov
+MINISTER|Rəşad Sahil oğlu İsmayılov
+MINISTER_CANDIDATE|Emin Əmrullayev
+MINISTER|Emin Eldar oğlu Əmrullayev
+MINISTER_CANDIDATE|Pərviz Şahbazov
+MINISTER|Pərviz Oqtay oğlu Şahbazov
+MINISTER_CANDIDATE|Fərid Əhmədov
+MINISTER|Fərid Turab oğlu Əhmədov
+MINISTER_CANDIDATE|Anar Əliyev
+MINISTER|Anar Rəhim oğlu Əliyev
+MINISTER_CANDIDATE|Kəmaləddin Heydərov
+MINISTER|Kəmaləddin Fəttah oğlu Heydərov
+MINISTER_CANDIDATE|Fərid Qayıbov
+MINISTER|Fərid Fazil oğlu Qayıbov
+MINISTER_CANDIDATE|Ceyhun Bayramov
+MINISTER|Ceyhun Əziz oğlu Bayramov
+MINISTER_CANDIDATE|Mikayıl Cabbarov
+MINISTER|Mikayıl Çingiz oğlu Cabbarov
+MINISTER_CANDIDATE|Məcnun Məmmədov
+MINISTER|Məcnun Qadir oğlu Məmmədov
+MINISTER_CANDIDATE|Sahil Babayev
+MINISTER|Sahil Rafiq oğlu Babayev
+MINISTER_CANDIDATE|Adil Kərimli
+MINISTER|Adil Qabil oğlu Kərimli
+MINISTER_CANDIDATE|Zakir Həsənov
+MINISTER|Zakir Əsgər oğlu Həsənov
+MINISTER_CANDIDATE|Vüqar Mustafayev
+MINISTER|Vüqar Valeh oğlu Mustafayev
+MINISTER_CANDIDATE|Rəşad Nəbiyev
+MINISTER|Rəşad Nəbi oğlu Nəbiyev
+MINISTER_CANDIDATE|Teymur Musayev
+MINISTER|Teymur Yusif oğlu Musayev
+
+MINISTER_CANDIDATE|Вилаят Эйвазов
+MINISTER|Вилаят Сулейман оглы Эйвазов
+MINISTER_CANDIDATE|Рашад Исмаилов
+MINISTER|Рашад Сахил оглы Исмаилов
+MINISTER_CANDIDATE|Эмин Амруллаев
+MINISTER|Эмин Эльдар оглы Амруллаев
+MINISTER_CANDIDATE|Парвиз Шахбазов
+MINISTER|Парвиз Огтай оглы Шахбазов
+MINISTER_CANDIDATE|Фарид Ахмедов
+MINISTER|Фарид Тураб оглы Ахмедов
+MINISTER_CANDIDATE|Анар Алиев
+MINISTER|Анар Рахим оглы Алиев
+MINISTER_CANDIDATE|Кямаледдин Гейдаров
+MINISTER|Кямаледдин Фаттах оглы Гейдаров
+MINISTER_CANDIDATE|Фарид Гаибов
+MINISTER|Фарид Фазиль оглы Гаибов
+MINISTER_CANDIDATE|Джейхун Байрамов
+MINISTER|Джейхун Азиз оглы Байрамов
+MINISTER_CANDIDATE|Микаил Джаббаров
+MINISTER|Микаил Чингиз оглы Джаббаров
+MINISTER_CANDIDATE|Меджнун Мамедов
+MINISTER|Меджнун Гадир оглы Мамедов
+MINISTER_CANDIDATE|Сахиль Бабаев
+MINISTER|Сахиль Рафиг оглы Бабаев
+MINISTER_CANDIDATE|Адыль Керимли
+MINISTER|Адыль Габиль оглы Керимли
+MINISTER_CANDIDATE|Закир Гасанов
+MINISTER|Закир Аскер оглы Гасанов
+MINISTER_CANDIDATE|Вугар Мустафаев
+MINISTER|Вугар Валех оглы Мустафаев
+MINISTER_CANDIDATE|Рашад Набиев
+MINISTER|Рашад Наби оглы Набиев
+MINISTER_CANDIDATE|Теймур Мусаев
+MINISTER|Теймур Юсиф оглы Мусаев
+
+# Organization aliases deliberately exclude bare YAP because lowercase Turkish "yap" is an
+# ordinary verb. Contextual bare abbreviations remain the semantic classifier's responsibility.
+YAP|Yeni Azərbaycan Partiyası
+YAP|Yeni Azerbaijan Party
+YAP|New Azerbaijan Party
+YAP|Партия Новый Азербайджан

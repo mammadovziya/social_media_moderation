@@ -63,18 +63,18 @@ class OpenAiRestClientTest {
                         "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073")
                 .containsEntry(
                         "classificationPromptBundleSha256",
-                        "644044f7960b05e48529003e03f6b69f3dd932a31d6e39d7b4e01d57f5aa9f7e")
+                        "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba")
                 .containsEntry(
                         "classificationProfileSha256",
-                        "de5d6be741ee1f30bfff85de54c71133ad541593083e7d857ff04c028dee0289")
+                        "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216")
                 .containsEntry("adjudicationModel", "gpt-5.6-terra")
                 .containsEntry("adjudicationReasoningEffort", "medium")
                 .containsEntry(
                         "adjudicationPromptSha256",
-                        "20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8")
+                        "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505")
                 .containsEntry(
                         "adjudicationProfileSha256",
-                        "07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef")
+                        "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa")
                 .containsEntry("openAiTimeoutSeconds", 30L);
     }
 
@@ -112,6 +112,7 @@ class OpenAiRestClientTest {
                         "financialRisk",
                         "financialPrivacy",
                         "impersonation",
+                        "restrictedPoliticalEntity",
                         "politicalContext");
         assertThat((List<String>) comment.get("required"))
                 .containsExactly(
@@ -121,13 +122,15 @@ class OpenAiRestClientTest {
                         "financialRisk",
                         "financialPrivacy",
                         "impersonation",
+                        "restrictedPoliticalEntity",
                         "politicalContext");
         assertThat((List<String>) username.get("required"))
                 .containsExactly(
                         "safetyDisposition",
                         "financialRisk",
                         "financialPrivacy",
-                        "impersonation");
+                        "impersonation",
+                        "restrictedPoliticalEntity");
         assertThat(post).containsEntry("additionalProperties", false);
 
         Map<String, Object> commentProperties =
@@ -157,7 +160,8 @@ class OpenAiRestClientTest {
                 "safetyDisposition",
                 "financialRisk",
                 "financialPrivacy",
-                "impersonation");
+                "impersonation",
+                "restrictedPoliticalEntity");
         assertThat((List<String>)
                         ((Map<String, Object>) postProperties.get("domain")).get("enum"))
                 .containsExactly(
@@ -172,6 +176,23 @@ class OpenAiRestClientTest {
                         "market_manipulation",
                         "phishing",
                         "paid_promotion");
+        assertThat((List<String>) ((Map<String, Object>)
+                                postProperties.get("restrictedPoliticalEntity"))
+                        .get("enum"))
+                .containsExactly(
+                        "none", "president", "minister", "yap", "multiple", "possible");
+        assertThat(((Map<String, Object>)
+                                commentProperties.get("restrictedPoliticalEntity"))
+                        .get("enum"))
+                .isEqualTo(((Map<String, Object>)
+                                postProperties.get("restrictedPoliticalEntity"))
+                        .get("enum"));
+        assertThat(((Map<String, Object>)
+                                usernameProperties.get("restrictedPoliticalEntity"))
+                        .get("enum"))
+                .isEqualTo(((Map<String, Object>)
+                                postProperties.get("restrictedPoliticalEntity"))
+                        .get("enum"));
     }
 
     @Test
@@ -187,6 +208,11 @@ class OpenAiRestClientTest {
                         "investment_related",
                         "financialClaim",
                         "financialPrivacy",
+                        "restrictedPoliticalEntity",
+                        "Data only in parentPostText",
+                        "does not count unless",
+                        "quotedText and other currently republished visible",
+                        "lowercase Turkish verb",
                         "politicalContext")
                 .doesNotContain("safety_action", "safety_category");
     }
@@ -202,7 +228,9 @@ class OpenAiRestClientTest {
                         "allow_none",
                         "guaranteed_return",
                         "financialPrivacy",
-                        "impersonation")
+                        "impersonation",
+                        "restrictedPoliticalEntity",
+                        "ordinary lowercase Turkish verb")
                 .doesNotContain(
                         "\"decision\"",
                         "\"confidence\"",
@@ -223,8 +251,25 @@ class OpenAiRestClientTest {
                         "financialClaim",
                         "pump_and_dump",
                         "financialPrivacy",
+                        "restrictedPoliticalEntity",
+                        "current visible image content together",
+                        "ordinary lowercase Turkish verb",
                         "politicalContext")
                 .doesNotContain("safety_action", "safety_category");
+    }
+
+    @Test
+    void textPromptsAllowRetrospectivePersonalPerformanceWithoutRiskPromotion() {
+        for (ContentType contentType : List.of(ContentType.POST, ContentType.COMMENT)) {
+            assertThat(OpenAiRestClient.promptFor(contentType))
+                    .contains(
+                            "retrospective report",
+                            "realized or unrealized profit or loss",
+                            "financialRisk=none",
+                            "absence of a citation",
+                            "20% today",
+                            "guaranteed 20% today");
+        }
     }
 
     @Test
@@ -248,6 +293,7 @@ class OpenAiRestClientTest {
                         "financialRisk",
                         "financialPrivacy",
                         "impersonation",
+                        "restrictedPoliticalEntity",
                         "politicalContext",
                         "finalReason",
                         "candidateDisposition",
@@ -272,6 +318,7 @@ class OpenAiRestClientTest {
                         "financial_privacy",
                         "financial_risk",
                         "impersonation",
+                        "restricted_political_entity",
                         "off_topic",
                         "evidence_unavailable");
     }
@@ -302,13 +349,14 @@ class OpenAiRestClientTest {
                         Map.entry("financialRisk", "investment_scam"),
                         Map.entry("financialPrivacy", "none"),
                         Map.entry("impersonation", "none"),
+                        Map.entry("restrictedPoliticalEntity", "president"),
                         Map.entry("politicalContext", "none")),
                 "both");
 
         assertThat(context)
                 .contains("c".repeat(20_000))
                 .contains("CURRENT OCR VIOLATION")
-                .contains("reference-1", "investment_scam", "both");
+                .contains("reference-1", "investment_scam", "president", "both");
     }
 
     @Test
@@ -415,6 +463,29 @@ class OpenAiRestClientTest {
     }
 
     @Test
+    void imageAdjudicationPromptDefinesRestrictedEntityPolicyAndFalsePositives()
+            throws Exception {
+        String prompt;
+        try (var stream = OpenAiRestClientTest.class.getResourceAsStream(
+                "/prompts/image-adjudication-v5.txt")) {
+            assertThat(stream).isNotNull();
+            prompt = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        assertThat(prompt).contains(
+                "restrictedPoliticalEntity is none, president, minister, yap, multiple, or",
+                "national/state president or presidency",
+                "minister in that governmental capacity",
+                "Azerbaijan's YAP / New",
+                "Azerbaijan Party",
+                "ordinary lowercase Turkish",
+                "verb \"yap\"",
+                "without relying on a list",
+                "of current officeholder names",
+                "restricted_political_entity");
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void moderationInputPreservesCaptionAndOcrAsSeparateItems() throws Exception {
         OpenAiRestClient client = client("test-key");
@@ -513,6 +584,7 @@ class OpenAiRestClientTest {
         unorderedSignal.put("financialRisk", "investment_scam");
         unorderedSignal.put("financialPrivacy", "none");
         unorderedSignal.put("impersonation", "none");
+        unorderedSignal.put("restrictedPoliticalEntity", "minister");
         unorderedSignal.put("politicalContext", "none");
         unorderedSignal.put("attackerField", "must-not-propagate");
 
@@ -545,6 +617,7 @@ class OpenAiRestClientTest {
                         "financialRisk",
                         "financialPrivacy",
                         "impersonation",
+                        "restrictedPoliticalEntity",
                         "politicalContext",
                         "model");
         assertThat(contextNode.toString()).doesNotContain("attackerField");
@@ -640,7 +713,8 @@ class OpenAiRestClientTest {
                 {"safetyDisposition":"allow_none",\
                 "domain":"investment_related","financialClaim":"analysis",\
                 "financialRisk":"none","financialPrivacy":"none",\
-                "impersonation":"none","politicalContext":"none"}
+                "impersonation":"none","restrictedPoliticalEntity":"none",\
+                "politicalContext":"none"}
                 """;
         assertThat(parseStructuredDecision(valid, ContentType.POST))
                 .containsExactlyInAnyOrderEntriesOf(Map.of(
@@ -651,6 +725,7 @@ class OpenAiRestClientTest {
                         "financialRisk", "none",
                         "financialPrivacy", "none",
                         "impersonation", "none",
+                        "restrictedPoliticalEntity", "none",
                         "politicalContext", "none"));
         assertThat(parseStructuredDecision(
                         valid.replace(
@@ -659,6 +734,12 @@ class OpenAiRestClientTest {
                         ContentType.POST))
                 .containsEntry("category", "vulgar")
                 .containsEntry("safetyAction", "block");
+        assertThat(parseStructuredDecision(
+                        valid.replace(
+                                "\"restrictedPoliticalEntity\":\"none\"",
+                                "\"restrictedPoliticalEntity\":\"president\""),
+                        ContentType.POST))
+                .containsEntry("restrictedPoliticalEntity", "president");
 
         for (String malformed : List.of(
                 valid.replace("}", ",\"model\":\"attacker-controlled\"}"),
@@ -671,6 +752,9 @@ class OpenAiRestClientTest {
                 valid.replace(
                         "\"safetyDisposition\":\"allow_none\"",
                         "\"safetyDisposition\":\"block_invented\""),
+                valid.replace(
+                        "\"restrictedPoliticalEntity\":\"none\"",
+                        "\"restrictedPoliticalEntity\":\"invented\""),
                 valid.replace(
                         "\"safetyDisposition\":\"allow_none\"",
                         "\"safetyDisposition\":\"allow_none\","
@@ -688,7 +772,8 @@ class OpenAiRestClientTest {
                 {"safetyDisposition":"allow_none",\
                 "domain":"investment_related","financialClaim":"analysis",\
                 "financialRisk":"none","financialPrivacy":"none",\
-                "impersonation":"none","politicalContext":"none"}
+                "impersonation":"none","restrictedPoliticalEntity":"none",\
+                "politicalContext":"none"}
                 """;
 
         assertThat(failureCode(() -> parseStructuredDecision("{", ContentType.POST)))
@@ -728,6 +813,7 @@ class OpenAiRestClientTest {
                 "category":"none","domain":"investment_related",\
                 "financialClaim":"analysis","financialRisk":"none",\
                 "financialPrivacy":"none","impersonation":"none",\
+                "restrictedPoliticalEntity":"none",\
                 "politicalContext":"none","finalReason":"none",\
                 "candidateDisposition":"rejected",\
                 "evidenceBasis":"current_text","reasonCode":"current_content_safe",\
@@ -740,12 +826,29 @@ class OpenAiRestClientTest {
                 "category":"vulgar","domain":"investment_related",\
                 "financialClaim":"none","financialRisk":"none",\
                 "financialPrivacy":"none","impersonation":"none",\
+                "restrictedPoliticalEntity":"none",\
                 "politicalContext":"none","finalReason":"safety",\
                 "candidateDisposition":"confirmed",\
                 "evidenceBasis":"current_text","reasonCode":"current_policy_violation",\
                 "candidateIds":["reference-1"]}
                 """;
         assertThat(parseAdjudication(vulgarBlock).category()).isEqualTo("vulgar");
+        String politicalBlock = valid
+                .replace("\"action\":\"allow\"", "\"action\":\"block\"")
+                .replace(
+                        "\"restrictedPoliticalEntity\":\"none\"",
+                        "\"restrictedPoliticalEntity\":\"yap\"")
+                .replace(
+                        "\"finalReason\":\"none\"",
+                        "\"finalReason\":\"restricted_political_entity\"")
+                .replace(
+                        "\"candidateDisposition\":\"rejected\"",
+                        "\"candidateDisposition\":\"confirmed\"")
+                .replace(
+                        "\"reasonCode\":\"current_content_safe\"",
+                        "\"reasonCode\":\"current_policy_violation\"");
+        assertThat(parseAdjudication(politicalBlock).restrictedPoliticalEntity())
+                .isEqualTo("yap");
         assertThat(failureCode(() -> parseAdjudication(valid.replace(
                         "\"candidateDisposition\":\"rejected\"",
                         "\"candidateDisposition\":\"confirmed\""))))

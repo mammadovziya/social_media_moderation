@@ -10,6 +10,7 @@ import com.example.moderation.gateway.api.Impersonation;
 import com.example.moderation.gateway.api.Investment;
 import com.example.moderation.gateway.api.PoliticalContext;
 import com.example.moderation.gateway.api.Politics;
+import com.example.moderation.gateway.api.RestrictedPoliticalEntity;
 import com.example.moderation.gateway.api.Safety;
 import java.util.Locale;
 import java.util.Map;
@@ -23,7 +24,8 @@ record PolicySignals(
         FinancialRisk financialRisk,
         FinancialPrivacy financialPrivacy,
         Impersonation impersonation,
-        PoliticalContext politicalContext) {
+        PoliticalContext politicalContext,
+        RestrictedPoliticalEntity restrictedPoliticalEntity) {
 
     static PolicySignals classifier(Map<String, Object> source, ContentType contentType) {
         Decision safetyAction = requiredEnum(source, "safetyAction", Decision.class);
@@ -43,7 +45,11 @@ record PolicySignals(
                     risk,
                     privacy,
                     impersonation,
-                    null);
+                    null,
+                    requiredEnum(
+                            source,
+                            "restrictedPoliticalEntity",
+                            RestrictedPoliticalEntity.class));
         }
         return new PolicySignals(
                 safetyAction,
@@ -53,7 +59,11 @@ record PolicySignals(
                 risk,
                 privacy,
                 impersonation,
-                requiredEnum(source, "politicalContext", PoliticalContext.class));
+                requiredEnum(source, "politicalContext", PoliticalContext.class),
+                requiredEnum(
+                        source,
+                        "restrictedPoliticalEntity",
+                        RestrictedPoliticalEntity.class));
     }
 
     static PolicySignals adjudicated(Map<String, Object> source) {
@@ -69,7 +79,11 @@ record PolicySignals(
                 requiredEnum(source, "financialRisk", FinancialRisk.class),
                 requiredEnum(source, "financialPrivacy", FinancialPrivacy.class),
                 requiredEnum(source, "impersonation", Impersonation.class),
-                requiredEnum(source, "politicalContext", PoliticalContext.class));
+                requiredEnum(source, "politicalContext", PoliticalContext.class),
+                requiredEnum(
+                        source,
+                        "restrictedPoliticalEntity",
+                        RestrictedPoliticalEntity.class));
     }
 
     PolicySignals withFinancialPrivacy(FinancialPrivacy localPrivacy) {
@@ -84,7 +98,8 @@ record PolicySignals(
                 financialRisk,
                 strongest,
                 impersonation,
-                politicalContext);
+                politicalContext,
+                restrictedPoliticalEntity);
     }
 
     Investment legacyInvestment() {
@@ -124,6 +139,14 @@ record PolicySignals(
         return risk == FinancialRisk.POTENTIALLY_MISLEADING
                 || risk == FinancialRisk.PAID_PROMOTION
                 || risk == FinancialRisk.UNCERTAIN;
+    }
+
+    static boolean isConfirmedRestrictedPoliticalEntity(
+            RestrictedPoliticalEntity entity) {
+        return entity == RestrictedPoliticalEntity.PRESIDENT
+                || entity == RestrictedPoliticalEntity.MINISTER
+                || entity == RestrictedPoliticalEntity.YAP
+                || entity == RestrictedPoliticalEntity.MULTIPLE;
     }
 
     private static void validateSafety(Decision action, Safety safety) {

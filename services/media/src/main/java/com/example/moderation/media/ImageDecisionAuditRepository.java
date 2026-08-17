@@ -32,9 +32,14 @@ class ImageDecisionAuditRepository {
                             financial_privacy,
                             impersonation,
                             political_context,
+                            restricted_political_entity,
+                            local_restricted_political_entity,
+                            local_policy_terminal,
+                            local_policy_violation,
                             image_match,
                             policy_version,
                             policy_word_lists_digest,
+                            restricted_political_registry_digest,
                             exact_reference_id,
                             candidate_ids,
                             classifier_proposed_block,
@@ -92,9 +97,14 @@ class ImageDecisionAuditRepository {
                             :financialPrivacy,
                             :impersonation,
                             :politicalContext,
+                            :restrictedPoliticalEntity,
+                            :localRestrictedPoliticalEntity,
+                            :localPolicyTerminal,
+                            :localPolicyViolation,
                             :imageMatch,
                             :policyVersion,
                             :policyWordListsDigest,
+                            :restrictedPoliticalRegistryDigest,
                             :exactReferenceId,
                             CAST(:candidateIds AS JSONB),
                             :classifierProposedBlock,
@@ -153,9 +163,23 @@ class ImageDecisionAuditRepository {
                 .param("financialPrivacy", event.financialPrivacy(), Types.VARCHAR)
                 .param("impersonation", event.impersonation(), Types.VARCHAR)
                 .param("politicalContext", event.politicalContext(), Types.VARCHAR)
+                .param(
+                        "restrictedPoliticalEntity",
+                        event.restrictedPoliticalEntity(),
+                        Types.VARCHAR)
+                .param(
+                        "localRestrictedPoliticalEntity",
+                        event.localRestrictedPoliticalEntity(),
+                        Types.VARCHAR)
+                .param("localPolicyTerminal", event.localPolicyTerminal())
+                .param("localPolicyViolation", event.localPolicyViolation(), Types.VARCHAR)
                 .param("imageMatch", event.imageMatch())
                 .param("policyVersion", event.policyVersion())
                 .param("policyWordListsDigest", event.policyWordListsDigest(), Types.CHAR)
+                .param(
+                        "restrictedPoliticalRegistryDigest",
+                        event.restrictedPoliticalRegistryDigest(),
+                        Types.CHAR)
                 .param("exactReferenceId", event.exactReferenceId(), Types.VARCHAR)
                 .param("candidateIds", candidateIdsJson(event))
                 .param("classifierProposedBlock", event.classifierProposedBlock())

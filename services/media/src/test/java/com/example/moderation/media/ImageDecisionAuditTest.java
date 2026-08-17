@@ -26,9 +26,9 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 class ImageDecisionAuditTest {
     private static final String DECISION_CONFIGURATION_SNAPSHOT = String.join(
             "\n",
-            "schema=image-decision-config-v2",
-            "implementation.identity=gateway-image-policy-runtime-v2",
-            "policy.version=investment-community-policy-v2");
+            "schema=image-decision-config-v3",
+            "implementation.identity=gateway-image-policy-runtime-v3",
+            "policy.version=investment-community-policy-v5");
     private static final String DECISION_CONFIGURATION_DIGEST =
             sha256(DECISION_CONFIGURATION_SNAPSHOT);
     private static final String AI_CONFIGURATION_SNAPSHOT = String.join(
@@ -38,13 +38,13 @@ class ImageDecisionAuditTest {
             "moderation.model=omni-moderation-2024-09-26",
             "moderation.profileSha256=25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
             "classification.model=gpt-5.6-terra",
-            "classification.promptBundleSha256=644044f7960b05e48529003e03f6b69f3dd932a31d6e39d7b4e01d57f5aa9f7e",
-            "classification.profileSha256=de5d6be741ee1f30bfff85de54c71133ad541593083e7d857ff04c028dee0289",
+            "classification.promptBundleSha256=92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba",
+            "classification.profileSha256=4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216",
             "adjudication.model=gpt-5.6-terra",
             "adjudication.reasoningEffort=medium",
-            "adjudication.promptVersion=image-adjudication-v4",
-            "adjudication.promptSha256=20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8",
-            "adjudication.profileSha256=07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef",
+            "adjudication.promptVersion=image-adjudication-v5",
+            "adjudication.promptSha256=d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505",
+            "adjudication.profileSha256=d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa",
             "openai.timeoutSeconds=30",
             "ai.maxImageBytes=8388608",
             "ai.maxImageRequestBytes=9437184");
@@ -146,6 +146,9 @@ class ImageDecisionAuditTest {
                         ImageDecisionAuditEvent::financialPrivacy,
                         ImageDecisionAuditEvent::impersonation,
                         ImageDecisionAuditEvent::politicalContext,
+                        ImageDecisionAuditEvent::restrictedPoliticalEntity,
+                        ImageDecisionAuditEvent::localPolicyTerminal,
+                        ImageDecisionAuditEvent::localPolicyViolation,
                         ImageDecisionAuditEvent::imageMatch,
                         ImageDecisionAuditEvent::classifierProposedBlock,
                         ImageDecisionAuditEvent::ocrDigest,
@@ -169,6 +172,9 @@ class ImageDecisionAuditTest {
                         "NONE",
                         "NONE",
                         "NONE",
+                        "NONE",
+                        false,
+                        null,
                         "SIMILAR_CANDIDATE",
                         false,
                         "a".repeat(64),
@@ -177,7 +183,7 @@ class ImageDecisionAuditTest {
                         DECISION_CONFIGURATION_SNAPSHOT,
                         "candidate_recheck",
                         "gpt-5.6-terra",
-                        "image-adjudication-v4",
+                        "image-adjudication-v5",
                         287);
         assertThat(event.getValue().candidateIds())
                 .containsExactly("reference-1", "reference-2");
@@ -196,7 +202,12 @@ class ImageDecisionAuditTest {
                 "financialRisk",
                 "financialPrivacy",
                 "impersonation",
-                "politicalContext")) {
+                "politicalContext",
+                "restrictedPoliticalEntity",
+                "localRestrictedPoliticalEntity",
+                "restrictedPoliticalRegistryDigest",
+                "localPolicyTerminal",
+                "localPolicyViolation")) {
             json.remove(field);
         }
         String legacySnapshot = String.join(
@@ -221,6 +232,11 @@ class ImageDecisionAuditTest {
         assertThat(legacy.financialPrivacy()).isNull();
         assertThat(legacy.impersonation()).isNull();
         assertThat(legacy.politicalContext()).isNull();
+        assertThat(legacy.restrictedPoliticalEntity()).isNull();
+        assertThat(legacy.localRestrictedPoliticalEntity()).isNull();
+        assertThat(legacy.restrictedPoliticalRegistryDigest()).isNull();
+        assertThat(legacy.localPolicyTerminal()).isNull();
+        assertThat(legacy.localPolicyViolation()).isNull();
     }
 
     @Test
@@ -354,6 +370,88 @@ class ImageDecisionAuditTest {
         assertThat(validator.validate(lowerPriorityReason))
                 .anyMatch(violation -> violation.getMessage()
                         .contains("policy signals must be complete and coherent"));
+    }
+
+    @Test
+    void enforcesRestrictedPoliticalPrecedenceAndGovernedLocalEvidence() {
+        ImageDecisionAuditRequest president = mutateValid(json -> {
+            setPolicyOutcome(
+                    json,
+                    "BLOCK",
+                    "POLITICAL_CONTENT",
+                    "POLITICAL_CONTENT",
+                    "OFF_TOPIC",
+                    "ALLOW",
+                    "NONE",
+                    "NONE",
+                    "NONE",
+                    "NONE");
+            json.put("restrictedPoliticalEntity", "PRESIDENT");
+        });
+        assertThat(validator.validate(president)).isEmpty();
+
+        ImageDecisionAuditRequest possible = mutateValid(json -> {
+            setPolicyOutcome(
+                    json,
+                    "UNKNOWN",
+                    "POLITICAL_CONTENT",
+                    "POLITICAL_CONTENT",
+                    "OFF_TOPIC",
+                    "ALLOW",
+                    "NONE",
+                    "NONE",
+                    "NONE",
+                    "NONE");
+            json.put("restrictedPoliticalEntity", "POSSIBLE");
+            json.put("adjudicationAction", "unknown");
+            json.put("adjudicationDisposition", "inconclusive");
+        });
+        assertThat(validator.validate(possible)).isEmpty();
+
+        ImageDecisionAuditRequest safetyWins = mutateValid(json -> {
+            json.put("restrictedPoliticalEntity", "PRESIDENT");
+        });
+        assertThat(validator.validate(safetyWins)).isEmpty();
+
+        ImageDecisionAuditRequest localPolitical = mutateValid(json -> {
+            setPolicyOutcome(
+                    json,
+                    "BLOCK",
+                    "POLITICAL_CONTENT",
+                    "POLITICAL_CONTENT",
+                    null,
+                    null,
+                    "NONE",
+                    "NONE",
+                    "NONE",
+                    "NONE");
+            setLocalPolicyTerminal(json, "POLITICAL_CONTENT");
+        });
+        assertThat(validator.validate(localPolitical)).isEmpty();
+
+        ImageDecisionAuditRequest localPrivacyWins = mutateValid(json -> {
+            setPolicyOutcome(
+                    json,
+                    "BLOCK",
+                    "FINANCIAL_PRIVACY",
+                    "FINANCIAL_PRIVACY",
+                    null,
+                    null,
+                    "NONE",
+                    "NONE",
+                    "CLEAR",
+                    "NONE");
+            setLocalPolicyTerminal(json, "POLITICAL_CONTENT");
+        });
+        assertThat(validator.validate(localPrivacyWins)).isEmpty();
+
+        ImageDecisionAuditRequest forgedLocalEvidence = mutateValid(json -> {
+            json.put("localPolicyTerminal", true);
+            json.put("localPolicyViolation", "POLITICAL_CONTENT");
+        });
+        assertThat(validator.validate(forgedLocalEvidence))
+                .anyMatch(violation -> violation.getMessage()
+                        .contains("local policy evidence must bind"));
     }
 
     @Test
@@ -522,6 +620,9 @@ class ImageDecisionAuditTest {
         verify(statement).param("financialPrivacy", "NONE", Types.VARCHAR);
         verify(statement).param("impersonation", "NONE", Types.VARCHAR);
         verify(statement).param("politicalContext", "NONE", Types.VARCHAR);
+        verify(statement).param("restrictedPoliticalEntity", "NONE", Types.VARCHAR);
+        verify(statement).param("localPolicyTerminal", false);
+        verify(statement).param("localPolicyViolation", null, Types.VARCHAR);
         verify(statement).param("adjudicationMode", "candidate_recheck");
         verify(statement).param("exactReferenceId", null, Types.VARCHAR);
         verify(statement).param("policyWordListsDigest", "f".repeat(64), Types.CHAR);
@@ -532,18 +633,18 @@ class ImageDecisionAuditTest {
                 "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073");
         verify(statement).param(
                 "configuredClassificationPromptBundleSha256",
-                "644044f7960b05e48529003e03f6b69f3dd932a31d6e39d7b4e01d57f5aa9f7e");
+                "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba");
         verify(statement).param(
                 "configuredClassificationProfileSha256",
-                "de5d6be741ee1f30bfff85de54c71133ad541593083e7d857ff04c028dee0289");
+                "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216");
         verify(statement).param("configuredAdjudicationModel", "gpt-5.6-terra");
         verify(statement).param("configuredAdjudicationReasoningEffort", "medium");
         verify(statement).param(
                 "configuredAdjudicationPromptSha256",
-                "20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8");
+                "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505");
         verify(statement).param(
                 "configuredAdjudicationProfileSha256",
-                "07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef");
+                "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa");
         verify(statement).param("aiConfigurationStatus", "matched");
         verify(statement).param("observedAiConfigurationDigest", AI_CONFIGURATION_DIGEST);
         verify(statement).param("observedAiConfigurationSnapshot", AI_CONFIGURATION_SNAPSHOT);
@@ -582,7 +683,7 @@ class ImageDecisionAuditTest {
                   "adjudicationAction":"block",
                   "adjudicationDisposition":"confirmed",
                   "adjudicationModel":"gpt-5.6-terra",
-                  "promptVersion":"image-adjudication-v4",
+                  "promptVersion":"image-adjudication-v5",
                   "latencyMs":287,
                   "rawImage":"must-not-be-accepted"
                 }
@@ -615,6 +716,8 @@ class ImageDecisionAuditTest {
                 resource("db/migration/V9__persist_decision_configuration_snapshot.sql");
         String publicPolicySignals =
                 resource("db/migration/V10__add_public_policy_signals_to_image_audit.sql");
+        String restrictedPoliticalPolicy =
+                resource("db/migration/V15__add_restricted_political_entity_policy.sql");
 
         assertThat(migration)
                 .contains("CREATE TABLE moderation_image_decision_audit_events")
@@ -702,6 +805,24 @@ class ImageDecisionAuditTest {
                         "image_bytes",
                         "ocr_text",
                         "post_text");
+        assertThat(restrictedPoliticalPolicy)
+                .contains(
+                        "ADD COLUMN restricted_political_entity VARCHAR(64)",
+                        "ADD COLUMN local_policy_terminal BOOLEAN NOT NULL DEFAULT FALSE",
+                        "ADD COLUMN local_policy_violation VARCHAR(64)",
+                        "image-decision-provenance-v4",
+                        "image-decision-config-v3",
+                        "gateway-image-policy-runtime-v3",
+                        "NEW.local_policy_violation = 'POLITICAL_CONTENT'",
+                        "NEW.restricted_political_entity = 'POSSIBLE'",
+                        "enforce_username_v3_policy_signals",
+                        "NEW.deciding_layer = 'BLOCKED_TERM'",
+                        "NEW.violation IN ('VULGAR', 'OTHER')",
+                        "blocked-term username decision violates policy reducer precedence",
+                        "NEW.deciding_layer = 'ANALYZER_UNAVAILABLE'",
+                        "NEW.classification_status <> 'ok'",
+                        "analyzer-unavailable username decisions must fail closed")
+                .doesNotContain("raw_image", "image_bytes", "ocr_text", "post_text");
         assertThat(List.of(ImageDecisionAuditEvent.class.getRecordComponents()).stream()
                         .map(component -> component.getName()))
                 .noneMatch(name -> name.toLowerCase(java.util.Locale.ROOT)
@@ -796,7 +917,11 @@ class ImageDecisionAuditTest {
         json.put("finalDecision", decision);
         json.put("violation", violation);
         json.put("finalReason", reason);
-        json.put("domain", domain);
+        if (domain == null) {
+            json.putNull("domain");
+        } else {
+            json.put("domain", domain);
+        }
         if (safetyAction == null) {
             json.putNull("safetyAction");
         } else {
@@ -808,6 +933,36 @@ class ImageDecisionAuditTest {
         json.put("impersonation", impersonation);
     }
 
+    private static void setLocalPolicyTerminal(
+            com.fasterxml.jackson.databind.node.ObjectNode json, String localViolation) {
+        json.put("localPolicyTerminal", true);
+        json.put("localPolicyViolation", localViolation);
+        json.putNull("financialClaim");
+        json.putNull("politicalContext");
+        json.putNull("restrictedPoliticalEntity");
+        json.put("moderationStatus", "not_required");
+        json.put("actualModerationModel", "not_invoked");
+        json.put("classificationStatus", "not_required");
+        json.put("actualClassificationModel", "not_invoked");
+        for (String field : List.of(
+                "configuredModerationModel",
+                "configuredModerationProfileSha256",
+                "configuredClassificationModel",
+                "configuredClassificationPromptBundleSha256",
+                "configuredClassificationProfileSha256",
+                "configuredAdjudicationModel",
+                "configuredAdjudicationReasoningEffort",
+                "configuredAdjudicationPromptVersion",
+                "configuredAdjudicationPromptSha256",
+                "configuredAdjudicationProfileSha256")) {
+            json.put(field, "not_invoked");
+        }
+        json.put("aiConfigurationStatus", "not_invoked");
+        json.put("observedAiConfigurationDigest", "not_invoked");
+        json.put("observedAiConfigurationSnapshot", "not_invoked");
+        setAdjudicationState(json, "not_required");
+    }
+
     private static void setAdjudicationState(
             com.fasterxml.jackson.databind.node.ObjectNode json, String status) {
         json.put("adjudicationStatus", status);
@@ -817,7 +972,7 @@ class ImageDecisionAuditTest {
                 json.put("adjudicationAction", "unknown");
                 json.put("adjudicationDisposition", "inconclusive");
                 json.put("adjudicationModel", "gpt-5.6-terra");
-                json.put("promptVersion", "image-adjudication-v4");
+                json.put("promptVersion", "image-adjudication-v5");
             }
             case "error", "unavailable" -> {
                 json.put("adjudicationMode", status);
@@ -922,13 +1077,18 @@ class ImageDecisionAuditTest {
                 "NONE",
                 "NONE",
                 "NONE",
+                "NONE",
+                null,
+                false,
+                null,
                 imageMatch,
-                "image-policy-v1",
+                "investment-community-policy-v5",
                 "f".repeat(64),
+                "e".repeat(64),
                 exactReferenceId,
                 candidateIds,
                 false,
-                "image-decision-provenance-v3",
+                "image-decision-provenance-v4",
                 "ok",
                 "omni-moderation-2024-09-26",
                 "ok",
@@ -936,13 +1096,13 @@ class ImageDecisionAuditTest {
                 "omni-moderation-2024-09-26",
                 "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                 "gpt-5.6-terra",
-                "644044f7960b05e48529003e03f6b69f3dd932a31d6e39d7b4e01d57f5aa9f7e",
-                "de5d6be741ee1f30bfff85de54c71133ad541593083e7d857ff04c028dee0289",
+                "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba",
+                "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216",
                 "gpt-5.6-terra",
                 "medium",
-                "image-adjudication-v4",
-                "20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8",
-                "07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef",
+                "image-adjudication-v5",
+                "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505",
+                "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa",
                 aiConfigurationStatus,
                 observedAiConfigurationDigest,
                 observedAiConfigurationSnapshot,
@@ -958,7 +1118,7 @@ class ImageDecisionAuditTest {
                 "opencv-orb-4.12-v1",
                 "opencv-orb-4.12-v1",
                 "orb-homography-specificity-v1",
-                "image-decision-config-v2",
+                "image-decision-config-v3",
                 decisionConfigurationDigest,
                 decisionConfigurationSnapshot,
                 "ok",
@@ -966,7 +1126,7 @@ class ImageDecisionAuditTest {
                 adjudicationAction,
                 adjudicationDisposition,
                 "gpt-5.6-terra",
-                "image-adjudication-v4",
+                "image-adjudication-v5",
                 287);
     }
 

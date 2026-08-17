@@ -84,28 +84,22 @@ public class MediaController {
         byte[] bytes = image.getBytes();
         try {
             DecodedImage decoded = decoder.decode(bytes);
+            PdqHashService.Preflight preflight = pdq.preflight(bytes);
+            if (preflight.hasAuthoritativeExactMatch()) {
+                PdqHashService.Analysis evidence = pdq.analyzeAuthoritativeExact(
+                        bytes, contentId, decoded.format(), preflight);
+                return response(
+                        decoded,
+                        evidence,
+                        OcrResult.disabled(),
+                        PdqHashService.AUTHORITATIVE_SHA256_EXACT_PATH);
+            }
             OcrResult ocrResult = ocr.analyze(decoded.image());
             PdqHashService.Analysis evidence =
                     pdq.analyze(
                             decoded.image(), bytes, contentId, ocrResult, decoded.format());
-            return Map.of(
-                    "status", "ok",
-                    "identity", evidence.identity(),
-                    "pdq", evidence.pdq(),
-                    "ocr", ocrEvidence(ocrResult),
-                    "image",
-                            Map.of(
-                                    "width", decoded.image().getWidth(),
-                                    "height", decoded.image().getHeight(),
-                                    "format", decoded.format(),
-                                    "decoderProfileVersion",
-                                    decoded.decoderProfileVersion(),
-                                    "maxImageBytes",
-                                    properties.maxImageBytes(),
-                                    "maxImageRequestBytes",
-                                    properties.maxImageRequestBytes(),
-                                    "maxImagePixels",
-                                    properties.maxImagePixels()));
+            return response(
+                    decoded, evidence, ocrResult, PdqHashService.FULL_ANALYSIS_PATH);
         } catch (InvalidImageException exception) {
             throw new ResponseStatusException(
                     HttpStatus.UNPROCESSABLE_ENTITY, exception.getMessage(), exception);
@@ -115,6 +109,34 @@ public class MediaController {
                     "visual retrieval is unavailable",
                     exception);
         }
+    }
+
+    private Map<String, Object> response(
+            DecodedImage decoded,
+            PdqHashService.Analysis evidence,
+            OcrResult ocrResult,
+            String processingPath) {
+        Map<String, Object> ocrEvidence = new LinkedHashMap<>(ocrEvidence(ocrResult));
+        ocrEvidence.put(
+                "executionStatus",
+                PdqHashService.AUTHORITATIVE_SHA256_EXACT_PATH.equals(processingPath)
+                        ? "not_invoked"
+                        : "completed");
+        return Map.of(
+                "status", "ok",
+                "identity", evidence.identity(),
+                "pdq", evidence.pdq(),
+                "ocr", Map.copyOf(ocrEvidence),
+                "image",
+                        Map.of(
+                                "width", decoded.image().getWidth(),
+                                "height", decoded.image().getHeight(),
+                                "format", decoded.format(),
+                                "decoderProfileVersion", decoded.decoderProfileVersion(),
+                                "processingPath", processingPath,
+                                "maxImageBytes", properties.maxImageBytes(),
+                                "maxImageRequestBytes", properties.maxImageRequestBytes(),
+                                "maxImagePixels", properties.maxImagePixels()));
     }
 
     private Map<String, Object> ocrEvidence(OcrResult result) {

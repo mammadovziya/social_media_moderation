@@ -32,6 +32,8 @@ public record ModerationResponse(
         @JsonView(Internal.class) @Schema(hidden = true) FinancialPrivacy financialPrivacy,
         @JsonView(Internal.class) @Schema(hidden = true) Impersonation impersonation,
         @JsonView(Internal.class) @Schema(hidden = true) PoliticalContext politicalContext,
+        @JsonView(Internal.class) @Schema(hidden = true)
+                RestrictedPoliticalEntity restrictedPoliticalEntity,
         @JsonView(Internal.class) @Schema(hidden = true) ImageMatch imageMatch,
         @JsonView(Internal.class) @Schema(hidden = true) Integer imageMatchScore,
         @JsonView(Internal.class) @Schema(hidden = true) String ocrText,

@@ -17,15 +17,17 @@ import org.springframework.stereotype.Service;
 public class AiAnalysisService {
     private static final Logger log = LoggerFactory.getLogger(AiAnalysisService.class);
     static final String IMAGE_ADJUDICATION_INVOCATION_POLICY_VERSION =
-            "image-adjudication-invocation-v4";
+            "image-adjudication-invocation-v5";
     private static final String IMAGE_ADJUDICATION_PROMPT_VERSION =
-            "image-adjudication-v4";
+            "image-adjudication-v5";
     private static final Set<String> DECISIVE_FINANCIAL_RISKS = Set.of(
             "guaranteed_return",
             "investment_scam",
             "pump_and_dump",
             "market_manipulation",
             "phishing");
+    private static final Set<String> RESTRICTED_POLITICAL_ENTITY_SIGNALS = Set.of(
+            "president", "minister", "yap", "multiple", "possible");
 
     private final AiProvider provider;
     private final AiProperties properties;
@@ -154,7 +156,9 @@ public class AiAnalysisService {
                 || DECISIVE_FINANCIAL_RISKS.contains(
                         String.valueOf(classification.get("financialRisk")))
                 || "clear".equals(classification.get("financialPrivacy"))
-                || "clear".equals(classification.get("impersonation"));
+                || "clear".equals(classification.get("impersonation"))
+                || RESTRICTED_POLITICAL_ENTITY_SIGNALS.contains(
+                        String.valueOf(classification.get("restrictedPoliticalEntity")));
     }
 
     private Map<String, Object> withAdjudicationMetadata(Map<String, Object> signal) {

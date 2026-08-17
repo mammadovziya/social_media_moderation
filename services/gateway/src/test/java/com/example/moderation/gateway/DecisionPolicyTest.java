@@ -6,11 +6,88 @@ import com.example.moderation.gateway.api.ContentType;
 import com.example.moderation.gateway.api.Decision;
 import com.example.moderation.gateway.api.Domain;
 import com.example.moderation.gateway.api.FinalReason;
+import com.example.moderation.gateway.api.FinancialPrivacy;
 import com.example.moderation.gateway.api.Violation;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class DecisionPolicyTest {
+    @Test
+    void restrictedPoliticalEntitiesBlockAndPossibleWinsBeforeOffTopic() {
+        for (String restricted : java.util.List.of(
+                "president", "minister", "yap", "multiple")) {
+            Map<String, Object> classification = new java.util.LinkedHashMap<>(
+                    classification("allow", "none", "off_topic"));
+            classification.put("restrictedPoliticalEntity", restricted);
+
+            DecisionPolicy.Result result = DecisionPolicy.decide(
+                    null,
+                    ai(Map.copyOf(classification)),
+                    ContentType.POST,
+                    Violation.NONE,
+                    0.70);
+
+            assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                    Decision.BLOCK,
+                    Violation.POLITICAL_CONTENT,
+                    FinalReason.POLITICAL_CONTENT));
+            assertThat(DecisionPolicy.classifierProposedBlock(
+                            Map.copyOf(classification), ContentType.POST))
+                    .isTrue();
+        }
+
+        Map<String, Object> possible = new java.util.LinkedHashMap<>(
+                classification("allow", "none", "off_topic"));
+        possible.put("restrictedPoliticalEntity", "possible");
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                null,
+                ai(Map.copyOf(possible)),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                Decision.UNKNOWN,
+                Violation.POLITICAL_CONTENT,
+                FinalReason.POLITICAL_CONTENT));
+        assertThat(DecisionPolicy.classifierProposedBlock(
+                        Map.copyOf(possible), ContentType.POST))
+                .isTrue();
+    }
+
+    @Test
+    void safetyRetainsPrecedenceOverRestrictedPoliticalEntity() {
+        Map<String, Object> classification = new java.util.LinkedHashMap<>(
+                classification("block", "hate", "off_topic"));
+        classification.put("restrictedPoliticalEntity", "president");
+
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                null,
+                ai(Map.copyOf(classification)),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                Decision.BLOCK, Violation.HATE, FinalReason.SAFETY));
+    }
+
+    @Test
+    void localFinancialPrivacyRetainsPrecedenceOverLocalPoliticalContent() {
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                null,
+                Map.of(),
+                ContentType.POST,
+                Violation.POLITICAL_CONTENT,
+                FinancialPrivacy.CLEAR,
+                0.70);
+
+        assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                Decision.BLOCK,
+                Violation.FINANCIAL_PRIVACY,
+                FinalReason.FINANCIAL_PRIVACY));
+    }
+
     @Test
     void perceptualCandidateNeverBlocksWithoutCurrentEvidence() {
         DecisionPolicy.Result result = DecisionPolicy.decide(
@@ -338,6 +415,74 @@ class DecisionPolicyTest {
     }
 
     @Test
+    void terraCanConfirmARestrictedPoliticalImageWithoutCandidates() {
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                noCandidateMedia(),
+                politicalImageAi(
+                        "president",
+                        Map.ofEntries(
+                                Map.entry("status", "ok"),
+                                Map.entry("adjudicationMode", "classifier_block_recheck"),
+                                Map.entry("action", "block"),
+                                Map.entry("safetyAction", "allow"),
+                                Map.entry("category", "none"),
+                                Map.entry("domain", "investment_related"),
+                                Map.entry("financialClaim", "none"),
+                                Map.entry("financialRisk", "none"),
+                                Map.entry("financialPrivacy", "none"),
+                                Map.entry("impersonation", "none"),
+                                Map.entry("restrictedPoliticalEntity", "president"),
+                                Map.entry("politicalContext", "general_politics"),
+                                Map.entry("finalReason", "restricted_political_entity"),
+                                Map.entry("candidateDisposition", "confirmed"),
+                                Map.entry("evidenceBasis", "current_visual"),
+                                Map.entry("reasonCode", "current_policy_violation"),
+                                Map.entry("candidateIds", java.util.List.of()))),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                Decision.BLOCK,
+                Violation.POLITICAL_CONTENT,
+                FinalReason.POLITICAL_CONTENT));
+    }
+
+    @Test
+    void terraKeepsAPossibleRestrictedPoliticalImageFailClosed() {
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                noCandidateMedia(),
+                politicalImageAi(
+                        "possible",
+                        Map.ofEntries(
+                                Map.entry("status", "ok"),
+                                Map.entry("adjudicationMode", "classifier_block_recheck"),
+                                Map.entry("action", "unknown"),
+                                Map.entry("safetyAction", "allow"),
+                                Map.entry("category", "none"),
+                                Map.entry("domain", "investment_related"),
+                                Map.entry("financialClaim", "none"),
+                                Map.entry("financialRisk", "none"),
+                                Map.entry("financialPrivacy", "none"),
+                                Map.entry("impersonation", "none"),
+                                Map.entry("restrictedPoliticalEntity", "possible"),
+                                Map.entry("politicalContext", "uncertain"),
+                                Map.entry("finalReason", "restricted_political_entity"),
+                                Map.entry("candidateDisposition", "inconclusive"),
+                                Map.entry("evidenceBasis", "insufficient"),
+                                Map.entry("reasonCode", "insufficient_evidence"),
+                                Map.entry("candidateIds", java.util.List.of()))),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                Decision.UNKNOWN,
+                Violation.POLITICAL_CONTENT,
+                FinalReason.POLITICAL_CONTENT));
+    }
+
+    @Test
     void bothModeBindsCandidateAndClassifierBlockBeforeBlocking() {
         DecisionPolicy.Result result = DecisionPolicy.decide(
                 textCandidateMedia(),
@@ -641,7 +786,7 @@ class DecisionPolicyTest {
     }
 
     @Test
-    void equalModerationScoresUseStableTaxonomyPriority() {
+    void moderationScoreAboveThresholdBlocksUsingStableTaxonomyPriority() {
         java.util.LinkedHashMap<String, Object> genericFirst = new java.util.LinkedHashMap<>();
         genericFirst.put("violence", 0.90);
         genericFirst.put("harassment/threatening", 0.90);
@@ -665,8 +810,90 @@ class DecisionPolicyTest {
                     0.70);
 
             assertThat(result).isEqualTo(
-                    new DecisionPolicy.Result(Decision.UNKNOWN, Violation.THREAT));
+                    new DecisionPolicy.Result(Decision.BLOCK, Violation.THREAT));
         }
+    }
+
+    @Test
+    void moderationScoreMustBeStrictlyAboveThresholdToBlock() {
+        for (double score : new double[] {0.149999, 0.15}) {
+            DecisionPolicy.Result result = DecisionPolicy.decide(
+                    null,
+                    Map.of(
+                            "moderation",
+                            Map.of(
+                                    "status", "ok",
+                                    "flagged", false,
+                                    "categoryScores", Map.of("sexual", score)),
+                            "classification",
+                            classification("allow", "none", "investment_related")),
+                    ContentType.USERNAME,
+                    Violation.NONE,
+                    0.15);
+
+            assertThat(result).isEqualTo(
+                    new DecisionPolicy.Result(Decision.ALLOW, Violation.NONE));
+        }
+    }
+
+    @Test
+    void moderationScoreAboveThresholdBlocksEvenWhenClassifierAllows() {
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                null,
+                Map.of(
+                        "moderation",
+                        Map.of(
+                                "status", "ok",
+                                "flagged", false,
+                                "categoryScores", Map.of("sexual", 0.5658521194151336)),
+                        "classification",
+                        classification("allow", "none", "investment_related")),
+                ContentType.USERNAME,
+                Violation.NONE,
+                0.15);
+
+        assertThat(result).isEqualTo(
+                new DecisionPolicy.Result(Decision.BLOCK, Violation.SEXUAL));
+    }
+
+    @Test
+    void moderationScoreAboveThresholdIsTerminalWhenOtherAnalyzersFail() {
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                Map.of("status", "error"),
+                Map.of(
+                        "moderation",
+                        Map.of(
+                                "status", "ok",
+                                "flagged", false,
+                                "categoryScores", Map.of("sexual", 0.5658521194151336)),
+                        "classification",
+                        Map.of("status", "error")),
+                ContentType.POST,
+                Violation.NONE,
+                0.15);
+
+        assertThat(result).isEqualTo(
+                new DecisionPolicy.Result(Decision.BLOCK, Violation.SEXUAL));
+    }
+
+    @Test
+    void moderationScoreAboveThresholdPrecedesAnOffTopicClassifierResult() {
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                Map.of("status", "ok"),
+                Map.of(
+                        "moderation",
+                        Map.of(
+                                "status", "ok",
+                                "flagged", false,
+                                "categoryScores", Map.of("violence", 0.150001)),
+                        "classification",
+                        classification("allow", "none", "off_topic")),
+                ContentType.POST,
+                Violation.NONE,
+                0.15);
+
+        assertThat(result).isEqualTo(
+                new DecisionPolicy.Result(Decision.BLOCK, Violation.VIOLENCE));
     }
 
     @Test
@@ -1159,6 +1386,32 @@ class DecisionPolicyTest {
                 "adjudication", adjudication);
     }
 
+    private static Map<String, Object> politicalImageAi(
+            String restrictedPoliticalEntity, Map<String, Object> adjudication) {
+        Map<String, Object> classification = new java.util.LinkedHashMap<>(
+                classification("allow", "none", "investment_related"));
+        classification.put("restrictedPoliticalEntity", restrictedPoliticalEntity);
+        return Map.of(
+                "moderation", Map.of(
+                        "status", "ok",
+                        "flagged", false,
+                        "categoryScores", Map.of()),
+                "classification", Map.copyOf(classification),
+                "adjudication", adjudication);
+    }
+
+    private static Map<String, Object> noCandidateMedia() {
+        return Map.of(
+                "status", "ok",
+                "ocr", Map.of(
+                        "status", "ok",
+                        "confidenceAccepted", true,
+                        "truncated", false),
+                "pdq", Map.of(
+                        "candidateFound", false,
+                        "candidates", java.util.List.of()));
+    }
+
     private static Map<String, Object> textCandidateMedia() {
         return Map.of(
                 "status", "ok",
@@ -1200,7 +1453,8 @@ class DecisionPolicyTest {
                 Map.entry("financialRisk", "none"),
                 Map.entry("financialPrivacy", "none"),
                 Map.entry("impersonation", "none"),
-                Map.entry("politicalContext", "none"));
+                Map.entry("politicalContext", "none"),
+                Map.entry("restrictedPoliticalEntity", "none"));
     }
 
     private static Map<String, Object> classification(
@@ -1242,6 +1496,7 @@ class DecisionPolicyTest {
         result.put("financialPrivacy", "none");
         result.put("impersonation", "none");
         result.put("politicalContext", "none");
+        result.put("restrictedPoliticalEntity", "none");
         result.put("finalReason", finalReason);
         return Map.copyOf(result);
     }

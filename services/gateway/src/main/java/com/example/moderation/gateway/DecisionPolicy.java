@@ -7,14 +7,15 @@ import com.example.moderation.gateway.api.FinalReason;
 import com.example.moderation.gateway.api.FinancialPrivacy;
 import com.example.moderation.gateway.api.FinancialRisk;
 import com.example.moderation.gateway.api.Impersonation;
+import com.example.moderation.gateway.api.RestrictedPoliticalEntity;
 import com.example.moderation.gateway.api.Safety;
 import com.example.moderation.gateway.api.Violation;
 import java.util.List;
 import java.util.Map;
 
 public final class DecisionPolicy {
-    public static final String POLICY_VERSION = "investment-community-policy-v2";
-    public static final String REDUCER_VERSION = "decision-reducer-v4";
+    public static final String POLICY_VERSION = "investment-community-policy-v5";
+    public static final String REDUCER_VERSION = "decision-reducer-v6";
     public static final String REFERENCE_ASSET_POLICY_VERSION = "image-policy-v1";
     private static final List<String> FLAGGED_CATEGORY_PRIORITY = List.of(
             "sexual/minors",
@@ -38,14 +39,14 @@ public final class DecisionPolicy {
             Map<String, Object> ai,
             ContentType contentType,
             Violation localViolation,
-            double unknownThreshold) {
+            double moderationScoreBlockThreshold) {
         return decide(
                 media,
                 ai,
                 contentType,
                 localViolation,
                 FinancialPrivacy.NONE,
-                unknownThreshold);
+                moderationScoreBlockThreshold);
     }
 
     public static Result decide(
@@ -54,7 +55,7 @@ public final class DecisionPolicy {
             ContentType contentType,
             Violation localViolation,
             FinancialPrivacy localFinancialPrivacy,
-            double unknownThreshold) {
+            double moderationScoreBlockThreshold) {
         if (hasAuthoritativeExactMatch(media)) {
             return new Result(
                     Decision.BLOCK, Violation.KNOWN_IMAGE, FinalReason.KNOWN_IMAGE);
@@ -72,8 +73,26 @@ public final class DecisionPolicy {
                     FinalReason.SAFETY);
         }
 
+        // The provider's binary flag uses its own operating point. This application binds a
+        // stricter governed operating point to the raw Omni Moderation category scores: any
+        // category strictly above the configured threshold is a terminal safety block.
+        ScoreCategory score = highestScore(nestedMap(moderation, "categoryScores"));
+        if (score.score() < 0) {
+            score = highestScore(nestedMap(moderation, "category_scores"));
+        }
+        if ("ok".equals(moderation.get("status"))
+                && score.score() > moderationScoreBlockThreshold) {
+            Violation scoreViolation = Violation.fromProvider(score.category());
+            return new Result(
+                    Decision.BLOCK,
+                    scoreViolation == Violation.NONE ? Violation.OTHER : scoreViolation,
+                    FinalReason.SAFETY);
+        }
+
         if (localViolation != null
-                && localViolation != Violation.NONE) {
+                && localViolation != Violation.NONE
+                && localViolation != Violation.IMPERSONATION
+                && localViolation != Violation.POLITICAL_CONTENT) {
             return new Result(
                     Decision.BLOCK, localViolation, finalReason(localViolation));
         }
@@ -82,6 +101,13 @@ public final class DecisionPolicy {
                     Decision.BLOCK,
                     Violation.FINANCIAL_PRIVACY,
                     FinalReason.FINANCIAL_PRIVACY);
+        }
+        if (localViolation == Violation.IMPERSONATION) {
+            return new Result(
+                    Decision.BLOCK, Violation.IMPERSONATION, FinalReason.IMPERSONATION);
+        }
+        if (localViolation == Violation.POLITICAL_CONTENT) {
+            return politicalContent(Decision.BLOCK);
         }
 
         boolean analyzerUnavailable =
@@ -108,18 +134,6 @@ public final class DecisionPolicy {
             }
         } else if (signals.domain() == Domain.OFF_TOPIC && !classifierPolicyBlock) {
             return offTopic();
-        }
-
-        ScoreCategory score = highestScore(nestedMap(moderation, "categoryScores"));
-        if (score.score() < 0) {
-            score = highestScore(nestedMap(moderation, "category_scores"));
-        }
-        if (!classifierPolicyBlock && score.score() >= unknownThreshold) {
-            Violation scoreViolation = Violation.fromProvider(score.category());
-            return new Result(
-                    Decision.UNKNOWN,
-                    scoreViolation == Violation.NONE ? Violation.OTHER : scoreViolation,
-                    FinalReason.SAFETY);
         }
 
         boolean candidateTrigger = requiresAdjudication(media);
@@ -151,7 +165,10 @@ public final class DecisionPolicy {
         return signals.safetyDecision() == Decision.BLOCK
                 || PolicySignals.isBlockingFinancialRisk(signals.financialRisk())
                 || signals.financialPrivacy() == FinancialPrivacy.CLEAR
-                || signals.impersonation() == Impersonation.CLEAR;
+                || signals.impersonation() == Impersonation.CLEAR
+                || (signals.restrictedPoliticalEntity() != null
+                        && signals.restrictedPoliticalEntity()
+                                != RestrictedPoliticalEntity.NONE);
     }
 
     private static Result reduceSignals(PolicySignals signals) {
@@ -177,6 +194,13 @@ public final class DecisionPolicy {
         if (signals.impersonation() == Impersonation.CLEAR) {
             return new Result(
                     Decision.BLOCK, Violation.IMPERSONATION, FinalReason.IMPERSONATION);
+        }
+        if (PolicySignals.isConfirmedRestrictedPoliticalEntity(
+                signals.restrictedPoliticalEntity())) {
+            return politicalContent(Decision.BLOCK);
+        }
+        if (signals.restrictedPoliticalEntity() == RestrictedPoliticalEntity.POSSIBLE) {
+            return politicalContent(Decision.UNKNOWN);
         }
         if (signals.domain() == Domain.OFF_TOPIC) {
             return offTopic();
@@ -238,6 +262,7 @@ public final class DecisionPolicy {
                         Decision.UNKNOWN,
                         Violation.IMPERSONATION,
                         FinalReason.IMPERSONATION);
+                case POLITICAL_CONTENT -> politicalContent(Decision.UNKNOWN);
                 case OFF_TOPIC -> new Result(
                         Decision.UNKNOWN, Violation.OFF_TOPIC, FinalReason.OFF_TOPIC);
                 case EVIDENCE_UNAVAILABLE -> evidenceUnavailable();
@@ -261,6 +286,7 @@ public final class DecisionPolicy {
                     FinalReason.FINANCIAL_RISK);
             case IMPERSONATION -> new Result(
                     Decision.BLOCK, Violation.IMPERSONATION, FinalReason.IMPERSONATION);
+            case POLITICAL_CONTENT -> politicalContent(Decision.BLOCK);
             case OFF_TOPIC -> offTopic();
             case NONE, KNOWN_IMAGE, EVIDENCE_UNAVAILABLE, ANALYZER_ERROR -> analyzerError();
         };
@@ -283,6 +309,13 @@ public final class DecisionPolicy {
         return new Result(Decision.BLOCK, Violation.OFF_TOPIC, FinalReason.OFF_TOPIC);
     }
 
+    private static Result politicalContent(Decision decision) {
+        return new Result(
+                decision,
+                Violation.POLITICAL_CONTENT,
+                FinalReason.POLITICAL_CONTENT);
+    }
+
     private static Result analyzerError() {
         return new Result(
                 Decision.UNKNOWN, Violation.ANALYZER_ERROR, FinalReason.ANALYZER_ERROR);
@@ -299,6 +332,7 @@ public final class DecisionPolicy {
         return switch (violation) {
             case KNOWN_IMAGE -> FinalReason.KNOWN_IMAGE;
             case IMPERSONATION -> FinalReason.IMPERSONATION;
+            case POLITICAL_CONTENT -> FinalReason.POLITICAL_CONTENT;
             case OFF_TOPIC, NOT_INVESTMENT -> FinalReason.OFF_TOPIC;
             case FINANCIAL_PRIVACY -> FinalReason.FINANCIAL_PRIVACY;
             case FINANCIAL_RISK -> FinalReason.FINANCIAL_RISK;
@@ -398,9 +432,7 @@ public final class DecisionPolicy {
             action = Decision.valueOf(
                     String.valueOf(adjudication.get("action"))
                             .toUpperCase(java.util.Locale.ROOT));
-            finalReason = FinalReason.valueOf(
-                    String.valueOf(adjudication.get("finalReason"))
-                            .toUpperCase(java.util.Locale.ROOT));
+            finalReason = adjudicatedFinalReason(adjudication.get("finalReason"));
             signals = PolicySignals.adjudicated(adjudication);
         } catch (IllegalArgumentException exception) {
             return analyzerError();
@@ -448,6 +480,14 @@ public final class DecisionPolicy {
             return resultForAdjudicatedReason(action, finalReason, signals);
         }
         return analyzerError();
+    }
+
+    private static FinalReason adjudicatedFinalReason(Object value) {
+        String normalized = String.valueOf(value)
+                .toUpperCase(java.util.Locale.ROOT);
+        return "RESTRICTED_POLITICAL_ENTITY".equals(normalized)
+                ? FinalReason.POLITICAL_CONTENT
+                : FinalReason.valueOf(normalized);
     }
 
     private static boolean validAdjudicationBinding(

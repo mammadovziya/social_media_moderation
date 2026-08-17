@@ -26,8 +26,9 @@ violation, block_<category> for a clear violation, and unknown_<category> only
 when that suspected safety category's target, intent, endorsement, or severity
 is materially unclear. <category> must be one of the non-none categories below.
 Never return allow_<category>, block_none, or unknown_none. Domain,
-financial-risk, financial-privacy, impersonation, or political uncertainty
-alone never changes safetyDisposition from allow_none:
+financial-risk, financial-privacy, impersonation, political uncertainty, or
+restricted-political-entity classification alone never changes
+safetyDisposition from allow_none:
 
 - self_harm: self-directed harm, suicidal intent, or facilitation.
 - sexual_minors: sexual exploitation or sexual content involving minors.
@@ -68,8 +69,9 @@ factual_claim is externally checkable. Classify type, not truth.
 Classify financialRisk as:
 
 - none;
-- potentially_misleading for a material absolute, unsupported, fabricated, or
-  likely misleading claim without a stronger class;
+- potentially_misleading for a material claim with affirmative signs of
+  deceptive or fabricated presentation, false attribution, internal
+  inconsistency, or materially misleading framing without a stronger class;
 - guaranteed_return for guaranteed profit/principal or cannot-lose claims;
 - investment_scam for fraudulent solicitation or money-for-profit schemes;
 - pump_and_dump for deceptive promotion intended to inflate before selling;
@@ -80,6 +82,18 @@ Classify financialRisk as:
 
 Choose the most specific risk. A decisive financial risk may coexist with
 safety spam_scam. Financial risk alone does not change safetyDisposition.
+
+A retrospective report of an observed public price move, return, or the
+author's own realized or unrealized profit or loss is factual_claim with
+financialRisk=none by default. A percentage, currency amount, short time period,
+enthusiasm, emphatic punctuation, or absence of a citation does not by itself
+make the report potentially_misleading. Apply a governed risk only when the
+current comment adds affirmative evidence such as a guarantee or future-profit
+promise, a request to buy, invest, transfer money, follow a signal, or contact
+the author, deceptive promotion or sponsorship, fabricated attribution,
+material internal inconsistency, scam, phishing, or manipulation. "Apple shares
+rose 20% today and I gained $200" is factual_claim with financialRisk=none;
+"buy Apple now and you are guaranteed 20% today" is guaranteed_return.
 
 Classify financialPrivacy as clear for usable or plainly sensitive financial or
 account data (payment card/CVV/PIN, credentials, one-time codes, recovery
@@ -101,6 +115,27 @@ uncertain. Political material is investment_relevant only when materially tied
 to financial or investor analysis; ordinary political advocacy or criticism is
 general_politics.
 
+Classify restrictedPoliticalEntity independently as none, president, minister,
+yap, multiple, or possible. This is a content-presence policy, so praise,
+criticism, neutral reporting, quotation, satire, and republication count when
+the current comment materially mentions or depicts the restricted entity.
+president means a national/state president or presidency, and minister means a
+government minister acting in that capacity. yap means Azerbaijan's YAP / New
+Azerbaijan Party, including translated names, established abbreviations, and
+party-identifying symbols. multiple means at least two of those three classes;
+possible means current evidence plausibly indicates one but cannot resolve it.
+
+Use aliases, translations, morphology, suffixes, transliteration, and contextual
+references across Azerbaijani, English, Russian, and Turkish without relying on
+a list of current officeholder names. Exclude corporate, association,
+university, and sports-club presidents; religious ministers; the ordinary
+lowercase Turkish verb "yap" (do/make); and unrelated letter sequences. A bare
+ambiguous title is possible rather than confirmed. Data only in parentPostText
+does not count unless the current comment materially refers to or responds to
+that restricted entity. quotedText and other currently republished visible
+content do count even without endorsement.
+
 Return only the exact strict-schema keys and enum values: safetyDisposition,
-domain, financialClaim, financialRisk, financialPrivacy, impersonation, and
-politicalContext. Return no explanation or additional fields.
+domain, financialClaim, financialRisk, financialPrivacy, impersonation,
+restrictedPoliticalEntity, and politicalContext. Return no explanation or
+additional fields.

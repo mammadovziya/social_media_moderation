@@ -34,6 +34,7 @@ public class PdqHashRepository {
                             sha256,
                             byte_length,
                             detected_format,
+                            processing_path,
                             pdq_hash,
                             pdq_quality,
                             masked_pdq_hash,
@@ -46,12 +47,16 @@ public class PdqHashRepository {
                             ocr_truncated,
                             ocr_engine,
                             candidate_count,
-                            pdq_implementation_commit
+                            pdq_implementation_commit,
+                            authoritative_reference_id,
+                            authoritative_policy_version,
+                            reference_asset_revision
                         ) VALUES (
                             :contentId,
                             :sha256,
                             :byteLength,
                             :detectedFormat,
+                            :processingPath,
                             :pdqHash,
                             :pdqQuality,
                             :maskedPdqHash,
@@ -64,13 +69,17 @@ public class PdqHashRepository {
                             :ocrTruncated,
                             :ocrEngine,
                             :candidateCount,
-                            :pdqImplementationCommit
+                            :pdqImplementationCommit,
+                            :authoritativeReferenceId,
+                            :authoritativePolicyVersion,
+                            :referenceAssetRevision
                         )
                         """)
                 .param("contentId", evidence.contentId())
                 .param("sha256", evidence.sha256())
                 .param("byteLength", evidence.byteLength())
                 .param("detectedFormat", evidence.detectedFormat())
+                .param("processingPath", evidence.processingPath())
                 .param("pdqHash", evidence.pdqHash())
                 .param("pdqQuality", evidence.pdqQuality())
                 .param("maskedPdqHash", evidence.maskedPdqHash())
@@ -84,6 +93,9 @@ public class PdqHashRepository {
                 .param("ocrEngine", evidence.ocrEngine())
                 .param("candidateCount", evidence.candidateCount())
                 .param("pdqImplementationCommit", evidence.pdqImplementationCommit())
+                .param("authoritativeReferenceId", evidence.authoritativeReferenceId())
+                .param("authoritativePolicyVersion", evidence.authoritativePolicyVersion())
+                .param("referenceAssetRevision", evidence.referenceAssetRevision())
                 .update();
     }
 

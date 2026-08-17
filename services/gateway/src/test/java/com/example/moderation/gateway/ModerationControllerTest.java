@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -28,6 +29,7 @@ import com.example.moderation.gateway.api.Investment;
 import com.example.moderation.gateway.api.ModerationResponse;
 import com.example.moderation.gateway.api.PoliticalContext;
 import com.example.moderation.gateway.api.Politics;
+import com.example.moderation.gateway.api.RestrictedPoliticalEntity;
 import com.example.moderation.gateway.api.Safety;
 import com.example.moderation.gateway.api.Violation;
 import java.nio.charset.StandardCharsets;
@@ -78,6 +80,8 @@ class ModerationControllerTest {
         assertThat(result.financialPrivacy()).isEqualTo(FinancialPrivacy.NONE);
         assertThat(result.impersonation()).isEqualTo(Impersonation.NONE);
         assertThat(result.politicalContext()).isEqualTo(PoliticalContext.NONE);
+        assertThat(result.restrictedPoliticalEntity())
+                .isEqualTo(RestrictedPoliticalEntity.NONE);
         assertThat(result.imageMatch()).isNull();
         assertThat(result.ocrText()).isNull();
         assertThat(result.aiUsage().meteredCalls()).isOne();
@@ -98,21 +102,20 @@ class ModerationControllerTest {
     @Test
     void aSavedBlockedTermAppliesOnTheNextRequestWithoutCallingAi() throws Exception {
         Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
-        Files.writeString(blocklist, "# initially empty\n", StandardCharsets.UTF_8);
+        Files.writeString(blocklist, "old blocked phrase\n", StandardCharsets.UTF_8);
         AnalyzerClients clients = mock(AnalyzerClients.class);
         String text = "fresh blocked phrase";
-        when(clients.analyzeText("post-before", ContentType.POST, text))
-                .thenReturn(successfulAi("related", "not_related"));
         ModerationController controller = controller(clients, blocklist);
 
         ModerationResponse before = controller.moderate(
                 "post-before",
                 "post",
-                text,
+                "old blocked phrase",
                 null,
                 null,
                 new MockHttpServletResponse());
-        Files.writeString(blocklist, "blocked phrase\n", StandardCharsets.UTF_8);
+        Files.writeString(
+                blocklist, "VULGAR|blocked phrase\n", StandardCharsets.UTF_8);
         ModerationResponse after = controller.moderate(
                 "post-after",
                 "post",
@@ -121,17 +124,97 @@ class ModerationControllerTest {
                 null,
                 new MockHttpServletResponse());
 
-        assertThat(before.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(before.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(before.violation()).isEqualTo(Violation.OTHER);
         assertThat(after.decision()).isEqualTo(Decision.BLOCK);
-        assertThat(after.violation()).isEqualTo(Violation.OTHER);
+        assertThat(after.violation()).isEqualTo(Violation.VULGAR);
+        assertThat(after.reason()).isEqualTo(FinalReason.SAFETY);
+        assertThat(after.safetyAction()).isEqualTo(Decision.BLOCK);
+        assertThat(after.safety()).isEqualTo(Safety.VULGAR);
         assertThat(after.aiUsage().meteredCalls()).isZero();
-        verify(clients).analyzeText("post-before", ContentType.POST, text);
+        verifyNoInteractions(clients);
+    }
+
+    @Test
+    void aPoliticalPhraseBlocksAsPoliticalContentWithoutCallingAi() throws Exception {
+        Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
+        Files.writeString(
+                blocklist,
+                "POLITICAL_CONTENT|Yeni Azərbaycan Partiyası\n",
+                StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+
+        ModerationResponse result = controller(clients, blocklist).moderate(
+                "post-political-term",
+                "post",
+                "Yeni Azərbaycan Partiyası barədə xəbər.",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.POLITICAL_CONTENT);
+        assertThat(result.reason()).isEqualTo(FinalReason.POLITICAL_CONTENT);
+        assertThat(result.aiUsage().meteredCalls()).isZero();
+        verifyNoInteractions(clients);
+    }
+
+    @Test
+    void aSemanticPresidentMentionReturnsTheGovernedPoliticalAxis() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.analyzeText(
+                        "post-semantic-political",
+                        ContentType.POST,
+                        "Dövlət başçısının çıxışı yayımlandı."))
+                .thenReturn(successfulAiWithRestrictedPoliticalEntity("president"));
+
+        ModerationResponse result = controller(clients).moderate(
+                "post-semantic-political",
+                "post",
+                "Dövlət başçısının çıxışı yayımlandı.",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.POLITICAL_CONTENT);
+        assertThat(result.reason()).isEqualTo(FinalReason.POLITICAL_CONTENT);
+        assertThat(result.restrictedPoliticalEntity())
+                .isEqualTo(RestrictedPoliticalEntity.PRESIDENT);
+    }
+
+    @Test
+    void aPoliticalPhraseInACommentBlocksWithoutCallingAi() throws Exception {
+        Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
+        Files.writeString(
+                blocklist,
+                "POLITICAL_CONTENT|Azərbaycan Respublikasının Prezidenti\n",
+                StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+
+        ModerationResponse result = controller(clients, blocklist).moderate(
+                "comment-political-term",
+                "comment",
+                "Azərbaycan Respublikasının Prezidenti barədə xəbər.",
+                "ETF müzakirəsi",
+                "ordinary_user",
+                "",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.POLITICAL_CONTENT);
+        assertThat(result.reason()).isEqualTo(FinalReason.POLITICAL_CONTENT);
+        assertThat(result.aiUsage().meteredCalls()).isZero();
+        verifyNoInteractions(clients);
     }
 
     @Test
     void aBlockedQuotedTextTerminalBlocksWithoutCallingAi() throws Exception {
         Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
-        Files.writeString(blocklist, "blocked quotation\n", StandardCharsets.UTF_8);
+        Files.writeString(
+                blocklist, "VULGAR|blocked quotation\n", StandardCharsets.UTF_8);
         AnalyzerClients clients = mock(AnalyzerClients.class);
 
         ModerationResponse result = controller(clients, blocklist).moderate(
@@ -146,9 +229,74 @@ class ModerationControllerTest {
                 new MockHttpServletResponse());
 
         assertThat(result.decision()).isEqualTo(Decision.BLOCK);
-        assertThat(result.violation()).isEqualTo(Violation.OTHER);
+        assertThat(result.violation()).isEqualTo(Violation.VULGAR);
         assertThat(result.aiUsage().meteredCalls()).isZero();
         verifyNoInteractions(clients);
+    }
+
+    @Test
+    void aTypedBlockedUsernameReturnsItsCategoryWithoutCallingAi() throws Exception {
+        Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
+        Files.writeString(
+                blocklist, "VULGAR|vulgar handle\n", StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        String expectedBlockedTermsDigest =
+                new ReloadingBlockedTerms(blocklist).snapshot().semanticSha256();
+
+        ModerationResponse result = controller(clients, blocklist).moderate(
+                "username-vulgar-term",
+                "username",
+                "vulgar_handle",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.VULGAR);
+        assertThat(result.reason()).isEqualTo(FinalReason.SAFETY);
+        assertThat(result.safetyAction()).isEqualTo(Decision.BLOCK);
+        assertThat(result.safety()).isEqualTo(Safety.VULGAR);
+        assertThat(result.aiUsage().meteredCalls()).isZero();
+        ArgumentCaptor<UsernameDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(UsernameDecisionAuditPayload.class);
+        verify(clients).persistUsernameDecisionAudit(audit.capture());
+        assertThat(audit.getValue().blockedTermsDigest())
+                .isEqualTo(expectedBlockedTermsDigest);
+        assertThat(audit.getValue().provenanceSchemaVersion())
+                .isEqualTo("username-decision-provenance-v4");
+        assertThat(audit.getValue().restrictedPoliticalRegistryDigest())
+                .matches("[0-9a-f]{64}")
+                .isNotEqualTo(audit.getValue().blockedTermsDigest());
+        verify(clients, never()).evaluateHandle(any(), any(), any(), any());
+        verify(clients, never()).analyzeText(any(), any(), any());
+        verify(clients, never()).recordHandleVerdict(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aTypedPoliticalUsernameReturnsItsCategoryWithoutCallingAi() throws Exception {
+        Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
+        Files.writeString(
+                blocklist,
+                "POLITICAL_CONTENT|yeni azerbaycan partiyasi\n",
+                StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+
+        ModerationResponse result = controller(clients, blocklist).moderate(
+                "username-political-term",
+                "username",
+                "yeni_azerbaycan_partiyasi",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.POLITICAL_CONTENT);
+        assertThat(result.reason()).isEqualTo(FinalReason.POLITICAL_CONTENT);
+        assertThat(result.aiUsage().meteredCalls()).isZero();
+        verify(clients).persistUsernameDecisionAudit(any());
+        verify(clients, never()).evaluateHandle(any(), any(), any(), any());
+        verify(clients, never()).analyzeText(any(), any(), any());
+        verify(clients, never()).recordHandleVerdict(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -201,7 +349,11 @@ class ModerationControllerTest {
     void acceptedNonTruncatedBlockedOcrBlocksAndPersistsAuditWithoutImageAi()
             throws Exception {
         Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
-        Files.writeString(blocklist, "restricted banner\n", StandardCharsets.UTF_8);
+        Files.writeString(
+                blocklist,
+                "POLITICAL_CONTENT|investment update\n"
+                        + "VULGAR|restricted banner\n",
+                StandardCharsets.UTF_8);
         AnalyzerClients clients = mock(AnalyzerClients.class);
         MockMultipartFile image = new MockMultipartFile(
                 "image", "ocr.png", "image/png", new byte[] {1, 2, 3});
@@ -228,12 +380,15 @@ class ModerationControllerTest {
                 new MockHttpServletResponse());
 
         assertThat(result.decision()).isEqualTo(Decision.BLOCK);
-        assertThat(result.violation()).isEqualTo(Violation.OTHER);
+        assertThat(result.violation()).isEqualTo(Violation.VULGAR);
+        assertThat(result.aiUsage().meteredCalls()).isZero();
         ArgumentCaptor<ImageDecisionAuditPayload> audit =
                 ArgumentCaptor.forClass(ImageDecisionAuditPayload.class);
         verify(clients).persistImageDecisionAudit(audit.capture());
         assertThat(audit.getValue().finalDecision()).isEqualTo("BLOCK");
-        assertThat(audit.getValue().violation()).isEqualTo("OTHER");
+        assertThat(audit.getValue().violation()).isEqualTo("VULGAR");
+        assertThat(audit.getValue().localPolicyTerminal()).isTrue();
+        assertThat(audit.getValue().localPolicyViolation()).isEqualTo("VULGAR");
         verify(clients, never()).analyzeImageAi(
                 any(),
                 any(),
@@ -259,7 +414,8 @@ class ModerationControllerTest {
             boolean confidenceAccepted, boolean truncated, String contentId)
             throws Exception {
         Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
-        Files.writeString(blocklist, "restricted banner\n", StandardCharsets.UTF_8);
+        Files.writeString(
+                blocklist, "VULGAR|restricted banner\n", StandardCharsets.UTF_8);
         AnalyzerClients clients = mock(AnalyzerClients.class);
         MockMultipartFile image = new MockMultipartFile(
                 "image", "ocr.png", "image/png", new byte[] {1, 2, 3});
@@ -313,6 +469,197 @@ class ModerationControllerTest {
                 eq(media),
                 eq(false),
                 eq(true));
+    }
+
+    @Test
+    void lowConfidenceProfanitySpanCannotRideOnAcceptedDocumentConfidence()
+            throws Exception {
+        Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
+        Files.writeString(
+                blocklist, "VULGAR|restricted banner\n", StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        MockMultipartFile image = new MockMultipartFile(
+                "image", "ocr.png", "image/png", new byte[] {1, 2, 3});
+        String ocrText = "Market report restricted banner";
+        Map<String, Object> media = completeMedia(
+                Map.of("qualityAccepted", true),
+                Map.of(
+                        "status", "ok",
+                        "text", ocrText,
+                        "confidenceAccepted", true,
+                        "truncated", false,
+                        "minConfidenceThreshold", 45.0,
+                        "spans", java.util.List.of(
+                                Map.of("text", "Market report", "confidence", 98.0),
+                                Map.of("text", "restricted banner", "confidence", 12.0))));
+        when(clients.analyzeMedia(
+                        any(byte[].class),
+                        eq("ocr.png"),
+                        eq("image/png"),
+                        eq("post-ocr-span-confidence")))
+                .thenReturn(media);
+        when(clients.analyzeImageAi(
+                        any(byte[].class),
+                        eq("ocr.png"),
+                        eq("image/png"),
+                        eq("post-ocr-span-confidence"),
+                        eq(ContentType.POST),
+                        eq("Investment update"),
+                        eq(ocrText),
+                        eq("ok"),
+                        eq(true),
+                        eq(false),
+                        eq(media),
+                        eq(false),
+                        eq(true)))
+                .thenReturn(successfulAi("related", "not_related"));
+
+        ModerationResponse result = controller(clients, blocklist).moderate(
+                "post-ocr-span-confidence",
+                "post",
+                "Investment update",
+                image,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.violation()).isEqualTo(Violation.NONE);
+        verify(clients).analyzeImageAi(
+                any(byte[].class),
+                eq("ocr.png"),
+                eq("image/png"),
+                eq("post-ocr-span-confidence"),
+                eq(ContentType.POST),
+                eq("Investment update"),
+                eq(ocrText),
+                eq("ok"),
+                eq(true),
+                eq(false),
+                eq(media),
+                eq(false),
+                eq(true));
+    }
+
+    @Test
+    void rejectedOcrSpanIsAHardBoundaryForBlocklistPhrases() throws Exception {
+        Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
+        Files.writeString(
+                blocklist, "VULGAR|restricted banner\n", StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        MockMultipartFile image = new MockMultipartFile(
+                "image", "ocr.png", "image/png", new byte[] {1, 2, 3});
+        String ocrText = "restricted market banner";
+        Map<String, Object> media = completeMedia(
+                Map.of("qualityAccepted", true),
+                Map.of(
+                        "status", "ok",
+                        "text", ocrText,
+                        "confidenceAccepted", true,
+                        "truncated", false,
+                        "minConfidenceThreshold", 45.0,
+                        "spans", java.util.List.of(
+                                Map.of("text", "restricted", "confidence", 98.0),
+                                Map.of("text", "market", "confidence", 12.0),
+                                Map.of("text", "banner", "confidence", 98.0))));
+        when(clients.analyzeMedia(
+                        any(byte[].class),
+                        eq("ocr.png"),
+                        eq("image/png"),
+                        eq("post-ocr-span-boundary")))
+                .thenReturn(media);
+        when(clients.analyzeImageAi(
+                        any(byte[].class),
+                        eq("ocr.png"),
+                        eq("image/png"),
+                        eq("post-ocr-span-boundary"),
+                        eq(ContentType.POST),
+                        eq("Investment update"),
+                        eq(ocrText),
+                        eq("ok"),
+                        eq(true),
+                        eq(false),
+                        eq(media),
+                        eq(false),
+                        eq(true)))
+                .thenReturn(successfulAi("related", "not_related"));
+
+        ModerationResponse result = controller(clients, blocklist).moderate(
+                "post-ocr-span-boundary",
+                "post",
+                "Investment update",
+                image,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.violation()).isEqualTo(Violation.NONE);
+        verify(clients).analyzeImageAi(
+                any(byte[].class),
+                eq("ocr.png"),
+                eq("image/png"),
+                eq("post-ocr-span-boundary"),
+                eq(ContentType.POST),
+                eq("Investment update"),
+                eq(ocrText),
+                eq("ok"),
+                eq(true),
+                eq(false),
+                eq(media),
+                eq(false),
+                eq(true));
+    }
+
+    @Test
+    void adjacentAcceptedOcrSpansCanFormABlocklistPhrase() throws Exception {
+        Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
+        Files.writeString(
+                blocklist, "VULGAR|restricted banner\n", StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        MockMultipartFile image = new MockMultipartFile(
+                "image", "ocr.png", "image/png", new byte[] {1, 2, 3});
+        Map<String, Object> media = completeMedia(
+                Map.of("qualityAccepted", true),
+                Map.of(
+                        "status", "ok",
+                        "text", "restricted banner",
+                        "confidenceAccepted", true,
+                        "truncated", false,
+                        "minConfidenceThreshold", 45.0,
+                        "spans", java.util.List.of(
+                                Map.of("text", "restricted", "confidence", 98.0),
+                                Map.of("text", "banner", "confidence", 98.0))));
+        when(clients.analyzeMedia(
+                        any(byte[].class),
+                        eq("ocr.png"),
+                        eq("image/png"),
+                        eq("post-ocr-adjacent-spans")))
+                .thenReturn(media);
+
+        ModerationResponse result = controller(clients, blocklist).moderate(
+                "post-ocr-adjacent-spans",
+                "post",
+                "Investment update",
+                image,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.VULGAR);
+        assertThat(result.aiUsage().meteredCalls()).isZero();
+        verify(clients, never()).analyzeImageAi(
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                anyBoolean(),
+                anyBoolean(),
+                any(),
+                anyBoolean(),
+                anyBoolean());
     }
 
     @Test
@@ -872,19 +1219,19 @@ class ModerationControllerTest {
                         "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                         "gpt-5.6-terra",
                         "medium",
-                        "20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8",
+                        "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505",
                         "java-imageio-first-frame-jpeg-png-static-gif-v1@java-21.0.11+10-LTS",
                         "b".repeat(64),
                         "orb-homography-specificity-v1",
-                        "image-decision-config-v2",
-                        "image-decision-provenance-v3",
+                        "image-decision-config-v3",
+                        "image-decision-provenance-v4",
                         "matched");
         assertThat(audit.getValue().policyWordListsDigest()).matches("[0-9a-f]{64}");
         String configurationSnapshot = audit.getValue().decisionConfigurationSnapshot();
         assertThat(configurationSnapshot)
                 .startsWith(
-                        "schema=image-decision-config-v2\n"
-                                + "implementation.identity=gateway-image-policy-runtime-v2\n")
+                        "schema=image-decision-config-v3\n"
+                                + "implementation.identity=gateway-image-policy-runtime-v3\n")
                 .contains(
                         "policy.version=" + DecisionPolicy.POLICY_VERSION,
                         "policy.reducerVersion=" + DecisionPolicy.REDUCER_VERSION,
@@ -1191,16 +1538,7 @@ class ModerationControllerTest {
                         eq("prohibited.png"),
                         eq("image/png"),
                         eq("post-exact")))
-                .thenReturn(completeMedia(
-                        Map.of(
-                                "qualityAccepted", true,
-                                "candidateFound", true,
-                                "authoritativeExactMatch", exactReference,
-                                "candidates", java.util.List.of(exactReference)),
-                        Map.of(
-                                "status", "no_text",
-                                "confidenceAccepted", false,
-                                "truncated", false)));
+                .thenReturn(authoritativeFastPathMedia(exactReference));
 
         ModerationResponse result = controller(clients).moderate(
                 "post-exact",
@@ -1232,6 +1570,11 @@ class ModerationControllerTest {
         verify(clients).persistImageDecisionAudit(audit.capture());
         assertThat(audit.getValue().adjudicationStatus()).isEqualTo("not_required");
         assertThat(audit.getValue().adjudicationModel()).isEqualTo("not_invoked");
+        assertThat(audit.getValue().ocrStatus()).isEqualTo("disabled");
+        assertThat(audit.getValue().ocrEngineVersion()).isEqualTo("not_invoked");
+        assertThat(audit.getValue().visualReferenceRevision()).isEqualTo("not_invoked");
+        assertThat(audit.getValue().decisionConfigurationDigest())
+                .matches("[0-9a-f]{64}");
     }
 
     @Test
@@ -1441,6 +1784,11 @@ class ModerationControllerTest {
         assertThat(result.investment()).isNull();
         assertThat(result.politics()).isNull();
         assertThat(result.imageMatch()).isNull();
+        ArgumentCaptor<UsernameDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(UsernameDecisionAuditPayload.class);
+        verify(clients).persistUsernameDecisionAudit(audit.capture());
+        assertThat(audit.getValue().restrictedPoliticalEntity()).isEqualTo("NONE");
+        assertThat(audit.getValue().localRestrictedPoliticalEntity()).isNull();
     }
 
     @Test
@@ -1549,11 +1897,10 @@ class ModerationControllerTest {
     }
 
     @Test
-    void aCachedVerdictDecidesWithoutCallingTheModelOrReportingSpend() throws Exception {
+    void aCachedUsernameVerdictStillDecidesWithoutCallingTheModel() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         when(clients.evaluateHandle(eq("cached_name"), any(), any(), any()))
                 .thenReturn(handleEvidenceWith("cachedVerdict", successfulUsernameAi()));
-
         ModerationResponse result = controller(clients)
                 .moderate(
                         "user-cached",
@@ -1564,13 +1911,43 @@ class ModerationControllerTest {
                         new MockHttpServletResponse());
 
         assertThat(result.decision()).isEqualTo(Decision.ALLOW);
-        assertThat(result.aiUsage().meteredCalls()).isZero();
+        assertThat(result.aiUsage()).isEqualTo(com.example.moderation.gateway.api.AiUsage.noCalls());
         verify(clients, never()).analyzeText(any(), any(), any());
         verify(clients, never()).recordHandleVerdict(any(), any(), any(), any(), any());
     }
 
     @Test
-    void aFreshVerdictIsCachedForTheNextRequest() throws Exception {
+    void aCachedUsernameScoreVerdictIsReducedByTheCurrentPolicy() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        Map<String, Object> cached = new java.util.LinkedHashMap<>(successfulUsernameAi());
+        cached.put(
+                "moderation",
+                Map.of(
+                        "status", "ok",
+                        "model", "omni-moderation-2024-09-26",
+                        "flagged", false,
+                        "categories", Map.of("sexual", false),
+                        "categoryScores", Map.of("sexual", 0.5658521194151336)));
+        when(clients.evaluateHandle(eq("licking_shiki"), any(), any(), any()))
+                .thenReturn(handleEvidenceWith("cachedVerdict", Map.copyOf(cached)));
+        ModerationResponse result = controller(clients)
+                .moderate(
+                        "user-cached-score",
+                        "username",
+                        "licking_shiki",
+                        null,
+                        null,
+                        new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.SEXUAL);
+        assertThat(result.aiUsage()).isEqualTo(com.example.moderation.gateway.api.AiUsage.noCalls());
+        verify(clients, never()).analyzeText(any(), any(), any());
+        verify(clients, never()).recordHandleVerdict(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aFreshUsernameVerdictIsStillWrittenToItsExistingCache() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         when(clients.evaluateHandle(eq("fresh_name"), any(), any(), any()))
                 .thenReturn(cleanHandleEvidence());
@@ -1587,6 +1964,198 @@ class ModerationControllerTest {
                         new MockHttpServletResponse());
 
         verify(clients).recordHandleVerdict(eq("fresh_name"), any(), any(), any(), any());
+    }
+
+    @Test
+    void identicalTextRetryReusesConfigurationBoundEvidenceWithZeroFreshSpend()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.analyzeText("post-original", ContentType.POST, "ETF update"))
+                .thenReturn(successfulAi("related", "not_related"));
+        ModerationController controller = controller(
+                clients, properties(), new InMemoryAiWorkCoordinator());
+
+        ModerationResponse first = controller.moderate(
+                "post-original",
+                "POST",
+                "ETF update",
+                null,
+                null,
+                new MockHttpServletResponse());
+        ModerationResponse retry = controller.moderate(
+                "post-copy",
+                "POST",
+                "ETF update",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(first.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(first.aiUsage().meteredCalls()).isOne();
+        assertThat(retry.decision()).isEqualTo(first.decision());
+        assertThat(retry.violation()).isEqualTo(first.violation());
+        assertThat(retry.aiUsage()).isEqualTo(com.example.moderation.gateway.api.AiUsage.noCalls());
+        verify(clients, times(1))
+                .analyzeText("post-original", ContentType.POST, "ETF update");
+        verify(clients, never())
+                .analyzeText("post-copy", ContentType.POST, "ETF update");
+    }
+
+    @Test
+    void identicalCommentTextWithDifferentParentContextDoesNotReuseEvidence()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.analyzeText(
+                        any(),
+                        eq(ContentType.COMMENT),
+                        eq("Absolutely."),
+                        any(),
+                        eq("valueinvestor"),
+                        eq("")))
+                .thenReturn(successfulAi("related", "not_related"));
+        ModerationController controller = controller(
+                clients, properties(), new InMemoryAiWorkCoordinator());
+
+        ModerationResponse first = controller.moderate(
+                "comment-one",
+                "COMMENT",
+                "Absolutely.",
+                "Would you buy this ETF?",
+                "valueinvestor",
+                "",
+                null,
+                null,
+                new MockHttpServletResponse());
+        ModerationResponse second = controller.moderate(
+                "comment-two",
+                "COMMENT",
+                "Absolutely.",
+                "Is this recipe spicy?",
+                "valueinvestor",
+                "",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(first.aiUsage().meteredCalls()).isOne();
+        assertThat(second.aiUsage().meteredCalls()).isOne();
+        verify(clients, times(2)).analyzeText(
+                any(),
+                eq(ContentType.COMMENT),
+                eq("Absolutely."),
+                any(),
+                eq("valueinvestor"),
+                eq(""));
+    }
+
+    @Test
+    void changedLocalDecisionThresholdReusesRawAiEvidenceAndRerunsPolicy()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.analyzeText("post-config-bound", ContentType.POST, "ETF update"))
+                .thenReturn(successfulAi("related", "not_related"));
+        InMemoryAiWorkCoordinator shared = new InMemoryAiWorkCoordinator();
+        ModerationController firstPolicy = controller(clients, properties(), shared);
+        ModerationController changedThreshold = controller(
+                clients,
+                properties("src/test/resources/blocked_terms.txt", 0.20),
+                shared);
+
+        ModerationResponse first = firstPolicy.moderate(
+                "post-config-bound", "POST", "ETF update", null, null,
+                new MockHttpServletResponse());
+        ModerationResponse changed = changedThreshold.moderate(
+                "post-config-bound", "POST", "ETF update", null, null,
+                new MockHttpServletResponse());
+
+        assertThat(first.aiUsage().meteredCalls()).isOne();
+        assertThat(changed.aiUsage()).isEqualTo(com.example.moderation.gateway.api.AiUsage.noCalls());
+        verify(clients, times(1))
+                .analyzeText("post-config-bound", ContentType.POST, "ETF update");
+    }
+
+    @Test
+    void invalidCachedEvidenceFallsBackToLiveAnalysisBeforePolicyReduction() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.analyzeText("post-stale-cache", ContentType.POST, "ETF update"))
+                .thenReturn(successfulAi("related", "not_related"));
+        Map<String, Object> stale = new java.util.LinkedHashMap<>(
+                ConfigurationBoundAiWorkCoordinator.withoutUsage(
+                        successfulAi("related", "not_related")));
+        Map<String, Object> staleConfiguration = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(stale, "configuration"));
+        staleConfiguration.put("customModel", "stale-model");
+        stale.put("configuration", Map.copyOf(staleConfiguration));
+        stale.put(AiWorkCoordinator.CACHE_HIT_KEY, true);
+        AiWorkCoordinator poisoned = (identity, live) -> Map.copyOf(stale);
+
+        ModerationResponse response = controller(clients, properties(), poisoned).moderate(
+                "post-stale-cache", "POST", "ETF update", null, null,
+                new MockHttpServletResponse());
+
+        assertThat(response.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(response.violation()).isEqualTo(Violation.NONE);
+        assertThat(response.aiUsage().meteredCalls()).isOne();
+        verify(clients).analyzeText(
+                "post-stale-cache", ContentType.POST, "ETF update");
+    }
+
+    @Test
+    void identicalImageRetryReusesAiButStillRevalidatesMediaAndAudits()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        Map<String, Object> media = completeMedia(
+                Map.of("qualityAccepted", true),
+                Map.of("status", "no_text"));
+        when(clients.analyzeMedia(any(), eq("chart.png"), any(), eq("image-original")))
+                .thenReturn(media);
+        when(clients.analyzeImageAi(
+                        any(),
+                        any(),
+                        any(),
+                        eq("image-original"),
+                        eq(ContentType.POST),
+                        eq("ETF chart"),
+                        eq(""),
+                        eq("no_text"),
+                        eq(false),
+                        eq(false),
+                        eq(media),
+                        eq(false),
+                        eq(true)))
+                .thenReturn(successfulAi("related", "not_related"));
+        ModerationController controller = controller(
+                clients, properties(), new InMemoryAiWorkCoordinator());
+        MockMultipartFile originalImage = new MockMultipartFile(
+                "image", "chart.png", "image/png", new byte[] {7, 8, 9});
+        when(clients.analyzeMedia(any(), eq("renamed.png"), any(), eq("image-copy")))
+                .thenReturn(media);
+        MockMultipartFile retryImage = new MockMultipartFile(
+                "image", "renamed.png", "image/png", new byte[] {7, 8, 9});
+
+        ModerationResponse first = controller.moderate(
+                "image-original",
+                "POST",
+                "ETF chart",
+                originalImage,
+                null,
+                new MockHttpServletResponse());
+        ModerationResponse retry = controller.moderate(
+                "image-copy",
+                "POST",
+                "ETF chart",
+                retryImage,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(first.aiUsage().meteredCalls()).isOne();
+        assertThat(retry.aiUsage()).isEqualTo(com.example.moderation.gateway.api.AiUsage.noCalls());
+        verify(clients).analyzeMedia(any(), eq("chart.png"), any(), eq("image-original"));
+        verify(clients).analyzeMedia(any(), eq("renamed.png"), any(), eq("image-copy"));
+        verify(clients, times(1)).analyzeImageAi(
+                any(), any(), any(), any(), any(), any(), any(), any(),
+                anyBoolean(), anyBoolean(), any(), anyBoolean(), anyBoolean());
+        verify(clients, times(2)).persistImageDecisionAudit(any());
     }
 
     @Test
@@ -1802,25 +2371,31 @@ class ModerationControllerTest {
     }
 
     private static ModerationProperties properties(String blockedTermsFile) {
+        return properties(blockedTermsFile, 0.15);
+    }
+
+    private static ModerationProperties properties(
+            String blockedTermsFile, double scoreBlockThreshold) {
         return new ModerationProperties(
                 "http://ai",
                 "http://media",
                 8_388_608,
                 9_437_184,
                 30,
-                0.70,
+                scoreBlockThreshold,
                 "omni-moderation-2024-09-26",
                 "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                 "gpt-5.6-terra",
-                "644044f7960b05e48529003e03f6b69f3dd932a31d6e39d7b4e01d57f5aa9f7e",
-                "de5d6be741ee1f30bfff85de54c71133ad541593083e7d857ff04c028dee0289",
+                "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba",
+                "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216",
                 "gpt-5.6-terra",
                 "medium",
-                "image-adjudication-v4",
-                "20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8",
-                "07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef",
+                "image-adjudication-v5",
+                "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505",
+                "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa",
                 30,
                 blockedTermsFile,
+                "src/test/resources/restricted_political_entities.txt",
                 "");
     }
 
@@ -1830,7 +2405,22 @@ class ModerationControllerTest {
                 clients,
                 properties,
                 new FinancialPrivacyScanner(),
-                new ReloadingBlockedTerms(properties));
+                new ReloadingBlockedTerms(properties),
+                new ReloadingRestrictedPoliticalEntities(properties),
+                AiWorkCoordinator.direct());
+    }
+
+    private static ModerationController controller(
+            AnalyzerClients clients,
+            ModerationProperties properties,
+            AiWorkCoordinator coordinator) {
+        return new ModerationController(
+                clients,
+                properties,
+                new FinancialPrivacyScanner(),
+                new ReloadingBlockedTerms(properties),
+                new ReloadingRestrictedPoliticalEntities(properties),
+                coordinator);
     }
 
     private static ModerationController controller(AnalyzerClients clients, Path blocklist) {
@@ -1839,7 +2429,9 @@ class ModerationControllerTest {
                 clients,
                 properties,
                 new FinancialPrivacyScanner(),
-                new ReloadingBlockedTerms(properties));
+                new ReloadingBlockedTerms(properties),
+                new ReloadingRestrictedPoliticalEntities(properties),
+                AiWorkCoordinator.direct());
     }
 
     /** Deterministic handle evidence with no registry match, no collision, and no cached verdict. */
@@ -1883,6 +2475,7 @@ class ModerationControllerTest {
                         Map.entry("financialPrivacy", "none"),
                         Map.entry("impersonation", "none"),
                         Map.entry("politicalContext", politicalContext(politics)),
+                        Map.entry("restrictedPoliticalEntity", "none"),
                         Map.entry("usage", modelUsage())),
                 "configuration",
                 aiConfiguration());
@@ -1905,9 +2498,21 @@ class ModerationControllerTest {
                         Map.entry("financialRisk", "none"),
                         Map.entry("financialPrivacy", "none"),
                         Map.entry("impersonation", "none"),
+                        Map.entry("restrictedPoliticalEntity", "none"),
                         Map.entry("usage", modelUsage())),
                 "configuration",
                 aiConfiguration());
+    }
+
+    private static Map<String, Object> successfulAiWithRestrictedPoliticalEntity(
+            String restrictedPoliticalEntity) {
+        Map<String, Object> result = new java.util.LinkedHashMap<>(
+                successfulAi("related", "general_politics"));
+        Map<String, Object> classification = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(result, "classification"));
+        classification.put("restrictedPoliticalEntity", restrictedPoliticalEntity);
+        result.put("classification", Map.copyOf(classification));
+        return Map.copyOf(result);
     }
 
     private static Map<String, Object> successfulAiWithSignals(
@@ -1941,19 +2546,19 @@ class ModerationControllerTest {
                 Map.entry("customModel", "gpt-5.6-terra"),
                 Map.entry(
                         "classificationPromptBundleSha256",
-                        "644044f7960b05e48529003e03f6b69f3dd932a31d6e39d7b4e01d57f5aa9f7e"),
+                        "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba"),
                 Map.entry(
                         "classificationProfileSha256",
-                        "de5d6be741ee1f30bfff85de54c71133ad541593083e7d857ff04c028dee0289"),
+                        "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216"),
                 Map.entry("adjudicationModel", "gpt-5.6-terra"),
                 Map.entry("adjudicationReasoningEffort", "medium"),
-                Map.entry("adjudicationPromptVersion", "image-adjudication-v4"),
+                Map.entry("adjudicationPromptVersion", "image-adjudication-v5"),
                 Map.entry(
                         "adjudicationPromptSha256",
-                        "20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8"),
+                        "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505"),
                 Map.entry(
                         "adjudicationProfileSha256",
-                        "07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef"),
+                        "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa"),
                 Map.entry("openAiTimeoutSeconds", 30L),
                 Map.entry("maxImageBytes", 8_388_608L),
                 Map.entry("maxImageRequestBytes", 9_437_184L));
@@ -1965,7 +2570,7 @@ class ModerationControllerTest {
         result.put("adjudication", Map.ofEntries(
                 Map.entry("status", "ok"),
                 Map.entry("model", "gpt-5.6-terra"),
-                Map.entry("promptVersion", "image-adjudication-v4"),
+                Map.entry("promptVersion", "image-adjudication-v5"),
                 Map.entry("adjudicationMode", "candidate_recheck"),
                 Map.entry("action", "allow"),
                 Map.entry("safetyAction", "allow"),
@@ -1976,6 +2581,7 @@ class ModerationControllerTest {
                 Map.entry("financialPrivacy", "none"),
                 Map.entry("impersonation", "none"),
                 Map.entry("politicalContext", "none"),
+                Map.entry("restrictedPoliticalEntity", "none"),
                 Map.entry("finalReason", "none"),
                 Map.entry("candidateDisposition", "rejected"),
                 Map.entry("evidenceBasis", "current_text"),
@@ -1994,11 +2600,47 @@ class ModerationControllerTest {
                 pdq.get("candidates") instanceof java.util.List<?> candidates
                         && !candidates.isEmpty());
         pdq.putIfAbsent("algorithm", "pdq-256");
+        pdq.putIfAbsent("implementation", "meta-threat-exchange-java");
+        pdq.putIfAbsent(
+                "implementationCommit", "baefb4ed67b6cdc1d4c82dbaef858d50866ac424");
+        pdq.putIfAbsent("distanceThreshold", 31);
+        pdq.putIfAbsent("qualityThreshold", 49);
+        pdq.putIfAbsent("candidateLimit", 5);
+        pdq.putIfAbsent("visualReferenceRevision", 1L);
+        pdq.putIfAbsent("visualReferenceSnapshotDigest", "a".repeat(64));
+        pdq.putIfAbsent("visualAlgorithmVersion", "opencv-orb-4.12-v1");
+        pdq.putIfAbsent("visualDescriptorVersion", "opencv-orb-4.12-v1");
+        pdq.putIfAbsent(
+                "candidateSelectionVersion", "orb-homography-specificity-v1");
+        pdq.putIfAbsent("visualCandidateLimit", 5);
+        pdq.putIfAbsent("visualConnectTimeoutMillis", 500);
+        pdq.putIfAbsent("visualReadTimeoutMillis", 30_000);
+        pdq.putIfAbsent("visualMaxReferences", 256);
+        pdq.putIfAbsent("visualMaxSnapshotBytes", 67_108_864);
 
         Map<String, Object> ocr = new java.util.LinkedHashMap<>(ocrValues);
         ocr.putIfAbsent("confidenceAccepted", false);
         ocr.putIfAbsent("truncated", false);
         ocr.putIfAbsent("engine", "tesseract-test-v1");
+        ocr.putIfAbsent("profileVersion", "ocr-policy-v1");
+        ocr.putIfAbsent("enabled", true);
+        ocr.putIfAbsent("languages", "aze+eng+rus+tur");
+        ocr.putIfAbsent("minConfidenceThreshold", 45.0);
+        ocr.putIfAbsent("maxTextChars", 20_000);
+        ocr.putIfAbsent("maxSpans", 256);
+        ocr.putIfAbsent("timeoutSeconds", 10);
+        ocr.putIfAbsent("maxConcurrent", 2);
+        ocr.putIfAbsent(
+                "spans",
+                ocr.get("text") instanceof String text && !text.isBlank()
+                        ? java.util.List.of(Map.of(
+                                "text",
+                                text,
+                                "confidence",
+                                Boolean.TRUE.equals(ocr.get("confidenceAccepted"))
+                                        ? 100.0
+                                        : 0.0))
+                        : java.util.List.of());
 
         return Map.of(
                 "status", "ok",
@@ -2009,7 +2651,46 @@ class ModerationControllerTest {
                                 "width", 640,
                                 "height", 360,
                                 "format", "png",
-                                "decoderProfileVersion", "test-decoder-v1"));
+                                "decoderProfileVersion", "test-decoder-v1",
+                                "maxImageBytes", 8_388_608,
+                                "maxImageRequestBytes", 9_437_184,
+                                "maxImagePixels", 16_777_216));
+    }
+
+    private static Map<String, Object> authoritativeFastPathMedia(
+            Map<String, Object> exactReference) {
+        Map<String, Object> base = completeMedia(
+                Map.ofEntries(
+                        Map.entry("processingPath", "AUTHORITATIVE_SHA256_EXACT"),
+                        Map.entry("executionStatus", "not_invoked"),
+                        Map.entry("qualityAccepted", false),
+                        Map.entry("candidateFound", true),
+                        Map.entry("authoritativeExactMatch", exactReference),
+                        Map.entry("candidates", java.util.List.of(exactReference)),
+                        Map.entry("visualReferenceRevision", "not_invoked"),
+                        Map.entry("visualReferenceSnapshotDigest", "not_invoked"),
+                        Map.entry("visualAlgorithmVersion", "not_invoked"),
+                        Map.entry("visualDescriptorVersion", "not_invoked"),
+                        Map.entry("candidateSelectionVersion", "not_invoked")),
+                Map.ofEntries(
+                        Map.entry("status", "disabled"),
+                        Map.entry("executionStatus", "not_invoked"),
+                        Map.entry("confidenceAccepted", false),
+                        Map.entry("truncated", false)));
+        Map<String, Object> image = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(base, "image"));
+        image.put("processingPath", "AUTHORITATIVE_SHA256_EXACT");
+        return Map.of(
+                "status", "ok",
+                "identity",
+                        Map.of(
+                                "sha256", "b".repeat(64),
+                                "algorithm", "sha-256",
+                                "exactMatchFound", true,
+                                "candidates", java.util.List.of(exactReference)),
+                "pdq", DecisionPolicy.nestedMap(base, "pdq"),
+                "ocr", DecisionPolicy.nestedMap(base, "ocr"),
+                "image", Map.copyOf(image));
     }
 
     private static Map<String, Object> modelUsage() {
@@ -2055,6 +2736,28 @@ class ModerationControllerTest {
                             .digest(value.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException exception) {
             throw new IllegalStateException("SHA-256 is not available", exception);
+        }
+    }
+
+    private static final class InMemoryAiWorkCoordinator implements AiWorkCoordinator {
+        private final Map<String, Map<String, Object>> results =
+                new java.util.concurrent.ConcurrentHashMap<>();
+
+        @Override
+        public Map<String, Object> execute(
+                AiWorkIdentity identity,
+                java.util.function.Supplier<Map<String, Object>> liveAnalysis) {
+            Map<String, Object> cached = results.get(identity.keySha256());
+            if (cached != null) {
+                Map<String, Object> replay = new java.util.LinkedHashMap<>(cached);
+                replay.put(CACHE_HIT_KEY, true);
+                return Map.copyOf(replay);
+            }
+            Map<String, Object> live = liveAnalysis.get();
+            results.put(
+                    identity.keySha256(),
+                    ConfigurationBoundAiWorkCoordinator.withoutUsage(live));
+            return live;
         }
     }
 }

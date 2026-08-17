@@ -11,7 +11,7 @@ public record ModerationProperties(
         long maxImageBytes,
         long maxImageRequestBytes,
         long upstreamTimeoutSeconds,
-        double unknownThreshold,
+        double moderationScoreBlockThreshold,
         String expectedModerationModel,
         String expectedModerationProfileSha256,
         String expectedClassificationModel,
@@ -24,6 +24,7 @@ public record ModerationProperties(
         String expectedAdjudicationProfileSha256,
         long expectedOpenAiTimeoutSeconds,
         String blockedTermsFile,
+        String restrictedPoliticalEntitiesFile,
         String internalResponseToken) {
 
     private static final long MAX_CONFIGURED_IMAGE_BYTES = 8L * 1024 * 1024;
@@ -45,11 +46,11 @@ public record ModerationProperties(
             throw new IllegalArgumentException(
                     "UPSTREAM_TIMEOUT_SECONDS must be between 1 and 300");
         }
-        if (!Double.isFinite(unknownThreshold)
-                || unknownThreshold < 0
-                || unknownThreshold > 1) {
+        if (!Double.isFinite(moderationScoreBlockThreshold)
+                || moderationScoreBlockThreshold < 0
+                || moderationScoreBlockThreshold > 1) {
             throw new IllegalArgumentException(
-                    "MODERATION_UNKNOWN_THRESHOLD must be between 0 and 1");
+                    "MODERATION_SCORE_BLOCK_THRESHOLD must be between 0 and 1");
         }
         expectedModerationModel = validatedVersionValue(
                 expectedModerationModel, "OPENAI_MODERATION_MODEL", 128);
@@ -87,6 +88,11 @@ public record ModerationProperties(
         }
         if (blockedTermsFile == null || blockedTermsFile.isBlank()) {
             throw new IllegalArgumentException("BLOCKED_TERMS_FILE must not be blank");
+        }
+        if (restrictedPoliticalEntitiesFile == null
+                || restrictedPoliticalEntitiesFile.isBlank()) {
+            throw new IllegalArgumentException(
+                    "RESTRICTED_POLITICAL_ENTITIES_FILE must not be blank");
         }
         internalResponseToken = internalResponseToken == null
                 ? ""

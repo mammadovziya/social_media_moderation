@@ -35,22 +35,29 @@ public class ReferenceAssetIndex {
         this.candidateLimit = properties.pdqCandidateLimit();
     }
 
+    /**
+     * Looks up byte-exact identities without requiring a PDQ computation.
+     *
+     * <p>The returned revision is the immutable provenance for the active-reference snapshot that
+     * produced the result. Callers may use an authoritative current-policy result as a terminal
+     * fast path; every other result must continue through perceptual and content analysis.
+     */
+    public ExactSearchResult findExactSha256(String sha256) {
+        String normalizedSha = normalizeFingerprint(sha256, "SHA-256");
+        CachedIndex current = currentIndex();
+        return new ExactSearchResult(
+                current.revision(),
+                !current.assets().isEmpty(),
+                exactCandidates(current, normalizedSha));
+    }
+
     public SearchResult findCandidates(String sha256, String fullPdq, String maskedPdq) {
         String normalizedSha = normalizeFingerprint(sha256, "SHA-256");
         PdqHashValue fullTarget = PdqHashValue.parse(fullPdq);
         PdqHashValue maskedTarget = PdqHashValue.parse(maskedPdq);
-        long observedRevision = repository.referenceAssetsRevision();
-        CachedIndex current = cachedIndex.get();
-        if (current.revision() < observedRevision) {
-            current = rebuild(observedRevision);
-        }
+        CachedIndex current = currentIndex();
 
-        List<ModerationReferenceAsset> exact = current.bySha256()
-                .getOrDefault(normalizedSha, List.of())
-                .stream()
-                .sorted(exactAssetComparator())
-                .limit(candidateLimit)
-                .toList();
+        List<ModerationReferenceAsset> exact = exactCandidates(current, normalizedSha);
         List<Candidate> perceptual = new ArrayList<>();
         appendNeighbors(
                 perceptual,
@@ -76,6 +83,25 @@ public class ReferenceAssetIndex {
                 !current.assets().isEmpty(),
                 exact,
                 List.copyOf(perceptual));
+    }
+
+    private CachedIndex currentIndex() {
+        long observedRevision = repository.referenceAssetsRevision();
+        CachedIndex current = cachedIndex.get();
+        if (current.revision() < observedRevision) {
+            current = rebuild(observedRevision);
+        }
+        return current;
+    }
+
+    private List<ModerationReferenceAsset> exactCandidates(
+            CachedIndex current, String normalizedSha) {
+        return current.bySha256()
+                .getOrDefault(normalizedSha, List.of())
+                .stream()
+                .sorted(exactAssetComparator())
+                .limit(candidateLimit)
+                .toList();
     }
 
     private CachedIndex rebuild(long observedRevision) {
@@ -165,6 +191,25 @@ public class ReferenceAssetIndex {
 
         static SearchResult empty() {
             return new SearchResult(false, List.of(), List.of());
+        }
+
+        ModerationReferenceAsset authoritativeExactMatch() {
+            return exactSha256Candidates.stream()
+                    .filter(ReferenceAssetIndex::isAuthoritativeCurrentPolicyExact)
+                    .findFirst()
+                    .orElse(null);
+        }
+    }
+
+    public record ExactSearchResult(
+            long revision,
+            boolean hasReferences,
+            List<ModerationReferenceAsset> exactSha256Candidates) {
+        public ExactSearchResult {
+            if (revision < 0) {
+                throw new IllegalArgumentException("Reference revision must not be negative");
+            }
+            exactSha256Candidates = List.copyOf(exactSha256Candidates);
         }
 
         ModerationReferenceAsset authoritativeExactMatch() {

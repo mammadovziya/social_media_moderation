@@ -31,6 +31,7 @@ class AiAnalysisServiceTest {
                     .containsEntry("financialRisk", "none")
                     .containsEntry("financialPrivacy", "none")
                     .containsEntry("impersonation", "none")
+                    .containsEntry("restrictedPoliticalEntity", "none")
                     .containsEntry("politicalContext", "none");
             assertThat(provider.parentPostText).isNull();
             assertThat(provider.authorUsername).isEqualTo("value_investor");
@@ -43,19 +44,19 @@ class AiAnalysisServiceTest {
                     .containsEntry("customModel", "gpt-5.6-terra")
                     .containsEntry(
                             "classificationPromptBundleSha256",
-                            "644044f7960b05e48529003e03f6b69f3dd932a31d6e39d7b4e01d57f5aa9f7e")
+                            "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba")
                     .containsEntry(
                             "classificationProfileSha256",
-                            "de5d6be741ee1f30bfff85de54c71133ad541593083e7d857ff04c028dee0289")
+                            "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216")
                     .containsEntry("adjudicationModel", "gpt-5.6-terra")
                     .containsEntry("adjudicationReasoningEffort", "medium")
-                    .containsEntry("adjudicationPromptVersion", "image-adjudication-v4")
+                    .containsEntry("adjudicationPromptVersion", "image-adjudication-v5")
                     .containsEntry(
                             "adjudicationPromptSha256",
-                            "20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8")
+                            "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505")
                     .containsEntry(
                             "adjudicationProfileSha256",
-                            "07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef")
+                            "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa")
                     .containsEntry("openAiTimeoutSeconds", 30L)
                     .containsEntry("maxImageBytes", 8_388_608L)
                     .containsEntry("maxImageRequestBytes", 9_437_184L);
@@ -120,7 +121,7 @@ class AiAnalysisServiceTest {
             assertThat((Map<String, Object>) result.get("adjudication"))
                     .containsEntry("status", "not_required")
                     .containsEntry("model", "gpt-5.6-terra")
-                    .containsEntry("promptVersion", "image-adjudication-v4")
+                    .containsEntry("promptVersion", "image-adjudication-v5")
                     .containsEntry("action", "not_required")
                     .containsEntry("candidateDisposition", "not_required");
         } finally {
@@ -242,7 +243,21 @@ class AiAnalysisServiceTest {
                         "safetyAction", "allow",
                         "financialRisk", "none",
                         "financialPrivacy", "none",
-                        "impersonation", "clear"))) {
+                        "impersonation", "clear"),
+                Map.of(
+                        "status", "ok",
+                        "safetyAction", "allow",
+                        "financialRisk", "none",
+                        "financialPrivacy", "none",
+                        "impersonation", "none",
+                        "restrictedPoliticalEntity", "president"),
+                Map.of(
+                        "status", "ok",
+                        "safetyAction", "allow",
+                        "financialRisk", "none",
+                        "financialPrivacy", "none",
+                        "impersonation", "none",
+                        "restrictedPoliticalEntity", "possible"))) {
             assertThat(AiAnalysisService.classifierRequiresAdjudication(signal)).isTrue();
         }
         assertThat(AiAnalysisService.classifierRequiresAdjudication(Map.of(
@@ -250,7 +265,8 @@ class AiAnalysisServiceTest {
                         "safetyAction", "allow",
                         "financialRisk", "potentially_misleading",
                         "financialPrivacy", "possible",
-                        "impersonation", "possible")))
+                        "impersonation", "possible",
+                        "restrictedPoliticalEntity", "none")))
                 .isFalse();
     }
 
@@ -493,6 +509,7 @@ class AiAnalysisServiceTest {
         private volatile String classificationFinancialRisk = "none";
         private volatile String classificationFinancialPrivacy = "none";
         private volatile String classificationImpersonation = "none";
+        private volatile String classificationRestrictedPoliticalEntity = "none";
         private volatile String parentPostText;
         private volatile String authorUsername;
         private volatile String quotedText;
@@ -522,18 +539,18 @@ class AiAnalysisServiceTest {
             details.put("customModel", "gpt-5.6-terra");
             details.put(
                     "classificationPromptBundleSha256",
-                    "644044f7960b05e48529003e03f6b69f3dd932a31d6e39d7b4e01d57f5aa9f7e");
+                    "92e01f7aba385dd437bd12be578a9e87ecfef8a86483d65762929dcb91e2e3ba");
             details.put(
                     "classificationProfileSha256",
-                    "de5d6be741ee1f30bfff85de54c71133ad541593083e7d857ff04c028dee0289");
+                    "4a455ab1f19d2dd13a0434ee543071e0caf6a0c261246ce3862667675b833216");
             details.put("adjudicationModel", "gpt-5.6-terra");
             details.put("adjudicationReasoningEffort", "medium");
             details.put(
                     "adjudicationPromptSha256",
-                    "20cb9497db8fd13421e9022d318dca95472cf7c08cf718738bb8b3e5134840a8");
+                    "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505");
             details.put(
                     "adjudicationProfileSha256",
-                    "07e4d446ee3c7d4f694ed90ddaea87892dd572037f524b4cf3589b51c2a9aaef");
+                    "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa");
             details.put("openAiTimeoutSeconds", 30L);
             return Map.copyOf(details);
         }
@@ -619,6 +636,7 @@ class AiAnalysisServiceTest {
                     Map.entry("financialRisk", "none"),
                     Map.entry("financialPrivacy", "none"),
                     Map.entry("impersonation", "none"),
+                    Map.entry("restrictedPoliticalEntity", "none"),
                     Map.entry("politicalContext", "none"),
                     Map.entry("finalReason", "none"),
                     Map.entry("candidateDisposition", "rejected"),
@@ -662,6 +680,9 @@ class AiAnalysisServiceTest {
             result.put("financialRisk", classificationFinancialRisk);
             result.put("financialPrivacy", classificationFinancialPrivacy);
             result.put("impersonation", classificationImpersonation);
+            result.put(
+                    "restrictedPoliticalEntity",
+                    classificationRestrictedPoliticalEntity);
             if (contentType != ContentType.USERNAME) {
                 result.put("politicalContext", "none");
             }

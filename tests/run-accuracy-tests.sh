@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 set -uo pipefail
+# Never allow an inherited or command-line xtrace setting to print credentials.
+set +x
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATASET="${1:-$SCRIPT_DIR/accuracy/text-cases.jsonl}"
@@ -10,6 +12,10 @@ EXPECTED_CASE_COUNT="${EXPECTED_CASE_COUNT:-100}"
 REQUEST_TIMEOUT_SECONDS="${REQUEST_TIMEOUT_SECONDS:-90}"
 TEST_DELAY_SECONDS="${TEST_DELAY_SECONDS:-0}"
 MIN_EXACT_ACCURACY="${MIN_EXACT_ACCURACY:-0}"
+INTERNAL_METADATA_FIELDS_JSON='[
+  "contentId", "contentType", "imageMatch", "imageMatchScore",
+  "ocrText", "aiUsage", "policyVersion"
+]'
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     cat <<'USAGE'
@@ -27,12 +33,15 @@ Optional environment variables:
   EXPECTED_CASE_COUNT=100
   VALIDATE_ONLY=1
   CONFIRM_LIVE_API=1
+  MODERATION_INTERNAL_RESPONSE_TOKEN=<same strong token configured by gateway>
   NO_COLOR=1
 
 Without VALIDATE_ONLY=1, the script refuses to send requests unless
 CONFIRM_LIVE_API=1 is explicitly supplied after API-spend approval. A live run
-sends one multipart request per case, prints the text, expected enums, response,
-and mismatches, and reports aggregate accuracy.
+sends one authenticated multipart request per case. It requires the same
+MODERATION_INTERNAL_RESPONSE_TOKEN configured by the gateway, prints the text,
+expected enums, internal response, and mismatches, and reports aggregate
+accuracy. The token itself is never printed.
 USAGE
     exit 0
 fi
@@ -92,14 +101,14 @@ if ! jq -e -s --argjson expected_count "$EXPECTED_CASE_COUNT" '
                 "NONE", "HARASSMENT", "HATE", "THREAT", "SELF_HARM",
                 "SEXUAL", "SEXUAL_MINORS", "GRAPHIC_VIOLENCE", "VIOLENCE",
                 "ILLICIT", "SPAM_SCAM", "VULGAR", "IMPERSONATION",
-                "OFF_TOPIC", "FINANCIAL_PRIVACY", "FINANCIAL_RISK",
+                "POLITICAL_CONTENT", "OFF_TOPIC", "FINANCIAL_PRIVACY", "FINANCIAL_RISK",
                 "NOT_INVESTMENT", "KNOWN_IMAGE", "ANALYZER_ERROR",
                 "EVIDENCE_UNAVAILABLE", "OTHER"
               ] | index($value) != null)
         and (.expected.reason as $value
             | [
                 "NONE", "KNOWN_IMAGE", "SAFETY", "FINANCIAL_PRIVACY",
-                "FINANCIAL_RISK", "IMPERSONATION", "OFF_TOPIC",
+                "FINANCIAL_RISK", "IMPERSONATION", "POLITICAL_CONTENT", "OFF_TOPIC",
                 "EVIDENCE_UNAVAILABLE", "ANALYZER_ERROR"
               ] | index($value) != null)
         and (
@@ -124,13 +133,20 @@ if ! jq -e -s --argjson expected_count "$EXPECTED_CASE_COUNT" '
         and (.expected.impersonation as $value
             | ["NONE", "POSSIBLE", "CLEAR"] | index($value) != null)
         and (
+            .expected.restrictedPoliticalEntity == null
+            or (.expected.restrictedPoliticalEntity as $value
+                | ["NONE", "PRESIDENT", "MINISTER", "YAP", "MULTIPLE", "POSSIBLE"]
+                | index($value) != null)
+        )
+        and (
             if .contentType == "POST" or .contentType == "COMMENT" then
                 (.expected | keys | sort)
                     == [
                         "decision", "domain", "financialClaim", "financialPrivacy",
                         "financialRisk", "impersonation", "investment",
-                        "politicalContext", "politics", "reason", "safety",
-                        "safetyAction", "violation"
+                        "politicalContext", "politics", "reason",
+                        "restrictedPoliticalEntity", "safety", "safetyAction",
+                        "violation"
                       ]
                 and (
                     .expected.investment == null
@@ -172,8 +188,8 @@ if ! jq -e -s --argjson expected_count "$EXPECTED_CASE_COUNT" '
                 (.expected | keys | sort)
                     == [
                         "decision", "financialPrivacy", "financialRisk",
-                        "impersonation", "reason", "safety", "safetyAction",
-                        "violation"
+                        "impersonation", "reason", "restrictedPoliticalEntity",
+                        "safety", "safetyAction", "violation"
                       ]
             end
         )
@@ -184,6 +200,18 @@ if ! jq -e -s --argjson expected_count "$EXPECTED_CASE_COUNT" '
             and .expected.politics == null
             and .expected.financialClaim == null
             and .expected.politicalContext == null
+            and (
+                .expected.restrictedPoliticalEntity == null
+                or (
+                    .expected.restrictedPoliticalEntity as $entity
+                    | (["PRESIDENT", "MINISTER", "YAP", "MULTIPLE"]
+                        | index($entity)) != null
+                      and .expected.decision == "BLOCK"
+                      and .expected.violation == "POLITICAL_CONTENT"
+                      and .expected.reason == "POLITICAL_CONTENT"
+                      and .expected.safetyAction == null
+                )
+            )
         else
             (
                 {
@@ -202,6 +230,14 @@ if ! jq -e -s --argjson expected_count "$EXPECTED_CASE_COUNT" '
             )
             and .expected.financialClaim != null
             and .expected.politicalContext != null
+            and .expected.restrictedPoliticalEntity != null
+        end
+    )
+    and all(.[] | select(.contentType == "USERNAME");
+        if .expected.safetyAction == null then
+            .expected.restrictedPoliticalEntity == null
+        else
+            .expected.restrictedPoliticalEntity != null
         end
     )
     and all(.[];
@@ -250,6 +286,45 @@ if ! jq -e -s --argjson expected_count "$EXPECTED_CASE_COUNT" '
     and any(.[];
         .expected.safetyAction == null
     )
+    and any(.[];
+        .expected.restrictedPoliticalEntity == "PRESIDENT"
+    )
+    and any(.[];
+        .expected.restrictedPoliticalEntity == "MINISTER"
+    )
+    and any(.[];
+        .expected.restrictedPoliticalEntity == "YAP"
+    )
+    and any(.[];
+        .expected.restrictedPoliticalEntity == "MULTIPLE"
+    )
+    and any(.[];
+        .expected.restrictedPoliticalEntity == "POSSIBLE"
+        and .expected.decision == "UNKNOWN"
+        and .expected.violation == "POLITICAL_CONTENT"
+    )
+    and any(.[];
+        .id == "post-en-001"
+        and .expected.restrictedPoliticalEntity == "NONE"
+        and .expected.violation == "OFF_TOPIC"
+    )
+    and any(.[];
+        .id == "comment-en-003"
+        and .expected.restrictedPoliticalEntity == "NONE"
+        and .expected.violation == "OFF_TOPIC"
+    )
+    and any(.[];
+        .id == "post-tr-003"
+        and (.text | contains("yap"))
+        and .expected.restrictedPoliticalEntity == "NONE"
+        and .expected.decision == "ALLOW"
+    )
+    and any(.[];
+        .expected.violation == "VULGAR"
+    )
+    and any(.[];
+        .expected.violation == "POLITICAL_CONTENT"
+    )
 ' "$DATASET" >/dev/null; then
     printf 'Dataset schema or enum validation failed: %s\n' "$DATASET" >&2
     exit 1
@@ -268,6 +343,10 @@ if [[ "${VALIDATE_ONLY:-0}" == "1" ]]; then
     jq -r -s '
         group_by(.expected.safetyAction)[]
         | "  safetyAction=\(.[0].expected.safetyAction // "OMITTED"): \(length)"
+    ' "$DATASET"
+    jq -r -s '
+        group_by(.expected.restrictedPoliticalEntity)[]
+        | "  restrictedPoliticalEntity=\(.[0].expected.restrictedPoliticalEntity // "OMITTED"): \(length)"
     ' "$DATASET"
     jq -r -s '
         . as $cases
@@ -291,6 +370,25 @@ if [[ "${CONFIRM_LIVE_API:-0}" != "1" ]]; then
     exit 2
 fi
 
+if [[ -z "${MODERATION_INTERNAL_RESPONSE_TOKEN:-}" ]]; then
+    printf '%s\n' \
+        'Refusing live accuracy requests: MODERATION_INTERNAL_RESPONSE_TOKEN is required.' >&2
+    exit 2
+fi
+internal_token_length="${#MODERATION_INTERNAL_RESPONSE_TOKEN}"
+if [[ "$internal_token_length" -lt 43 \
+        || "$internal_token_length" -gt 256 \
+        || "$MODERATION_INTERNAL_RESPONSE_TOKEN" =~ [^A-Za-z0-9_-] ]]; then
+    printf '%s\n' \
+        'Refusing live accuracy requests: MODERATION_INTERNAL_RESPONSE_TOKEN has an invalid format.' >&2
+    exit 2
+fi
+
+# Copy the secret into a non-exported shell variable, then remove the inherited
+# environment variable before curl or any other child process starts.
+internal_response_token="$MODERATION_INTERNAL_RESPONSE_TOKEN"
+unset MODERATION_INTERNAL_RESPONSE_TOKEN
+
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
     COLOR_GREEN=$'\033[32m'
     COLOR_RED=$'\033[31m'
@@ -307,6 +405,7 @@ fi
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/moderation-accuracy.XXXXXX")"
 cleanup() {
+    unset internal_response_token
     if [[ -n "${work_dir:-}" && -d "$work_dir" ]]; then
         rm -rf -- "$work_dir"
     fi
@@ -314,6 +413,13 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+internal_header_file="$work_dir/internal-response-header"
+if ! (umask 077 && printf 'X-Moderation-Internal-Token: %s\n' \
+        "$internal_response_token" >"$internal_header_file"); then
+    printf '%s\n' 'Unable to prepare the internal response credential.' >&2
+    exit 1
+fi
 
 api_success=0
 exact_correct=0
@@ -348,6 +454,8 @@ impersonation_correct=0
 impersonation_total=0
 political_context_correct=0
 political_context_total=0
+restricted_political_entity_correct=0
+restricted_political_entity_total=0
 
 post_correct=0
 post_total=0
@@ -402,6 +510,7 @@ while IFS= read -r test_case || [[ -n "$test_case" ]]; do
     author_username="$(jq -r '.authorUsername // ""' <<<"$test_case")"
     quoted_text="$(jq -r '.quotedText // ""' <<<"$test_case")"
     expected_json="$(jq -cS '.expected' <<<"$test_case")"
+    expected_fields_json="$(jq -c '.expected | keys' <<<"$test_case")"
 
     case "$content_type" in
         POST) post_total=$((post_total + 1)) ;;
@@ -423,6 +532,7 @@ while IFS= read -r test_case || [[ -n "$test_case" ]]; do
         --max-time "$REQUEST_TIMEOUT_SECONDS"
         -o "$body_file"
         -w '%{http_code}'
+        --header "@$internal_header_file"
         "$BASE_URL/v1/moderate"
         --form-string "contentId=$case_id"
         --form-string "contentType=$content_type"
@@ -450,6 +560,7 @@ while IFS= read -r test_case || [[ -n "$test_case" ]]; do
     else
         response_text="<empty>"
     fi
+    response_text="${response_text//$internal_response_token/[REDACTED]}"
 
     printf '\n%s[%03d/%03d] %s | %s | %s%s\n' \
         "$COLOR_BOLD" "$index" "$case_count" "$case_id" \
@@ -473,6 +584,7 @@ while IFS= read -r test_case || [[ -n "$test_case" ]]; do
     else
         case_pass=false
         curl_error="$(tr '\r\n' '  ' <"$error_file")"
+        curl_error="${curl_error//$internal_response_token/[REDACTED]}"
         printf '%sAPI error:%s curl=%s http=%s %s\n' \
             "$COLOR_RED" "$COLOR_RESET" "$curl_exit" \
             "${http_code:-000}" "$curl_error"
@@ -480,16 +592,47 @@ while IFS= read -r test_case || [[ -n "$test_case" ]]; do
 
     contract_total=$((contract_total + 1))
     if [[ "$response_is_json" == true ]] \
-        && jq -e 'keys | sort == ["decision", "violation"]' \
+        && jq -e \
+            --arg expected_content_id "$case_id" \
+            --arg expected_content_type "$content_type" \
+            --argjson expected_fields "$expected_fields_json" \
+            --argjson metadata_fields "$INTERNAL_METADATA_FIELDS_JSON" '
+                type == "object"
+                and ((keys - ($expected_fields + $metadata_fields)) | length == 0)
+                and .contentId == $expected_content_id
+                and .contentType == $expected_content_type
+                and (.aiUsage | type == "object")
+                and (.policyVersion | type == "string" and length > 0)
+                and (
+                    if has("imageMatch") then
+                        .imageMatch as $value
+                        | [
+                            "EXACT_MATCH", "SIMILAR_CANDIDATE", "MATCHED",
+                            "NOT_MATCHED", "LOW_QUALITY", "UNAVAILABLE"
+                          ]
+                        | index($value) != null
+                    else true end
+                )
+                and (
+                    if has("imageMatchScore") then
+                        (.imageMatchScore | type == "number"
+                            and floor == . and . >= 0 and . <= 100)
+                    else true end
+                )
+                and (
+                    if has("ocrText") then (.ocrText | type == "string")
+                    else true end
+                )
+            ' \
             "$body_file" >/dev/null 2>&1; then
         contract_correct=$((contract_correct + 1))
     else
         case_pass=false
-        printf '%sMismatch:%s response must contain exactly decision and violation\n' \
+        printf '%sMismatch:%s invalid authenticated internal response contract\n' \
             "$COLOR_YELLOW" "$COLOR_RESET"
     fi
 
-    for field_name in decision violation; do
+    while IFS= read -r field_name; do
         expected_value="$(
             jq -r --arg field "$field_name" \
                 'if (.expected | has($field)) then
@@ -519,6 +662,7 @@ while IFS= read -r test_case || [[ -n "$test_case" ]]; do
             financialPrivacy) financial_privacy_total=$((financial_privacy_total + 1)) ;;
             impersonation) impersonation_total=$((impersonation_total + 1)) ;;
             politicalContext) political_context_total=$((political_context_total + 1)) ;;
+            restrictedPoliticalEntity) restricted_political_entity_total=$((restricted_political_entity_total + 1)) ;;
             investment) investment_total=$((investment_total + 1)) ;;
             politics) politics_total=$((politics_total + 1)) ;;
         esac
@@ -536,6 +680,7 @@ while IFS= read -r test_case || [[ -n "$test_case" ]]; do
         else
             actual_value="__MISSING__"
         fi
+        actual_value="${actual_value//$internal_response_token/[REDACTED]}"
 
         if [[ "$actual_value" == "$expected_value" ]]; then
             label_correct=$((label_correct + 1))
@@ -551,6 +696,7 @@ while IFS= read -r test_case || [[ -n "$test_case" ]]; do
                 financialPrivacy) financial_privacy_correct=$((financial_privacy_correct + 1)) ;;
                 impersonation) impersonation_correct=$((impersonation_correct + 1)) ;;
                 politicalContext) political_context_correct=$((political_context_correct + 1)) ;;
+                restrictedPoliticalEntity) restricted_political_entity_correct=$((restricted_political_entity_correct + 1)) ;;
                 investment) investment_correct=$((investment_correct + 1)) ;;
                 politics) politics_correct=$((politics_correct + 1)) ;;
             esac
@@ -560,7 +706,7 @@ while IFS= read -r test_case || [[ -n "$test_case" ]]; do
                 "$COLOR_YELLOW" "$COLOR_RESET" "$field_name" \
                 "$expected_value" "$actual_value"
         fi
-    done
+    done < <(jq -r '.expected | keys[]' <<<"$test_case")
 
     if [[ "$case_pass" == true ]]; then
         exact_correct=$((exact_correct + 1))
@@ -605,6 +751,19 @@ print_metric "Turkish exact accuracy" "$tr_correct" "$tr_total"
 printf '\nBy label\n'
 print_metric "decision" "$decision_correct" "$decision_total"
 print_metric "violation" "$violation_correct" "$violation_total"
+print_metric "reason" "$reason_correct" "$reason_total"
+print_metric "domain" "$domain_correct" "$domain_total"
+print_metric "safetyAction" "$safety_action_correct" "$safety_action_total"
+print_metric "safety" "$safety_correct" "$safety_total"
+print_metric "financialClaim" "$financial_claim_correct" "$financial_claim_total"
+print_metric "financialRisk" "$financial_risk_correct" "$financial_risk_total"
+print_metric "financialPrivacy" "$financial_privacy_correct" "$financial_privacy_total"
+print_metric "impersonation" "$impersonation_correct" "$impersonation_total"
+print_metric "politicalContext" "$political_context_correct" "$political_context_total"
+print_metric "restrictedPoliticalEntity" \
+    "$restricted_political_entity_correct" "$restricted_political_entity_total"
+print_metric "investment" "$investment_correct" "$investment_total"
+print_metric "politics" "$politics_correct" "$politics_total"
 
 exact_accuracy="$(percentage "$exact_correct" "$case_count")"
 api_failures=$((case_count - api_success))
@@ -612,6 +771,13 @@ if [[ "$api_failures" -gt 0 ]]; then
     printf '\n%sCompleted with %d API failures.%s\n' \
         "$COLOR_RED" "$api_failures" "$COLOR_RESET" >&2
     exit 2
+fi
+
+contract_failures=$((contract_total - contract_correct))
+if [[ "$contract_failures" -gt 0 ]]; then
+    printf '\n%sCompleted with %d internal response contract failures.%s\n' \
+        "$COLOR_RED" "$contract_failures" "$COLOR_RESET" >&2
+    exit 4
 fi
 
 if ! awk -v actual="$exact_accuracy" -v minimum="$MIN_EXACT_ACCURACY" \
