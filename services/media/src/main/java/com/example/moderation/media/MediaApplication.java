@@ -12,7 +12,8 @@ import org.springframework.scheduling.annotation.EnableScheduling;
     MediaPerformanceProperties.class,
     VisualRetrievalProperties.class,
     AiWorkIdempotencyCleanupProperties.class,
-    AiWorkIdempotencySecurityProperties.class
+    AiWorkIdempotencySecurityProperties.class,
+    PolicyDistributionSecurityProperties.class
 })
 public class MediaApplication {
     public static void main(String[] args) {

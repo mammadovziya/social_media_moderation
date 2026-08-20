@@ -95,6 +95,69 @@ class AiWorkIdempotencyServiceTest {
     }
 
     @Test
+    void completeAcceptsTextAdjudicationAndBundleProvenance() throws Exception {
+        String key = "a".repeat(64);
+        UUID owner = UUID.randomUUID();
+        Map<String, Object> configuration = Map.ofEntries(
+                Map.entry("provider", "openai"),
+                Map.entry("moderationModel", "omni-moderation-latest"),
+                Map.entry("moderationProfileSha256", "1".repeat(64)),
+                Map.entry("customModel", "gpt-5.4-mini"),
+                Map.entry("classificationPromptBundleSha256", "2".repeat(64)),
+                Map.entry("classificationProfileSha256", "3".repeat(64)),
+                Map.entry("adjudicationModel", "gpt-5.6-terra"),
+                Map.entry("adjudicationReasoningEffort", "medium"),
+                Map.entry("adjudicationPromptVersion", "adjudication-prompts-v1"),
+                Map.entry("adjudicationPromptSha256", "4".repeat(64)),
+                Map.entry("adjudicationPromptBundleSha256", "4".repeat(64)),
+                Map.entry("imageAdjudicationPromptSha256", "5".repeat(64)),
+                Map.entry("textAdjudicationPromptSha256", "6".repeat(64)),
+                Map.entry("adjudicationProfileSha256", "7".repeat(64)),
+                Map.entry("imageAdjudicationProfileSha256", "8".repeat(64)),
+                Map.entry("textAdjudicationProfileSha256", "9".repeat(64)),
+                Map.entry("openAiTimeoutSeconds", 30),
+                Map.entry("maxImageBytes", 8_388_608),
+                Map.entry("maxImageRequestBytes", 9_437_184));
+        Map<String, Object> result = Map.of(
+                "moderation",
+                Map.of("status", "ok", "flagged", false),
+                "classification",
+                Map.of(
+                        "status", "ok",
+                        "safetyAction", "unknown",
+                        "category", "other"),
+                "adjudication",
+                Map.ofEntries(
+                        Map.entry("status", "ok"),
+                        Map.entry("model", "gpt-5.6-terra"),
+                        Map.entry("promptVersion", "text-adjudication-v1"),
+                        Map.entry("adjudicationMode", "text_unknown_recheck"),
+                        Map.entry("action", "allow"),
+                        Map.entry("safetyAction", "allow"),
+                        Map.entry("category", "none"),
+                        Map.entry("domain", "investment_related"),
+                        Map.entry("financialClaim", "opinion"),
+                        Map.entry("financialRisk", "none"),
+                        Map.entry("financialPrivacy", "none"),
+                        Map.entry("impersonation", "none"),
+                        Map.entry("restrictedPoliticalEntity", "none"),
+                        Map.entry("politicalContext", "none"),
+                        Map.entry("finalReason", "none"),
+                        Map.entry("usage", Map.of("totalTokens", 21))),
+                "configuration",
+                configuration);
+        when(repository.complete(eq(key), eq(owner), anyString())).thenReturn(true);
+
+        service.complete(new AiWorkCompleteRequest(key, owner, result));
+
+        ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
+        verify(repository).complete(eq(key), eq(owner), json.capture());
+        Map<?, ?> stored = new ObjectMapper().readValue(json.getValue(), Map.class);
+        assertThat(stored.get("configuration")).isEqualTo(configuration);
+        assertThat(json.getValue()).doesNotContain("usage", "totalTokens");
+    }
+
+    @Test
     void rejectsRawContentAtAnyDepth() {
         Map<String, Object> result = Map.of(
                 "classification",

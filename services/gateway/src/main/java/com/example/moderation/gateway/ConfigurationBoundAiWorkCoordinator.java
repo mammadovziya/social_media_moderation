@@ -438,7 +438,7 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
             CompletableFuture<Map<String, Object>> result) {
         long remainingMillis = TimeUnit.NANOSECONDS.toMillis(remainingCoordinationNanos());
         if (remainingMillis <= 0) {
-            throw new CoordinationUnavailableException(
+            throw new CoordinationTimeoutException(
                     "analysis deadline expired while waiting for identical AI work");
         }
         try {
@@ -447,9 +447,12 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
                     TimeUnit.MILLISECONDS);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
-            throw new CoordinationUnavailableException(
+            throw new CoordinationTimeoutException(
                     "interrupted while waiting for identical AI work", exception);
-        } catch (ExecutionException | TimeoutException exception) {
+        } catch (TimeoutException exception) {
+            throw new CoordinationTimeoutException(
+                    "identical AI work did not complete before the deadline", exception);
+        } catch (ExecutionException exception) {
             throw new CoordinationUnavailableException(
                     "identical AI work did not complete", exception);
         }
@@ -460,7 +463,7 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
             Thread.sleep(millis);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
-            throw new CoordinationUnavailableException(
+            throw new CoordinationTimeoutException(
                     "interrupted while polling AI work", exception);
         }
     }
@@ -496,7 +499,7 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
     private void requireAnalysisBudget() {
         if (!InternalRequestDeadline.hasAnalysisBudget(
                 waitTimeout, finalizationReserve)) {
-            throw new CoordinationUnavailableException(
+            throw new CoordinationTimeoutException(
                     "analysis deadline expired before new AI work");
         }
     }
@@ -552,11 +555,61 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
                 || !"ok".equals(classification.get("status"))) {
             return false;
         }
+        if (!(moderation.get("model") instanceof String moderationModel)
+                || moderationModel.isBlank()
+                || !(moderation.get("flagged") instanceof Boolean)
+                || !ModerationDependencyValidator.validModerationCategoryEvidence(moderation)
+                || !(classification.get("model") instanceof String classificationModel)
+                || classificationModel.isBlank()
+                || !hasStringFields(
+                        classification,
+                        "safetyAction",
+                        "category",
+                        "financialRisk",
+                        "financialPrivacy",
+                        "impersonation",
+                        "restrictedPoliticalEntity")) {
+            return false;
+        }
+        boolean hasContentAxis = classification.containsKey("domain")
+                || classification.containsKey("financialClaim")
+                || classification.containsKey("politicalContext");
+        if (hasContentAxis
+                && !hasStringFields(
+                        classification, "domain", "financialClaim", "politicalContext")) {
+            return false;
+        }
         Map<String, Object> adjudication = DecisionPolicy.nestedMap(ai, "adjudication");
         Object status = adjudication.get("status");
-        return adjudication.isEmpty()
-                || "ok".equals(status)
-                || "not_required".equals(status);
+        if ("ok".equals(status)) {
+            Object action = adjudication.get("action");
+            return action instanceof String value
+                    && ("allow".equalsIgnoreCase(value) || "block".equalsIgnoreCase(value));
+        }
+        if (!adjudication.isEmpty() && !"not_required".equals(status)) {
+            return false;
+        }
+        // Ambiguous first-pass evidence is not a completed verdict. Persisting it would make
+        // later retries replay the same non-public UNKNOWN instead of obtaining adjudication.
+        return classification.values().stream()
+                .filter(String.class::isInstance)
+                .map(String.class::cast)
+                .map(value -> value.trim().toLowerCase(java.util.Locale.ROOT))
+                .noneMatch(value -> switch (value) {
+                    case "unknown", "uncertain", "possible", "potentially_misleading",
+                                    "paid_promotion" ->
+                            true;
+                    default -> false;
+                });
+    }
+
+    private static boolean hasStringFields(Map<String, Object> source, String... fields) {
+        for (String field : fields) {
+            if (!(source.get(field) instanceof String value) || value.isBlank()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     static Map<String, Object> withoutUsage(Map<String, Object> ai) {
@@ -585,6 +638,16 @@ public final class ConfigurationBoundAiWorkCoordinator implements AiWorkCoordina
         }
 
         CoordinationUnavailableException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    static final class CoordinationTimeoutException extends RuntimeException {
+        CoordinationTimeoutException(String message) {
+            super(message);
+        }
+
+        CoordinationTimeoutException(String message, Throwable cause) {
             super(message, cause);
         }
     }

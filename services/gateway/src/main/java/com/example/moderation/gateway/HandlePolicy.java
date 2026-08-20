@@ -14,7 +14,7 @@ import java.util.Locale;
  * asking a model to reason about them later. This policy applies only to machine handles.
  */
 public final class HandlePolicy {
-    public static final String PROFILE_VERSION = "handle-structure-v1";
+    public static final String PROFILE_VERSION = "handle-structure-v2";
     public static final String PROFILE_SHA256;
 
     static final int MIN_LENGTH = 3;

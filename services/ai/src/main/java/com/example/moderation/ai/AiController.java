@@ -86,6 +86,7 @@ public class AiController {
                 request.parentPostText(),
                 request.authorUsername(),
                 request.quotedText(),
+                request.adjudicationRequested(),
                 parseDeadline(deadlineHeader));
     }
 

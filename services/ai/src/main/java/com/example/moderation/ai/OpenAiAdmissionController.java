@@ -55,10 +55,12 @@ final class OpenAiAdmissionController {
             Thread.currentThread().interrupt();
             outcome = "interrupted";
             throw new OpenAiRestClient.OpenAiResponseException(
+                    OpenAiRestClient.OpenAiFailureKind.TIMEOUT,
                     "OpenAI admission was interrupted", exception);
         } catch (AdmissionRejectedException exception) {
             outcome = exception.outcome;
-            throw new OpenAiRestClient.OpenAiResponseException(exception.getMessage());
+            throw new OpenAiRestClient.OpenAiResponseException(
+                    exception.failureKind, exception.getMessage());
         } finally {
             if (admitted) {
                 release(model);
@@ -77,12 +79,16 @@ final class OpenAiAdmissionController {
             }
             if (waiting >= queueLimit) {
                 throw new AdmissionRejectedException(
-                        "queue_full", "OpenAI admission queue is full");
+                        "queue_full",
+                        OpenAiRestClient.OpenAiFailureKind.UNAVAILABLE,
+                        "OpenAI admission queue is full");
             }
             long waitMillis = AiRequestDeadline.boundedWaitMillis(admissionTimeoutMillis);
             if (waitMillis <= 0) {
                 throw new AdmissionRejectedException(
-                        "deadline_expired", "OpenAI request deadline has expired");
+                        "deadline_expired",
+                        OpenAiRestClient.OpenAiFailureKind.TIMEOUT,
+                        "OpenAI request deadline has expired");
             }
             waiting++;
             countedAsWaiting = true;
@@ -93,7 +99,9 @@ final class OpenAiAdmissionController {
                             ? "deadline_expired"
                             : "admission_timeout";
                     throw new AdmissionRejectedException(
-                            outcome, "OpenAI admission capacity was not available");
+                            outcome,
+                            OpenAiRestClient.OpenAiFailureKind.TIMEOUT,
+                            "OpenAI admission capacity was not available");
                 }
                 remainingNanos = capacityChanged.awaitNanos(remainingNanos);
             }
@@ -159,10 +167,15 @@ final class OpenAiAdmissionController {
 
     private static final class AdmissionRejectedException extends RuntimeException {
         private final String outcome;
+        private final OpenAiRestClient.OpenAiFailureKind failureKind;
 
-        private AdmissionRejectedException(String outcome, String message) {
+        private AdmissionRejectedException(
+                String outcome,
+                OpenAiRestClient.OpenAiFailureKind failureKind,
+                String message) {
             super(message);
             this.outcome = outcome;
+            this.failureKind = failureKind;
         }
     }
 }

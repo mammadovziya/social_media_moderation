@@ -144,7 +144,7 @@ class OpenApiDocumentationTest {
                         jsonPath(
                                         "$.components.schemas.ModerationResponse"
                                                 + ".properties.decision.enum")
-                                .value(contains("ALLOW", "BLOCK", "UNKNOWN")))
+                                .value(contains("ALLOW", "BLOCK")))
                 .andExpect(
                         jsonPath(
                                         "$.components.schemas.ModerationResponse"
@@ -157,7 +157,7 @@ class OpenApiDocumentationTest {
                         jsonPath(
                                         "$.paths['/v1/moderate'].post.responses"
                                                 + ".*.headers['X-Request-ID']")
-                                .value(hasSize(8)))
+                                .value(hasSize(10)))
                 .andExpect(
                         jsonPath(
                                         "$.paths['/v1/moderate'].post.responses['200']"
@@ -201,9 +201,50 @@ class OpenApiDocumentationTest {
                                 .value("INTERNAL_ERROR"))
                 .andExpect(
                         jsonPath(
+                                        "$.paths['/v1/moderate'].post.responses['502']"
+                                                + ".headers['X-Request-ID']")
+                                .exists())
+                .andExpect(
+                        jsonPath(
+                                        "$.paths['/v1/moderate'].post.responses['502']"
+                                                + ".content['application/json'].example.error")
+                                .value("UPSTREAM_FAILURE"))
+                .andExpect(
+                        jsonPath(
+                                        "$.paths['/v1/moderate'].post.responses['502']"
+                                                + ".content['application/json'].example.message")
+                                .value(
+                                        "A required moderation service returned an invalid response."))
+                .andExpect(
+                        jsonPath(
+                                        "$.paths['/v1/moderate'].post.responses['503']"
+                                                + ".headers['X-Request-ID']")
+                                .exists())
+                .andExpect(
+                        jsonPath(
                                         "$.paths['/v1/moderate'].post.responses['503']"
                                                 + ".content['application/json'].example.error")
-                                .value("SERVICE_UNAVAILABLE"));
+                                .value("SERVICE_UNAVAILABLE"))
+                .andExpect(
+                        jsonPath(
+                                        "$.paths['/v1/moderate'].post.responses['503']"
+                                                + ".content['application/json'].example.message")
+                                .value("A required moderation service is not available."))
+                .andExpect(
+                        jsonPath(
+                                        "$.paths['/v1/moderate'].post.responses['504']"
+                                                + ".headers['X-Request-ID']")
+                                .exists())
+                .andExpect(
+                        jsonPath(
+                                        "$.paths['/v1/moderate'].post.responses['504']"
+                                                + ".content['application/json'].example.error")
+                                .value("UPSTREAM_TIMEOUT"))
+                .andExpect(
+                        jsonPath(
+                                        "$.paths['/v1/moderate'].post.responses['504']"
+                                                + ".content['application/json'].example.message")
+                                .value("A required moderation service timed out."));
     }
 
     @Test

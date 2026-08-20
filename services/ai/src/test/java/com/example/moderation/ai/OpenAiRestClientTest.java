@@ -56,6 +56,17 @@ class OpenAiRestClientTest {
     }
 
     @Test
+    void technicalFailureKindsAreAClosedSafeTaxonomy() {
+        assertThat(OpenAiRestClient.OpenAiFailureKind.values())
+                .extracting(Enum::name)
+                .containsExactly(
+                        "TIMEOUT",
+                        "UNAVAILABLE",
+                        "RATE_LIMITED",
+                        "CONTRACT_INVALID");
+    }
+
+    @Test
     void detailsBindTheConfiguredModelsAndPromptBytes() {
         assertThat(client("test-key").details())
                 .containsEntry(
@@ -63,18 +74,33 @@ class OpenAiRestClientTest {
                         "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073")
                 .containsEntry(
                         "classificationPromptBundleSha256",
-                        "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8")
+                        "3f16da31ae1f71763b2a5262e694b531abefddb1d626f4dbf731bcef56139928")
                 .containsEntry(
                         "classificationProfileSha256",
-                        "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d")
+                        "8ba145c16b484d910a58755598552bf97107880b1dfef0a01d0825f941818b01")
                 .containsEntry("adjudicationModel", "gpt-5.6-terra")
                 .containsEntry("adjudicationReasoningEffort", "medium")
                 .containsEntry(
                         "adjudicationPromptSha256",
-                        "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505")
+                        "ac1640fbf75889a8071545ae80fca3adf25706f6b9f3e7b35a60201aa2d82d1c")
+                .containsEntry(
+                        "adjudicationPromptBundleSha256",
+                        "ac1640fbf75889a8071545ae80fca3adf25706f6b9f3e7b35a60201aa2d82d1c")
+                .containsEntry(
+                        "imageAdjudicationPromptSha256",
+                        "14d2daa25d8b31765be1b804c061ab1bfab761a1a854f379e2d331ae82f93132")
+                .containsEntry(
+                        "textAdjudicationPromptSha256",
+                        "f1da3665f157dabc5c87bfc85105d892aec73c5696c21b47b4fc7bef8097c7f1")
                 .containsEntry(
                         "adjudicationProfileSha256",
-                        "9efc6b244bba4ab2cd0ab0747e7a9fbf8f83d4479cf1310cdbbdeb5c0e3e3eef")
+                        "c2855ff1698d969d213445a2e278557d8c2d8119a8d3ce5f01bf6d397f5f889e")
+                .containsEntry(
+                        "imageAdjudicationProfileSha256",
+                        "894d8c98443230496195e0e443b3293e0f4ec359b9a582f20d87dbb58f9fb699")
+                .containsEntry(
+                        "textAdjudicationProfileSha256",
+                        "a82b417a84d77a5179bdd876cd228c4337991c8c6b6947e0e1916b3330daa250")
                 .containsEntry("openAiTimeoutSeconds", 30L);
     }
 
@@ -276,6 +302,32 @@ class OpenAiRestClientTest {
     }
 
     @Test
+    void textPromptsDistinguishAnAntiFraudWarningFromDirectSolicitation() {
+        for (ContentType contentType : List.of(ContentType.POST, ContentType.COMMENT)) {
+            assertThat(OpenAiRestClient.promptFor(contentType))
+                    .contains(
+                            "Dostum dedi ki 'kartını göndər pulunu ikiqat edim' - bu fırıldaqdır,",
+                            "safetyDisposition=allow_none",
+                            "investment_adjacent, not off_topic",
+                            "Kartını mənə göndər,",
+                            "block_spam_scam",
+                            "financialRisk=investment_scam");
+        }
+    }
+
+    @Test
+    void textPromptsDoNotTreatAConditionalFiftyYearProjectionAsFinancialRisk() {
+        for (ContentType contentType : List.of(ContentType.POST, ContentType.COMMENT)) {
+            assertThat(OpenAiRestClient.promptFor(contentType))
+                    .contains(
+                            "Hər ay 100 dollar investisiya etsən, 50 il ərzində milyonçu ola",
+                            "financialClaim=opinion and financialRisk=none",
+                            "Hər ay 100 dollar yatır və 50 ilə mütləq milyonçu",
+                            "financialRisk=guaranteed_return");
+        }
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void adjudicationSchemaIsClosedAndCarriesRetrievedCandidateIds() throws Exception {
         OpenAiRestClient client = client("test-key");
@@ -312,7 +364,16 @@ class OpenAiRestClientTest {
                 .contains("vulgar");
         assertThat((List<String>)
                         ((Map<String, Object>) properties.get("safetyAction")).get("enum"))
-                .containsExactly("allow", "block", "unknown");
+                .containsExactly("allow", "block");
+        assertThat((List<String>)
+                        ((Map<String, Object>) properties.get("action")).get("enum"))
+                .containsExactly("allow", "block");
+        assertThat((List<String>)
+                        ((Map<String, Object>) properties.get("adjudicationMode")).get("enum"))
+                .contains("classifier_unknown_recheck");
+        assertThat((List<String>)
+                        ((Map<String, Object>) properties.get("financialRisk")).get("enum"))
+                .doesNotContain("potentially_misleading", "paid_promotion", "uncertain");
         assertThat((List<String>)
                         ((Map<String, Object>) properties.get("finalReason")).get("enum"))
                 .containsExactly(
@@ -322,8 +383,98 @@ class OpenAiRestClientTest {
                         "financial_risk",
                         "impersonation",
                         "restricted_political_entity",
-                        "off_topic",
-                        "evidence_unavailable");
+                        "off_topic");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void textAdjudicationSchemasAreBinaryClosedAndContentTypeSpecific()
+            throws Exception {
+        OpenAiRestClient client = client("test-key");
+        var method = OpenAiRestClient.class.getDeclaredMethod(
+                "textAdjudicationSchema", ContentType.class);
+        method.setAccessible(true);
+
+        Map<String, Object> post =
+                (Map<String, Object>) method.invoke(client, ContentType.POST);
+        Map<String, Object> username =
+                (Map<String, Object>) method.invoke(client, ContentType.USERNAME);
+
+        assertThat(post).containsEntry("additionalProperties", false);
+        assertThat((List<String>) post.get("required"))
+                .containsExactly(
+                        "adjudicationMode",
+                        "action",
+                        "safetyAction",
+                        "category",
+                        "domain",
+                        "financialClaim",
+                        "financialRisk",
+                        "financialPrivacy",
+                        "impersonation",
+                        "restrictedPoliticalEntity",
+                        "politicalContext",
+                        "finalReason");
+        assertThat((List<String>) username.get("required"))
+                .containsExactly(
+                        "adjudicationMode",
+                        "action",
+                        "safetyAction",
+                        "category",
+                        "financialRisk",
+                        "financialPrivacy",
+                        "impersonation",
+                        "restrictedPoliticalEntity",
+                        "finalReason");
+        Map<String, Object> postProperties =
+                (Map<String, Object>) post.get("properties");
+        Map<String, Object> usernameProperties =
+                (Map<String, Object>) username.get("properties");
+        assertThat((List<String>) ((Map<String, Object>)
+                                postProperties.get("action"))
+                        .get("enum"))
+                .containsExactly("allow", "block");
+        assertThat((List<String>) ((Map<String, Object>)
+                                postProperties.get("financialRisk"))
+                        .get("enum"))
+                .containsExactly(
+                        "none",
+                        "guaranteed_return",
+                        "investment_scam",
+                        "pump_and_dump",
+                        "market_manipulation",
+                        "phishing")
+                .doesNotContain("potentially_misleading", "paid_promotion", "uncertain");
+        assertThat(usernameProperties)
+                .doesNotContainKeys("domain", "financialClaim", "politicalContext");
+    }
+
+    @Test
+    void textAdjudicationPromptRequiresBinaryIndependentRecheck() throws Exception {
+        String prompt;
+        try (var stream = OpenAiRestClientTest.class.getResourceAsStream(
+                "/prompts/text-adjudication-v2.txt")) {
+            assertThat(stream).isNotNull();
+            prompt = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        assertThat(prompt)
+                .contains(
+                        "semantic UNKNOWN",
+                        "text_unknown_recheck",
+                        "Never return unknown, possible,",
+                        "Azerbaijani, English, Russian, and Turkish",
+                        "BLOCK only when",
+                        "Dostum dedi ki 'kartını göndər pulunu",
+                        "action=allow",
+                        "category=spam_scam",
+                        "Hər ay 100 dollar investisiya",
+                        "financialClaim=opinion and financialRisk=none",
+                        "restrictedPoliticalEntity",
+                        "ordinary lowercase Turkish verb \"yap\"",
+                        "For USERNAME",
+                        "Return only the exact")
+                .doesNotContain("candidateDisposition", "candidateIds");
     }
 
     @Test
@@ -398,6 +549,74 @@ class OpenAiRestClientTest {
     }
 
     @Test
+    void textAdjudicationContextIsOrderedBoundedAndFiltersClassifierEvidence()
+            throws Exception {
+        OpenAiRestClient client = client("test-key");
+        var method = OpenAiRestClient.class.getDeclaredMethod(
+                "textAdjudicationContext",
+                ContentType.class,
+                String.class,
+                String.class,
+                String.class,
+                String.class,
+                Map.class);
+        method.setAccessible(true);
+        Map<String, Object> classifier = new java.util.HashMap<>();
+        classifier.put("status", "ok");
+        classifier.put("safetyAction", "unknown");
+        classifier.put("category", "threat");
+        classifier.put("domain", "uncertain");
+        classifier.put("financialClaim", "none");
+        classifier.put("financialRisk", "none");
+        classifier.put("financialPrivacy", "none");
+        classifier.put("impersonation", "none");
+        classifier.put("restrictedPoliticalEntity", "none");
+        classifier.put("politicalContext", "none");
+        classifier.put("model", "gpt-5.4-mini");
+        classifier.put("attackerField", "must-not-propagate");
+
+        String context = (String) method.invoke(
+                client,
+                ContentType.COMMENT,
+                "c".repeat(21_000),
+                "Parent",
+                "author",
+                "quote",
+                classifier);
+        JsonNode parsed = new ObjectMapper().readTree(
+                context.substring(context.indexOf('\n') + 1));
+
+        assertThat(parsed.fieldNames())
+                .toIterable()
+                .containsExactly(
+                        "requiredAdjudicationMode",
+                        "contentType",
+                        "currentText",
+                        "parentPostText",
+                        "authorUsername",
+                        "quotedText",
+                        "proposedClassifierSignal");
+        assertThat(parsed.path("requiredAdjudicationMode").asText())
+                .isEqualTo("text_unknown_recheck");
+        assertThat(parsed.path("currentText").asText()).hasSize(20_000);
+        assertThat(parsed.path("proposedClassifierSignal").fieldNames())
+                .toIterable()
+                .containsExactly(
+                        "status",
+                        "safetyAction",
+                        "category",
+                        "domain",
+                        "financialClaim",
+                        "financialRisk",
+                        "financialPrivacy",
+                        "impersonation",
+                        "restrictedPoliticalEntity",
+                        "politicalContext",
+                        "model");
+        assertThat(parsed.toString()).doesNotContain("attackerField");
+    }
+
+    @Test
     void classificationContextPreservesOcrSeparatelyFromAMaximumCaption()
             throws Exception {
         OpenAiRestClient client = client("test-key");
@@ -449,10 +668,11 @@ class OpenAiRestClientTest {
     }
 
     @Test
-    void imageClassificationPromptTreatsOcrReliabilityAsConfidenceMetadata() throws Exception {
+    void imageClassificationPromptBindsTheGovernedRevealingSwimwearAttireRule()
+            throws Exception {
         String prompt;
         try (var stream = OpenAiRestClientTest.class.getResourceAsStream(
-                "/prompts/image-classification-context-v1.txt")) {
+                "/prompts/image-classification-context-v2.txt")) {
             assertThat(stream).isNotNull();
             prompt = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
         }
@@ -462,30 +682,67 @@ class OpenAiRestClientTest {
                         "untrusted machine extraction",
                         "ocrConfidenceAccepted",
                         "ocrTruncated",
-                        "never erase a sensitive financial/privacy exposure");
+                        "never erase a sensitive financial/privacy exposure",
+                        "governed image-only attire rule",
+                        "photo, illustration, or video frame",
+                        "safetyDisposition=block_sexual",
+                        "beach, pool",
+                        "celebrity, editorial, advertising",
+                        "nonsexual-pose context",
+                        "perceived age alone",
+                        "apparel product shown without a wearer",
+                        "wetsuit, rash guard, board shorts",
+                        "ordinary non-revealing swimwear",
+                        "too tiny, occluded",
+                        "safetyDisposition=unknown_sexual");
+        assertThat(OpenAiRestClient.promptFor(ContentType.POST))
+                .doesNotContain("governed image-only attire rule", "block_sexual");
     }
 
     @Test
-    void imageAdjudicationPromptDefinesRestrictedEntityPolicyAndFalsePositives()
+    void imageAdjudicationV7RequiresBinaryOutcomesAndBindsGovernedRules()
             throws Exception {
         String prompt;
         try (var stream = OpenAiRestClientTest.class.getResourceAsStream(
-                "/prompts/image-adjudication-v5.txt")) {
+                "/prompts/image-adjudication-v7.txt")) {
             assertThat(stream).isNotNull();
             prompt = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
         }
 
         assertThat(prompt).contains(
-                "restrictedPoliticalEntity is none, president, minister, yap, multiple, or",
-                "national/state president or presidency",
-                "minister in that governmental capacity",
+                "successful answer must resolve the current content to exactly allow or block",
+                "classifier_unknown_recheck",
+                "Never return unknown, possible, uncertain, potentially_misleading",
+                "restrictedPoliticalEntity is none, president, minister, yap, or multiple",
+                "national/state president or",
+                "government minister in that capacity",
                 "Azerbaijan's YAP / New",
                 "Azerbaijan Party",
                 "ordinary lowercase Turkish",
                 "verb \"yap\"",
-                "without relying on a list",
-                "of current officeholder names",
-                "restricted_political_entity");
+                "restricted_political_entity",
+                "image-only revealing-swimwear attire rule",
+                "photo, illustration",
+                "video frame",
+                "celebrity, editorial",
+                "advertising, and nonsexual-pose",
+                "not an assertion of sexual intent",
+                "infer sexual_minors from swimwear or perceived age alone",
+                "apparel shown without a wearer",
+                "wetsuit",
+                "rash guard",
+                "board shorts",
+                "ordinary non-revealing swimwear",
+                "safetyAction=block and category=sexual",
+                "too tiny, occluded, or",
+                "do not manufacture a",
+                "financialClaim=opinion and financialRisk=none",
+                "financialRisk=guaranteed_return");
+
+        try (var preserved = OpenAiRestClientTest.class.getResourceAsStream(
+                "/prompts/image-adjudication-v6.txt")) {
+            assertThat(preserved).isNotNull();
+        }
     }
 
     @Test
@@ -537,6 +794,13 @@ class OpenAiRestClientTest {
         Map<String, Object> adjudicationPayload =
                 (Map<String, Object>) adjudicationMethod.invoke(client, input);
 
+        var textAdjudicationMethod = OpenAiRestClient.class.getDeclaredMethod(
+                "textAdjudicationPayload", ContentType.class, List.class);
+        textAdjudicationMethod.setAccessible(true);
+        Map<String, Object> textAdjudicationPayload =
+                (Map<String, Object>) textAdjudicationMethod.invoke(
+                        client, ContentType.COMMENT, input);
+
         assertStrictSchemaPayload(
                 classificationPayload, "content_analysis", input);
         assertThat(classificationPayload).doesNotContainKey("reasoning");
@@ -552,6 +816,15 @@ class OpenAiRestClientTest {
                 .doesNotContainKey("prompt_cache_retention");
         assertThat(adjudicationPayload.get("prompt_cache_key"))
                 .isNotEqualTo(classificationPayload.get("prompt_cache_key"));
+        assertStrictSchemaPayload(
+                textAdjudicationPayload, "text_semantic_adjudication", input);
+        assertThat(textAdjudicationPayload)
+                .containsEntry("model", "gpt-5.6-terra")
+                .containsEntry("reasoning", Map.of("effort", "medium"))
+                .containsEntry("max_output_tokens", 600)
+                .containsKey("prompt_cache_key");
+        assertThat(textAdjudicationPayload.get("prompt_cache_key"))
+                .isNotEqualTo(adjudicationPayload.get("prompt_cache_key"));
     }
 
     @Test
@@ -774,6 +1047,20 @@ class OpenAiRestClientTest {
                 .containsEntry("safetyAction", "block");
         assertThat(parseStructuredDecision(
                         valid.replace(
+                                "\"safetyDisposition\":\"allow_none\"",
+                                "\"safetyDisposition\":\"block_sexual\""),
+                        ContentType.POST))
+                .containsEntry("category", "sexual")
+                .containsEntry("safetyAction", "block");
+        assertThat(parseStructuredDecision(
+                        valid.replace(
+                                "\"safetyDisposition\":\"allow_none\"",
+                                "\"safetyDisposition\":\"unknown_sexual\""),
+                        ContentType.POST))
+                .containsEntry("category", "sexual")
+                .containsEntry("safetyAction", "unknown");
+        assertThat(parseStructuredDecision(
+                        valid.replace(
                                 "\"restrictedPoliticalEntity\":\"none\"",
                                 "\"restrictedPoliticalEntity\":\"president\""),
                         ContentType.POST))
@@ -871,6 +1158,19 @@ class OpenAiRestClientTest {
                 "candidateIds":["reference-1"]}
                 """;
         assertThat(parseAdjudication(vulgarBlock).category()).isEqualTo("vulgar");
+        String revealingSwimwearBlock = vulgarBlock
+                .replace("\"category\":\"vulgar\"", "\"category\":\"sexual\"")
+                .replace("\"evidenceBasis\":\"current_text\"", "\"evidenceBasis\":\"current_visual\"");
+        assertThat(parseAdjudication(revealingSwimwearBlock))
+                .satisfies(parsed -> {
+                    assertThat(parsed.action()).isEqualTo("block");
+                    assertThat(parsed.safetyAction()).isEqualTo("block");
+                    assertThat(parsed.category()).isEqualTo("sexual");
+                    assertThat(parsed.finalReason()).isEqualTo("safety");
+                    assertThat(parsed.candidateDisposition()).isEqualTo("confirmed");
+                    assertThat(parsed.evidenceBasis()).isEqualTo("current_visual");
+                    assertThat(parsed.reasonCode()).isEqualTo("current_policy_violation");
+                });
         String politicalBlock = valid
                 .replace("\"action\":\"allow\"", "\"action\":\"block\"")
                 .replace(
@@ -905,6 +1205,54 @@ class OpenAiRestClientTest {
             assertThatThrownBy(() -> parseAdjudication(malformed))
                     .isInstanceOf(OpenAiRestClient.OpenAiResponseException.class);
         }
+    }
+
+    @Test
+    void textAdjudicationParserAcceptsOnlyBinaryCoherentContentTypeContract()
+            throws Exception {
+        String postAllow = """
+                {"adjudicationMode":"text_unknown_recheck","action":"allow",\
+                "safetyAction":"allow","category":"none",\
+                "domain":"investment_related","financialClaim":"analysis",\
+                "financialRisk":"none","financialPrivacy":"none",\
+                "impersonation":"none","restrictedPoliticalEntity":"none",\
+                "politicalContext":"none","finalReason":"none"}
+                """;
+        assertThat(parseTextAdjudication(postAllow, ContentType.POST).action())
+                .isEqualTo("allow");
+
+        String usernameBlock = """
+                {"adjudicationMode":"text_unknown_recheck","action":"block",\
+                "safetyAction":"allow","category":"none",\
+                "financialRisk":"none","financialPrivacy":"none",\
+                "impersonation":"clear","restrictedPoliticalEntity":"none",\
+                "finalReason":"impersonation"}
+                """;
+        assertThat(parseTextAdjudication(usernameBlock, ContentType.USERNAME).action())
+                .isEqualTo("block");
+
+        assertThat(failureCode(() -> parseTextAdjudication(
+                        postAllow.replace("\"action\":\"allow\"", "\"action\":\"unknown\""),
+                        ContentType.POST)))
+                .isEqualTo(OpenAiRestClient.OpenAiFailureCode.SCHEMA_VALUE_INVALID);
+        assertThat(failureCode(() -> parseTextAdjudication(
+                        postAllow.replace(
+                                "\"financialPrivacy\":\"none\"",
+                                "\"financialPrivacy\":\"clear\""),
+                        ContentType.POST)))
+                .isEqualTo(
+                        OpenAiRestClient.OpenAiFailureCode
+                                .ADJUDICATION_CONTRACT_INCONSISTENT);
+        assertThat(failureCode(() -> parseTextAdjudication(
+                        postAllow.replace("}", ",\"candidateIds\":[]}"),
+                        ContentType.POST)))
+                .isEqualTo(OpenAiRestClient.OpenAiFailureCode.SCHEMA_FIELDS_MISMATCH);
+        assertThat(failureCode(() -> parseTextAdjudication(
+                        postAllow.replace(
+                                "\"financialRisk\":\"none\"",
+                                "\"financialRisk\":\"uncertain\""),
+                        ContentType.POST)))
+                .isEqualTo(OpenAiRestClient.OpenAiFailureCode.SCHEMA_VALUE_INVALID);
     }
 
     @Test
@@ -1045,6 +1393,22 @@ class OpenAiRestClientTest {
         try {
             return (ImageAdjudication) method.invoke(
                     client, json, Set.of("reference-1"), "candidate_recheck");
+        } catch (InvocationTargetException exception) {
+            if (exception.getCause() instanceof RuntimeException runtimeException) {
+                throw runtimeException;
+            }
+            throw exception;
+        }
+    }
+
+    private TextAdjudication parseTextAdjudication(
+            String json, ContentType contentType) throws Exception {
+        OpenAiRestClient client = client("test-key");
+        var method = OpenAiRestClient.class.getDeclaredMethod(
+                "parseTextAdjudication", String.class, ContentType.class);
+        method.setAccessible(true);
+        try {
+            return (TextAdjudication) method.invoke(client, json, contentType);
         } catch (InvocationTargetException exception) {
             if (exception.getCause() instanceof RuntimeException runtimeException) {
                 throw runtimeException;

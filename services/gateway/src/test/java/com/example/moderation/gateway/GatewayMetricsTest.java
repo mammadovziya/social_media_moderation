@@ -120,8 +120,48 @@ class GatewayMetricsTest {
 
     private static Map<String, Object> successfulAi() {
         return Map.of(
-                "moderation", Map.of("status", "ok"),
-                "classification", Map.of("status", "ok"),
+                "moderation", moderationEvidence(),
+                "classification",
+                Map.ofEntries(
+                        Map.entry("status", "ok"),
+                        Map.entry("model", "gpt-5.4-mini"),
+                        Map.entry("safetyAction", "allow"),
+                        Map.entry("category", "none"),
+                        Map.entry("domain", "investment_related"),
+                        Map.entry("financialClaim", "none"),
+                        Map.entry("financialRisk", "none"),
+                        Map.entry("financialPrivacy", "none"),
+                        Map.entry("impersonation", "none"),
+                        Map.entry("politicalContext", "none"),
+                        Map.entry("restrictedPoliticalEntity", "none")),
                 "adjudication", Map.of("status", "not_required"));
+    }
+
+    private static Map<String, Object> moderationEvidence() {
+        Map<String, Boolean> categories = new java.util.LinkedHashMap<>();
+        Map<String, Double> scores = new java.util.LinkedHashMap<>();
+        for (String category : List.of(
+                "hate",
+                "hate/threatening",
+                "harassment",
+                "harassment/threatening",
+                "illicit",
+                "illicit/violent",
+                "self-harm",
+                "self-harm/instructions",
+                "self-harm/intent",
+                "sexual",
+                "sexual/minors",
+                "violence",
+                "violence/graphic")) {
+            categories.put(category, false);
+            scores.put(category, 0.0);
+        }
+        return Map.of(
+                "status", "ok",
+                "model", "omni-moderation-2024-09-26",
+                "flagged", false,
+                "categories", Map.copyOf(categories),
+                "categoryScores", Map.copyOf(scores));
     }
 }

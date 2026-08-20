@@ -21,9 +21,13 @@ import org.springframework.stereotype.Service;
 public class AiAnalysisService {
     private static final Logger log = LoggerFactory.getLogger(AiAnalysisService.class);
     static final String IMAGE_ADJUDICATION_INVOCATION_POLICY_VERSION =
-            "image-adjudication-invocation-v5";
+            "image-adjudication-invocation-v6";
     private static final String IMAGE_ADJUDICATION_PROMPT_VERSION =
-            "image-adjudication-v5";
+            "image-adjudication-v7";
+    static final String TEXT_ADJUDICATION_PROMPT_VERSION =
+            "text-adjudication-v3";
+    static final String ADJUDICATION_PROMPT_BUNDLE_VERSION =
+            "adjudication-prompts-v4";
     private static final Set<String> DECISIVE_FINANCIAL_RISKS = Set.of(
             "guaranteed_return",
             "investment_scam",
@@ -32,6 +36,45 @@ public class AiAnalysisService {
             "phishing");
     private static final Set<String> RESTRICTED_POLITICAL_ENTITY_SIGNALS = Set.of(
             "president", "minister", "yap", "multiple", "possible");
+    private static final Set<String> SAFETY_ACTIONS = Set.of("allow", "block", "unknown");
+    private static final Set<String> SAFETY_CATEGORIES = Set.of(
+            "none",
+            "harassment",
+            "hate",
+            "threat",
+            "self_harm",
+            "sexual",
+            "sexual_minors",
+            "graphic_violence",
+            "violence",
+            "illicit",
+            "spam_scam",
+            "vulgar",
+            "other");
+    private static final Set<String> DOMAIN_VALUES = Set.of(
+            "investment_related", "investment_adjacent", "off_topic", "uncertain");
+    private static final Set<String> FINANCIAL_CLAIM_VALUES = Set.of(
+            "none", "opinion", "analysis", "factual_claim", "uncertain");
+    private static final Set<String> FINANCIAL_RISK_VALUES = Set.of(
+            "none",
+            "potentially_misleading",
+            "guaranteed_return",
+            "investment_scam",
+            "pump_and_dump",
+            "market_manipulation",
+            "phishing",
+            "paid_promotion",
+            "uncertain");
+    private static final Set<String> UNCERTAIN_FINANCIAL_RISKS = Set.of(
+            "potentially_misleading", "paid_promotion", "uncertain");
+    private static final Set<String> FINANCIAL_PRIVACY_VALUES = Set.of(
+            "none", "possible", "clear");
+    private static final Set<String> IMPERSONATION_VALUES = Set.of(
+            "none", "possible", "clear");
+    private static final Set<String> RESTRICTED_POLITICAL_ENTITY_VALUES = Set.of(
+            "none", "president", "minister", "yap", "multiple", "possible");
+    private static final Set<String> POLITICAL_CONTEXT_VALUES = Set.of(
+            "none", "investment_relevant", "general_politics", "uncertain");
 
     private final AiProvider provider;
     private final AiProperties properties;
@@ -64,6 +107,7 @@ public class AiAnalysisService {
                 parentPostText,
                 authorUsername,
                 quotedText,
+                false,
                 AiRequestDeadline.NONE);
     }
 
@@ -73,6 +117,7 @@ public class AiAnalysisService {
             String parentPostText,
             String authorUsername,
             String quotedText,
+            boolean requiresAdjudication,
             long deadlineEpochMillis) {
         CompletableFuture<Map<String, Object>> moderation =
                 capture(
@@ -89,7 +134,44 @@ public class AiAnalysisService {
                                 parentPostText,
                                 authorUsername,
                                 quotedText));
-        return signals(moderation.join(), classification.join());
+        Map<String, Object> moderationSignal = moderation.join();
+        Map<String, Object> classificationSignal = classification.join();
+        boolean baseSignalsReady = "ok".equals(moderationSignal.get("status"))
+                && "ok".equals(classificationSignal.get("status"));
+        boolean hardModerationBlock = "ok".equals(moderationSignal.get("status"))
+                && Boolean.TRUE.equals(moderationSignal.get("flagged"));
+        TextFirstPassOutcome firstPass = baseSignalsReady
+                ? textFirstPassOutcome(contentType, classificationSignal)
+                : TextFirstPassOutcome.ERROR;
+        // A confident first pass still adjudicates when the caller reports uncertainty the
+        // classifier cannot observe, such as a protected-name near-miss on a username.
+        boolean shouldAdjudicate = baseSignalsReady
+                && !hardModerationBlock
+                && (firstPass == TextFirstPassOutcome.UNKNOWN || requiresAdjudication);
+        Map<String, Object> adjudication = shouldAdjudicate
+                ? capture(
+                                "text_adjudication",
+                                deadlineEpochMillis,
+                                () -> provider.adjudicateText(
+                                        contentType,
+                                        text,
+                                        parentPostText,
+                                        authorUsername,
+                                        quotedText,
+                                        classificationSignal))
+                        .thenApply(signal -> withTextAdjudicationMetadata(
+                                contentType, signal))
+                        .join()
+                : withTextAdjudicationMetadata(
+                        contentType,
+                        stageStatus(
+                                !baseSignalsReady
+                                                || firstPass == TextFirstPassOutcome.ERROR
+                                        ? "error"
+                                        : "not_required",
+                                moderationSignal,
+                                classificationSignal));
+        return signals(moderationSignal, classificationSignal, adjudication);
     }
 
     public Map<String, Object> analyzeImage(
@@ -183,15 +265,16 @@ public class AiAnalysisService {
                                         requiresAdjudication))
                         .thenApply(this::withAdjudicationMetadata)
                         .join()
-                : withAdjudicationMetadata(Map.of(
-                        "status",
+                : withAdjudicationMetadata(stageStatus(
                         adjudicationStatus(
                                 baseSignalsReady,
                                 hardModerationBlock,
                                 terminalOffTopicBlock,
                                 requiresAdjudication,
                                 classifierPolicyTrigger,
-                                adjudicationAllowed)));
+                                adjudicationAllowed),
+                        moderationSignal,
+                        classificationSignal));
         return signals(moderationSignal, classificationSignal, adjudication);
     }
 
@@ -221,13 +304,98 @@ public class AiAnalysisService {
         if (!"ok".equals(classification.get("status"))) {
             return false;
         }
-        return "block".equals(classification.get("safetyAction"))
+        return classifierRequiresUnknownAdjudication(classification)
+                || "block".equals(classification.get("safetyAction"))
                 || DECISIVE_FINANCIAL_RISKS.contains(
                         String.valueOf(classification.get("financialRisk")))
                 || "clear".equals(classification.get("financialPrivacy"))
                 || "clear".equals(classification.get("impersonation"))
                 || RESTRICTED_POLITICAL_ENTITY_SIGNALS.contains(
                         String.valueOf(classification.get("restrictedPoliticalEntity")));
+    }
+
+    static boolean classifierRequiresUnknownAdjudication(
+            Map<String, Object> classification) {
+        return textFirstPassOutcome(ContentType.POST, classification)
+                == TextFirstPassOutcome.UNKNOWN;
+    }
+
+    static boolean classifierRequiresTextAdjudication(
+            ContentType contentType, Map<String, Object> classification) {
+        return textFirstPassOutcome(contentType, classification)
+                == TextFirstPassOutcome.UNKNOWN;
+    }
+
+    private static TextFirstPassOutcome textFirstPassOutcome(
+            ContentType contentType, Map<String, Object> classification) {
+        if (!"ok".equals(classification.get("status"))) {
+            return TextFirstPassOutcome.ERROR;
+        }
+        String safetyAction = textValue(classification, "safetyAction");
+        String category = textValue(classification, "category");
+        String domain = textValue(classification, "domain");
+        String financialClaim = textValue(classification, "financialClaim");
+        String financialRisk = textValue(classification, "financialRisk");
+        String financialPrivacy = textValue(classification, "financialPrivacy");
+        String impersonation = textValue(classification, "impersonation");
+        String restrictedPoliticalEntity =
+                textValue(classification, "restrictedPoliticalEntity");
+        String politicalContext = textValue(classification, "politicalContext");
+        boolean safetyValid = allowed(SAFETY_ACTIONS, safetyAction)
+                && allowed(SAFETY_CATEGORIES, category)
+                && switch (safetyAction) {
+                    case "allow" -> "none".equals(category);
+                    case "block", "unknown" -> !"none".equals(category);
+                    default -> false;
+                };
+        boolean contentFieldsValid = contentType == ContentType.USERNAME
+                ? !classification.containsKey("domain")
+                        && !classification.containsKey("financialClaim")
+                        && !classification.containsKey("politicalContext")
+                : allowed(DOMAIN_VALUES, domain)
+                        && allowed(FINANCIAL_CLAIM_VALUES, financialClaim)
+                        && allowed(POLITICAL_CONTEXT_VALUES, politicalContext);
+        if (!safetyValid
+                || !contentFieldsValid
+                || !allowed(FINANCIAL_RISK_VALUES, financialRisk)
+                || !allowed(FINANCIAL_PRIVACY_VALUES, financialPrivacy)
+                || !allowed(IMPERSONATION_VALUES, impersonation)
+                || !allowed(
+                        RESTRICTED_POLITICAL_ENTITY_VALUES,
+                        restrictedPoliticalEntity)) {
+            return TextFirstPassOutcome.ERROR;
+        }
+        if ("block".equals(safetyAction)
+                || "clear".equals(financialPrivacy)
+                || DECISIVE_FINANCIAL_RISKS.contains(financialRisk)
+                || "clear".equals(impersonation)
+                || Set.of("president", "minister", "yap", "multiple")
+                        .contains(restrictedPoliticalEntity)) {
+            return TextFirstPassOutcome.BLOCK;
+        }
+        if ("possible".equals(restrictedPoliticalEntity)) {
+            return TextFirstPassOutcome.UNKNOWN;
+        }
+        if (contentType != ContentType.USERNAME && "off_topic".equals(domain)) {
+            return TextFirstPassOutcome.BLOCK;
+        }
+        if ("unknown".equals(safetyAction)
+                || "possible".equals(financialPrivacy)
+                || UNCERTAIN_FINANCIAL_RISKS.contains(financialRisk)
+                || "possible".equals(impersonation)
+                || (contentType != ContentType.USERNAME && "uncertain".equals(domain))) {
+            return TextFirstPassOutcome.UNKNOWN;
+        }
+        return TextFirstPassOutcome.ALLOW;
+    }
+
+    private static boolean allowed(Set<String> values, String value) {
+        return value != null && values.contains(value);
+    }
+
+    private static String textValue(Map<String, Object> source, String key) {
+        Object value = source.get(key);
+        return value instanceof String text && !text.isBlank() ? text : null;
     }
 
     private Map<String, Object> withAdjudicationMetadata(Map<String, Object> signal) {
@@ -251,6 +419,68 @@ public class AiAnalysisService {
             enriched.putIfAbsent("candidateDisposition", "unavailable");
         }
         return Map.copyOf(enriched);
+    }
+
+    private Map<String, Object> withTextAdjudicationMetadata(
+            ContentType contentType, Map<String, Object> signal) {
+        Map<String, Object> details = provider.details();
+        Map<String, Object> enriched = new LinkedHashMap<>(signal);
+        enriched.putIfAbsent(
+                "model", details.getOrDefault("adjudicationModel", "unavailable"));
+        enriched.put("promptVersion", TEXT_ADJUDICATION_PROMPT_VERSION);
+        String status = String.valueOf(enriched.get("status"));
+        if ("not_required".equals(status)) {
+            enriched.put("adjudicationMode", "not_required");
+            enriched.put("action", "not_required");
+            return Map.copyOf(enriched);
+        }
+        if ("error".equals(status)) {
+            enriched.put("adjudicationMode", "error");
+            enriched.put("action", "error");
+            return Map.copyOf(enriched);
+        }
+        if (!"ok".equals(status)) {
+            return textAdjudicationContractError(enriched, details);
+        }
+        try {
+            TextAdjudication parsed = TextAdjudication.fromMap(enriched);
+            parsed.validate(contentType);
+            if (!(enriched.get("model") instanceof String model) || model.isBlank()) {
+                throw new IllegalArgumentException("missing adjudication model");
+            }
+            if (!(enriched.get("usage") instanceof Map<?, ?>)) {
+                throw new IllegalArgumentException("missing adjudication usage");
+            }
+            enriched.putAll(parsed.asMap(contentType));
+            return Map.copyOf(enriched);
+        } catch (RuntimeException exception) {
+            return textAdjudicationContractError(enriched, details);
+        }
+    }
+
+    private Map<String, Object> textAdjudicationContractError(
+            Map<String, Object> signal, Map<String, Object> details) {
+        Map<String, Object> failed = new LinkedHashMap<>();
+        failed.put("status", "error");
+        failed.put("provider", provider.name());
+        failed.put("error", "provider_response_invalid");
+        failed.put(
+                "failureCode",
+                OpenAiRestClient.OpenAiFailureCode.ADJUDICATION_CONTRACT_INCONSISTENT
+                        .name());
+        failed.put(
+                "failureKind",
+                OpenAiRestClient.OpenAiFailureKind.CONTRACT_INVALID.name());
+        Object model = signal.getOrDefault(
+                "model", details.getOrDefault("adjudicationModel", "unavailable"));
+        failed.put("model", model);
+        if (signal.get("usage") instanceof Map<?, ?> usage) {
+            failed.put("usage", usage);
+        }
+        failed.put("promptVersion", TEXT_ADJUDICATION_PROMPT_VERSION);
+        failed.put("adjudicationMode", "error");
+        failed.put("action", "error");
+        return Map.copyOf(failed);
     }
 
     private Map<String, Object> signals(
@@ -285,11 +515,22 @@ public class AiAnalysisService {
         copyConfigurationValue(details, configuration, "adjudicationModel");
         copyConfigurationValue(details, configuration, "adjudicationReasoningEffort");
         copyConfigurationValue(details, configuration, "adjudicationPromptSha256");
+        copyConfigurationValue(
+                details, configuration, "adjudicationPromptBundleSha256");
+        copyConfigurationValue(
+                details, configuration, "imageAdjudicationPromptSha256");
+        copyConfigurationValue(
+                details, configuration, "textAdjudicationPromptSha256");
         copyConfigurationValue(details, configuration, "adjudicationProfileSha256");
+        copyConfigurationValue(
+                details, configuration, "imageAdjudicationProfileSha256");
+        copyConfigurationValue(
+                details, configuration, "textAdjudicationProfileSha256");
         copyConfigurationNumber(details, configuration, "openAiTimeoutSeconds");
         configuration.put("maxImageBytes", properties.maxImageBytes());
         configuration.put("maxImageRequestBytes", properties.maxImageRequestBytes());
-        configuration.put("adjudicationPromptVersion", IMAGE_ADJUDICATION_PROMPT_VERSION);
+        configuration.put(
+                "adjudicationPromptVersion", ADJUDICATION_PROMPT_BUNDLE_VERSION);
         return Map.copyOf(configuration);
     }
 
@@ -322,7 +563,16 @@ public class AiAnalysisService {
                     long started = System.nanoTime();
                     String outcome = "success";
                     try {
-                        return AiRequestDeadline.call(deadlineEpochMillis, operation);
+                        Map<String, Object> signal =
+                                AiRequestDeadline.call(deadlineEpochMillis, operation);
+                        if (signal == null) {
+                            throw new OpenAiRestClient.OpenAiResponseException(
+                                    "provider returned no signal");
+                        }
+                        if ("error".equals(signal.get("status"))) {
+                            outcome = "error";
+                        }
+                        return withSafeFailureKind(signal);
                     } catch (RuntimeException exception) {
                         outcome = "error";
                         log.error(
@@ -342,6 +592,7 @@ public class AiAnalysisService {
                                             ? "provider_request_failed"
                                             : "provider_response_invalid");
                             failed.put("failureCode", openAiException.failureCode().name());
+                            failed.put("failureKind", openAiException.failureKind().name());
                             if (!openAiException.usage().isEmpty()) {
                                 failed.put("model", openAiException.responseModel());
                                 failed.put("usage", openAiException.usage());
@@ -354,12 +605,63 @@ public class AiAnalysisService {
                                 "error", "provider_request_failed",
                                 "failureCode",
                                 OpenAiRestClient.OpenAiFailureCode.PROVIDER_RESPONSE_INVALID
-                                        .name());
+                                        .name(),
+                                "failureKind",
+                                OpenAiRestClient.OpenAiFailureKind.UNAVAILABLE.name());
                     } finally {
                         recordStage(name, outcome, System.nanoTime() - started);
                     }
                 },
                 executor);
+    }
+
+    private static Map<String, Object> withSafeFailureKind(
+            Map<String, Object> signal) {
+        if (!"error".equals(signal.get("status"))) {
+            return signal;
+        }
+        Object existing = signal.get("failureKind");
+        if (existing instanceof String value) {
+            try {
+                OpenAiRestClient.OpenAiFailureKind.valueOf(value);
+                return signal;
+            } catch (IllegalArgumentException ignored) {
+                // Replace ungoverned values with the safe contract-error classification.
+            }
+        }
+        Map<String, Object> normalized = new LinkedHashMap<>(signal);
+        normalized.put(
+                "failureKind",
+                OpenAiRestClient.OpenAiFailureKind.CONTRACT_INVALID.name());
+        return Map.copyOf(normalized);
+    }
+
+    @SafeVarargs
+    private static Map<String, Object> stageStatus(
+            String status, Map<String, Object>... dependencies) {
+        if (!"error".equals(status)) {
+            return Map.of("status", status);
+        }
+        return Map.of(
+                "status", "error",
+                "failureKind", dependentFailureKind(dependencies));
+    }
+
+    @SafeVarargs
+    private static String dependentFailureKind(
+            Map<String, Object>... dependencies) {
+        for (OpenAiRestClient.OpenAiFailureKind preferred : java.util.List.of(
+                OpenAiRestClient.OpenAiFailureKind.TIMEOUT,
+                OpenAiRestClient.OpenAiFailureKind.RATE_LIMITED,
+                OpenAiRestClient.OpenAiFailureKind.UNAVAILABLE,
+                OpenAiRestClient.OpenAiFailureKind.CONTRACT_INVALID)) {
+            for (Map<String, Object> dependency : dependencies) {
+                if (preferred.name().equals(dependency.get("failureKind"))) {
+                    return preferred.name();
+                }
+            }
+        }
+        return OpenAiRestClient.OpenAiFailureKind.CONTRACT_INVALID.name();
     }
 
     private void recordStage(String stage, String outcome, long nanos) {
@@ -376,5 +678,12 @@ public class AiAnalysisService {
     @PreDestroy
     public void close() {
         executor.shutdownNow();
+    }
+
+    private enum TextFirstPassOutcome {
+        ALLOW,
+        BLOCK,
+        UNKNOWN,
+        ERROR
     }
 }

@@ -10,4 +10,15 @@ public record TextAnalysisRequest(
         @NotBlank @Size(max = 20_000) String text,
         @Size(max = 20_000) String parentPostText,
         @Size(max = 256) String authorUsername,
-        @Size(max = 20_000) String quotedText) {}
+        @Size(max = 20_000) String quotedText,
+        /**
+         * Requests adjudication even when the first pass is confident. A registry near-miss is
+         * uncertainty the classifier cannot see, so the caller escalates it explicitly.
+         */
+        Boolean requiresAdjudication) {
+
+    /** Absent means the caller did not request forced adjudication. */
+    public boolean adjudicationRequested() {
+        return Boolean.TRUE.equals(requiresAdjudication);
+    }
+}

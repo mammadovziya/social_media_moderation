@@ -2,6 +2,7 @@ package com.example.moderation.gateway;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
@@ -11,6 +12,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -46,6 +48,11 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.HttpServerErrorException;
+import org.springframework.web.client.RestClientResponseException;
 import org.springframework.web.server.ResponseStatusException;
 
 class ModerationControllerTest {
@@ -58,14 +65,15 @@ class ModerationControllerTest {
         when(clients.analyzeText("post-1", ContentType.POST, "ETF investment"))
                 .thenReturn(successfulAi("related", "not_related"));
 
+        MockHttpServletResponse servletResponse = new MockHttpServletResponse();
         ModerationResponse result = controller(clients)
                 .moderate(
                         "post-1",
                         "post",
                         "ETF investment",
                         null,
-                        null,
-                        new MockHttpServletResponse());
+                        "audit-request-1",
+                        servletResponse);
 
         assertThat(result.contentType()).isEqualTo(ContentType.POST);
         assertThat(result.decision()).isEqualTo(Decision.ALLOW);
@@ -97,6 +105,27 @@ class ModerationControllerTest {
         assertThat(keys).containsExactlyInAnyOrder("decision", "violation");
         assertThat(json.path("decision").textValue()).isEqualTo("ALLOW");
         assertThat(json.path("violation").textValue()).isEqualTo("NONE");
+
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().requestId()).isEqualTo("audit-request-1");
+        assertThat(servletResponse.getHeader("X-Request-ID"))
+                .isEqualTo(audit.getValue().requestId());
+        assertThat(audit.getValue().contentType()).isEqualTo("POST");
+        assertThat(audit.getValue().input().textLength()).isEqualTo("ETF investment".length());
+        assertThat(audit.getValue().input().inputSha256()).matches("[0-9a-f]{64}");
+        assertThat(audit.getValue().input().imagePresent()).isFalse();
+        assertThat(audit.getValue().decision().moderationPath()).isEqualTo("TEXT_AI");
+        assertThat(audit.getValue().decision().decidingLayer()).isEqualTo("CLASSIFIER");
+        assertThat(audit.getValue().decision().finalDecision()).isEqualTo("ALLOW");
+        assertThat(audit.getValue().ai().verdictSource()).isEqualTo("LIVE");
+        assertThat(audit.getValue().ai().aiConfigurationStatus()).isEqualTo("matched");
+        assertThat(audit.getValue().usage().meteredCalls()).isOne();
+        assertThat(audit.getValue().policy().decisionConfigurationDigest())
+                .isEqualTo(sha256(audit.getValue().policy().decisionConfigurationSnapshot()));
+        assertThat(mapper.writeValueAsString(audit.getValue()))
+                .doesNotContain("ETF investment");
     }
 
     @Test
@@ -132,7 +161,8 @@ class ModerationControllerTest {
         assertThat(after.safetyAction()).isEqualTo(Decision.BLOCK);
         assertThat(after.safety()).isEqualTo(Safety.VULGAR);
         assertThat(after.aiUsage().meteredCalls()).isZero();
-        verifyNoInteractions(clients);
+        verify(clients, times(2)).persistContentDecisionAudit(any());
+        verifyNoMoreInteractions(clients);
     }
 
     @Test
@@ -156,7 +186,8 @@ class ModerationControllerTest {
         assertThat(result.violation()).isEqualTo(Violation.POLITICAL_CONTENT);
         assertThat(result.reason()).isEqualTo(FinalReason.POLITICAL_CONTENT);
         assertThat(result.aiUsage().meteredCalls()).isZero();
-        verifyNoInteractions(clients);
+        verify(clients).persistContentDecisionAudit(any());
+        verifyNoMoreInteractions(clients);
     }
 
     @Test
@@ -207,7 +238,8 @@ class ModerationControllerTest {
         assertThat(result.violation()).isEqualTo(Violation.POLITICAL_CONTENT);
         assertThat(result.reason()).isEqualTo(FinalReason.POLITICAL_CONTENT);
         assertThat(result.aiUsage().meteredCalls()).isZero();
-        verifyNoInteractions(clients);
+        verify(clients).persistContentDecisionAudit(any());
+        verifyNoMoreInteractions(clients);
     }
 
     @Test
@@ -231,7 +263,8 @@ class ModerationControllerTest {
         assertThat(result.decision()).isEqualTo(Decision.BLOCK);
         assertThat(result.violation()).isEqualTo(Violation.VULGAR);
         assertThat(result.aiUsage().meteredCalls()).isZero();
-        verifyNoInteractions(clients);
+        verify(clients).persistContentDecisionAudit(any());
+        verifyNoMoreInteractions(clients);
     }
 
     @Test
@@ -263,7 +296,16 @@ class ModerationControllerTest {
         assertThat(audit.getValue().blockedTermsDigest())
                 .isEqualTo(expectedBlockedTermsDigest);
         assertThat(audit.getValue().provenanceSchemaVersion())
-                .isEqualTo("username-decision-provenance-v4");
+                .isEqualTo("username-decision-provenance-v5");
+        assertThat(audit.getValue().handleStructureVersion())
+                .isEqualTo("handle-structure-v2");
+        assertThat(audit.getValue().handleSkeletonVersion())
+                .isEqualTo("handle-skeleton-v2");
+        assertThat(audit.getValue().handleSkeletonSha256())
+                .isEqualTo(HandleSkeleton.PROFILE_SHA256);
+        assertThat(audit.getValue().adjudicationStatus()).isEqualTo("not_required");
+        assertThat(audit.getValue().usage())
+                .isEqualTo(com.example.moderation.gateway.api.AiUsage.noCalls());
         assertThat(audit.getValue().restrictedPoliticalRegistryDigest())
                 .matches("[0-9a-f]{64}")
                 .isNotEqualTo(audit.getValue().blockedTermsDigest());
@@ -294,6 +336,208 @@ class ModerationControllerTest {
         verify(clients, never()).evaluateHandle(any(), any(), any(), any());
         verify(clients, never()).analyzeText(any(), any(), any());
         verify(clients, never()).recordHandleVerdict(any(), any(), any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "picoglu,picoglu",
+        "p1coglu,p1coglu",
+        "p1c0glu,p1c0glu",
+        "p.i.c.o.g.l.u,picoglu",
+        "kopoglu,kopoglu",
+        "k0poglu,k0poglu",
+        "k0p0glu,k0p0glu",
+        "k.0.p.0.g.l.u,kopoglu",
+        "eclaf,eclaf",
+        "3cl4f,3cl4f",
+        "e.c.l.a.f,eclaf",
+        "avanak,avanak",
+        "4v4n4k,4v4n4k",
+        "a.v.a.n.a.k,avanak",
+        "qoduqsan,qoduqsan",
+        "g0dug54n,g0dug54n",
+        "q.o.d.u.q.s.a.n,qoduqsan",
+        "esseksen,esseksen",
+        "e.s.s.e.k.s.e.n,esseksen"
+    })
+    void governedShortInsultsTerminalBlockPostsAndUsernamesBeforeAiOrCache(
+            String handle, String postText) throws Exception {
+        Path blocklist = temporaryDirectory.resolve(
+                "reported-short-insults-" + handle + ".txt");
+        Files.writeString(
+                blocklist,
+                "VULGAR|piçoğlu\n"
+                        + "VULGAR|köpoğlu\n"
+                        + "VULGAR|əclaf\n"
+                        + "VULGAR|avanak\n"
+                        + "VULGAR|eşşəksən\n"
+                        + "VULGAR|qoduqsan\n",
+                StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        ModerationController controller = controller(clients, blocklist);
+
+        ModerationResponse username = controller.moderate(
+                "username-local-" + handle,
+                "username",
+                handle,
+                null,
+                null,
+                new MockHttpServletResponse());
+        ModerationResponse post = controller.moderate(
+                "post-local-" + handle,
+                "post",
+                postText,
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        for (ModerationResponse response : java.util.List.of(username, post)) {
+            assertThat(response.decision()).isEqualTo(Decision.BLOCK);
+            assertThat(response.violation()).isEqualTo(Violation.VULGAR);
+            assertThat(response.reason()).isEqualTo(FinalReason.SAFETY);
+            assertThat(response.safetyAction()).isEqualTo(Decision.BLOCK);
+            assertThat(response.safety()).isEqualTo(Safety.VULGAR);
+            assertThat(response.aiUsage().meteredCalls()).isZero();
+        }
+
+        ArgumentCaptor<UsernameDecisionAuditPayload> usernameAudit =
+                ArgumentCaptor.forClass(UsernameDecisionAuditPayload.class);
+        verify(clients).persistUsernameDecisionAudit(usernameAudit.capture());
+        assertThat(usernameAudit.getValue().decidingLayer()).isEqualTo("BLOCKED_TERM");
+        assertThat(usernameAudit.getValue().verdictSource()).isEqualTo("NOT_INVOKED");
+        assertThat(usernameAudit.getValue().adjudicationStatus()).isEqualTo("not_required");
+        assertThat(usernameAudit.getValue().usage().meteredCalls()).isZero();
+
+        ArgumentCaptor<ContentDecisionAuditPayload> contentAudit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(contentAudit.capture());
+        assertThat(contentAudit.getValue().decision().moderationPath())
+                .isEqualTo("LOCAL_POLICY");
+        assertThat(contentAudit.getValue().decision().decidingLayer())
+                .isEqualTo("LOCAL_POLICY");
+        assertThat(contentAudit.getValue().decision().localPolicyTerminal()).isTrue();
+        assertThat(contentAudit.getValue().ai().verdictSource()).isEqualTo("NOT_INVOKED");
+        assertThat(contentAudit.getValue().usage().meteredCalls()).isZero();
+
+        verify(clients, never()).evaluateHandle(any(), any(), any(), any());
+        verify(clients, never()).analyzeText(any(), any(), any());
+        verify(clients, never()).recordHandleVerdict(any(), any(), any(), any(), any());
+        verifyNoMoreInteractions(clients);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"essek", "qoduq"})
+    void bareAnimalTermsRemainClassifierOwnedAndUseTheNormalUsernameCache(
+            String bareAnimal) throws Exception {
+        Path blocklist = temporaryDirectory.resolve(
+                "contextual-animal-" + bareAnimal + ".txt");
+        Files.writeString(
+                blocklist,
+                "VULGAR|eşşəksən\nVULGAR|qoduqsan\n",
+                StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        String usernameContentId = "username-contextual-" + bareAnimal;
+        String postContentId = "post-contextual-" + bareAnimal;
+        when(clients.evaluateHandle(eq(bareAnimal), any(), any(), any()))
+                .thenReturn(cleanHandleEvidence(bareAnimal));
+        when(clients.analyzeText(usernameContentId, ContentType.USERNAME, bareAnimal))
+                .thenReturn(successfulUsernameAi());
+        when(clients.analyzeText(postContentId, ContentType.POST, bareAnimal))
+                .thenReturn(successfulAi("related", "not_related"));
+        ModerationController controller = controller(clients, blocklist);
+
+        ModerationResponse username = controller.moderate(
+                usernameContentId,
+                "username",
+                bareAnimal,
+                null,
+                null,
+                new MockHttpServletResponse());
+        ModerationResponse post = controller.moderate(
+                postContentId,
+                "post",
+                bareAnimal,
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(username.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(post.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(username.aiUsage().meteredCalls()).isOne();
+        assertThat(post.aiUsage().meteredCalls()).isOne();
+
+        verify(clients).evaluateHandle(eq(bareAnimal), any(), any(), any());
+        verify(clients).analyzeText(usernameContentId, ContentType.USERNAME, bareAnimal);
+        verify(clients).analyzeText(postContentId, ContentType.POST, bareAnimal);
+        verify(clients).recordHandleVerdict(eq(bareAnimal), any(), any(), any(), any());
+
+        ArgumentCaptor<UsernameDecisionAuditPayload> usernameAudit =
+                ArgumentCaptor.forClass(UsernameDecisionAuditPayload.class);
+        verify(clients).persistUsernameDecisionAudit(usernameAudit.capture());
+        assertThat(usernameAudit.getValue().decidingLayer()).isEqualTo("CLASSIFIER");
+        assertThat(usernameAudit.getValue().verdictSource()).isEqualTo("LIVE");
+
+        ArgumentCaptor<ContentDecisionAuditPayload> contentAudit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(contentAudit.capture());
+        assertThat(contentAudit.getValue().decision().decidingLayer())
+                .isEqualTo("CLASSIFIER");
+        assertThat(contentAudit.getValue().ai().verdictSource()).isEqualTo("LIVE");
+        verifyNoMoreInteractions(clients);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"xiyar_murad", "xlyarmurad", "badimcan_ali", "badlmcanal"})
+    void aHandleOnlyDerogatoryComponentBlocksWithoutCallingAi(String handle) throws Exception {
+        Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
+        Files.writeString(
+                blocklist,
+                "HANDLE_VULGAR|xiyar\nHANDLE_VULGAR|badımcan\n",
+                StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+
+        ModerationResponse result = controller(clients, blocklist).moderate(
+                "username-handle-only-" + handle,
+                "username",
+                handle,
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.VULGAR);
+        assertThat(result.reason()).isEqualTo(FinalReason.SAFETY);
+        assertThat(result.aiUsage().meteredCalls()).isZero();
+        verify(clients).persistUsernameDecisionAudit(any());
+        verify(clients, never()).evaluateHandle(any(), any(), any(), any());
+        verify(clients, never()).analyzeText(any(), any(), any());
+        verify(clients, never()).recordHandleVerdict(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aHandleOnlyTermDoesNotLocallyBlockOrdinaryPostText() throws Exception {
+        Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
+        Files.writeString(
+                blocklist,
+                "HANDLE_VULGAR|xiyar\nHANDLE_VULGAR|badımcan\n",
+                StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        String text = "Badımcan və xiyar salatı haqqında yazı.";
+        when(clients.analyzeText("post-vegetables", ContentType.POST, text))
+                .thenReturn(successfulAi("related", "not_related"));
+
+        ModerationResponse result = controller(clients, blocklist).moderate(
+                "post-vegetables",
+                "post",
+                text,
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.violation()).isEqualTo(Violation.NONE);
+        verify(clients).analyzeText("post-vegetables", ContentType.POST, text);
+        verify(clients).persistContentDecisionAudit(any());
     }
 
     @Test
@@ -353,6 +597,18 @@ class ModerationControllerTest {
         verify(clients).analyzeMedia(
                 any(byte[].class), eq("post.png"), eq("image/png"), eq("post-blocked"));
         verify(clients).persistImageDecisionAudit(any());
+        ArgumentCaptor<ContentDecisionAuditPayload> contentAudit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(contentAudit.capture());
+        assertThat(contentAudit.getValue().contentType()).isEqualTo("POST");
+        assertThat(contentAudit.getValue().input().imagePresent()).isTrue();
+        assertThat(contentAudit.getValue().input().imageSha256())
+                .matches("[0-9a-f]{64}");
+        assertThat(contentAudit.getValue().decision().moderationPath())
+                .isEqualTo("IMAGE_PIPELINE");
+        assertThat(contentAudit.getValue().decision().localPolicyTerminal()).isTrue();
+        assertThat(contentAudit.getValue().decision().finalDecision())
+                .isEqualTo(result.decision().name());
         verify(clients, never()).analyzeImageAi(
                 any(),
                 any(),
@@ -691,15 +947,10 @@ class ModerationControllerTest {
             throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         Map<String, Object> ai = new java.util.LinkedHashMap<>(
-                successfulAi("related", "not_related"));
-        ai.put(
-                "moderation",
-                Map.of(
-                        "status", "ok",
-                        "model", "omni-moderation-2024-09-26",
-                        "flagged", true,
-                        "categories", Map.of("hate", true),
-                        "categoryScores", Map.of("hate", 0.99)));
+                semanticTextAi(
+                        uncertainContentClassification(),
+                        textAdjudication(ContentType.POST, Map.of())));
+        ai.put("moderation", omniModeration(true, "hate", 0.99));
         when(clients.analyzeText("post-hate", ContentType.POST, "provider-flagged text"))
                 .thenReturn(Map.copyOf(ai));
 
@@ -716,6 +967,12 @@ class ModerationControllerTest {
         assertThat(result.reason()).isEqualTo(FinalReason.SAFETY);
         assertThat(result.safetyAction()).isEqualTo(Decision.BLOCK);
         assertThat(result.safety()).isEqualTo(Safety.HATE);
+        assertThat(result.domain()).isEqualTo(Domain.UNCERTAIN);
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().decision().decidingLayer())
+                .isEqualTo("PROVIDER_MODERATION");
     }
 
     @Test
@@ -737,7 +994,8 @@ class ModerationControllerTest {
         assertThat(result.safetyAction()).isNull();
         assertThat(result.financialPrivacy()).isEqualTo(FinancialPrivacy.CLEAR);
         assertThat(result.aiUsage().meteredCalls()).isZero();
-        verifyNoInteractions(clients);
+        verify(clients).persistContentDecisionAudit(any());
+        verifyNoMoreInteractions(clients);
     }
 
     @Test
@@ -817,7 +1075,7 @@ class ModerationControllerTest {
     }
 
     @Test
-    void preservesBilledUsageAndExposesErrorResultForFailedClassification()
+    void preservesBilledUsageAndAuditsBeforeRejectingFailedClassification()
             throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         Map<String, Object> ai = new java.util.LinkedHashMap<>(
@@ -832,29 +1090,237 @@ class ModerationControllerTest {
         when(clients.analyzeText("post-failed-call", ContentType.POST, "ETF investment"))
                 .thenReturn(Map.copyOf(ai));
 
-        ModerationResponse result = controller(clients).moderate(
-                "post-failed-call",
-                "post",
-                "ETF investment",
-                null,
-                null,
-                new MockHttpServletResponse());
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "post-failed-call",
+                        "post",
+                        "ETF investment",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
 
-        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
-        assertThat(result.violation()).isEqualTo(Violation.ANALYZER_ERROR);
-        assertThat(result.aiUsage().meteredCalls()).isOne();
-        assertThat(result.aiUsage().inputTokens()).isEqualTo(100L);
-        assertThat(result.aiUsage().estimatedCostUsd())
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().decision().finalDecision()).isEqualTo("UNKNOWN");
+        assertThat(audit.getValue().decision().violation()).isEqualTo("ANALYZER_ERROR");
+        assertThat(audit.getValue().usage().meteredCalls()).isOne();
+        assertThat(audit.getValue().usage().inputTokens()).isEqualTo(100L);
+        assertThat(audit.getValue().usage().estimatedCostUsd())
                 .isEqualByComparingTo("0.000320000000");
-        assertThat(result.aiUsage().usageComplete()).isTrue();
-        assertThat(result.aiUsage().costComplete()).isTrue();
-        assertThat(result.aiUsage().modelCalls()).singleElement()
+        assertThat(audit.getValue().usage().usageComplete()).isTrue();
+        assertThat(audit.getValue().usage().costComplete()).isTrue();
+        assertThat(audit.getValue().usage().modelCalls()).singleElement()
                 .satisfies(call -> {
                     assertThat(call.purpose()).isEqualTo("classification");
                     assertThat(call.resultStatus()).isEqualTo(AiCallResultStatus.ERROR);
                     assertThat(call.failureCode())
                             .isEqualTo(AiCallFailureCode.DECISION_CONTRACT_INCONSISTENT);
                 });
+    }
+
+    @Test
+    void requiredAnalyzerFailureStillThrowsWhenAnotherStageWouldBlock() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(
+                successfulAi("related", "not_related"));
+        ai.put("moderation", omniModeration(true, "hate", 0.99));
+        ai.put(
+                "classification",
+                Map.of(
+                        "status", "error",
+                        "model", "gpt-5.6-terra",
+                        "failureKind", "UNAVAILABLE"));
+        when(clients.analyzeText(
+                        "post-block-with-required-failure",
+                        ContentType.POST,
+                        "classifier block"))
+                .thenReturn(Map.copyOf(ai));
+
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "post-block-with-required-failure",
+                        "post",
+                        "classifier block",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.UNAVAILABLE);
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().decision().finalDecision()).isEqualTo("BLOCK");
+        assertThat(audit.getValue().decision().violation()).isEqualTo("HATE");
+        assertThat(audit.getValue().decision().decidingLayer())
+                .isEqualTo("PROVIDER_MODERATION");
+        assertThat(audit.getValue().ai().classificationStatus()).isEqualTo("error");
+    }
+
+    @Test
+    void aiStageTimeoutMarkerBecomesTypedTimeoutAfterAudit() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(
+                successfulAi("related", "not_related"));
+        ai.put(
+                "classification",
+                Map.of(
+                        "status", "error",
+                        "model", "gpt-5.6-terra",
+                        "failureKind", "TIMEOUT"));
+        when(clients.analyzeText("post-stage-timeout", ContentType.POST, "ETF investment"))
+                .thenReturn(Map.copyOf(ai));
+
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "post-stage-timeout",
+                        "post",
+                        "ETF investment",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind()).isEqualTo(ModerationSystemException.Kind.TIMEOUT);
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().decision().finalDecision()).isEqualTo("UNKNOWN");
+        assertThat(audit.getValue().decision().violation()).isEqualTo("ANALYZER_ERROR");
+        assertThat(audit.getValue().ai().classificationStatus()).isEqualTo("error");
+    }
+
+    @Test
+    void contradictoryAiFailureKindAndCodeReturnsInvalidResponse() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(
+                successfulAi("related", "not_related"));
+        ai.put(
+                "classification",
+                Map.of(
+                        "status", "error",
+                        "model", "gpt-5.6-terra",
+                        "failureKind", "TIMEOUT",
+                        "failureCode", "DECISION_CONTRACT_INCONSISTENT"));
+        when(clients.analyzeText(
+                        "post-contradictory-failure",
+                        ContentType.POST,
+                        "ETF investment"))
+                .thenReturn(Map.copyOf(ai));
+
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "post-contradictory-failure",
+                        "post",
+                        "ETF investment",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
+        verify(clients).persistContentDecisionAudit(any());
+    }
+
+    @Test
+    void emptyOmniModerationEvidenceReturnsInvalidResponse() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(
+                successfulAi("related", "not_related"));
+        ai.put(
+                "moderation",
+                Map.of(
+                        "status", "ok",
+                        "model", "omni-moderation-2024-09-26",
+                        "flagged", false,
+                        "categories", Map.of(),
+                        "categoryScores", Map.of()));
+        when(clients.analyzeText(
+                        "post-empty-omni", ContentType.POST, "ETF investment"))
+                .thenReturn(Map.copyOf(ai));
+
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "post-empty-omni",
+                        "post",
+                        "ETF investment",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
+        verify(clients).persistContentDecisionAudit(any());
+    }
+
+    @Test
+    void liveSuccessfulAiWithoutUsageReturnsInvalidResponse() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(
+                successfulAi("related", "not_related"));
+        Map<String, Object> classification = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(ai, "classification"));
+        classification.remove("usage");
+        ai.put("classification", Map.copyOf(classification));
+        when(clients.analyzeText(
+                        "post-missing-live-usage", ContentType.POST, "ETF investment"))
+                .thenReturn(Map.copyOf(ai));
+
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "post-missing-live-usage",
+                        "post",
+                        "ETF investment",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().decision().finalDecision()).isEqualTo("UNKNOWN");
+        assertThat(audit.getValue().usage().usageComplete()).isFalse();
+    }
+
+    @Test
+    void liveSuccessfulAiWithIncoherentUsageReturnsInvalidResponse() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(
+                successfulAi("related", "not_related"));
+        Map<String, Object> classification = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(ai, "classification"));
+        Map<String, Object> usage = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(classification, "usage"));
+        usage.put("totalTokens", 999L);
+        classification.put("usage", Map.copyOf(usage));
+        ai.put("classification", Map.copyOf(classification));
+        when(clients.analyzeText(
+                        "post-incoherent-live-usage", ContentType.POST, "ETF investment"))
+                .thenReturn(Map.copyOf(ai));
+
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "post-incoherent-live-usage",
+                        "post",
+                        "ETF investment",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
+        verify(clients).persistContentDecisionAudit(any());
     }
 
     @Test
@@ -873,18 +1339,25 @@ class ModerationControllerTest {
         when(clients.analyzeText("post-unknown-code", ContentType.POST, "ETF investment"))
                 .thenReturn(Map.copyOf(ai));
 
-        ModerationResponse result = controller(clients).moderate(
-                "post-unknown-code",
-                "post",
-                "ETF investment",
-                null,
-                null,
-                new MockHttpServletResponse());
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "post-unknown-code",
+                        "post",
+                        "ETF investment",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
 
-        assertThat(result.aiUsage().meteredCalls()).isZero();
-        assertThat(result.aiUsage().usageComplete()).isFalse();
-        assertThat(result.aiUsage().costComplete()).isFalse();
-        assertThat(result.aiUsage().modelCalls()).isEmpty();
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().usage().meteredCalls()).isZero();
+        assertThat(audit.getValue().usage().usageComplete()).isFalse();
+        assertThat(audit.getValue().usage().costComplete()).isFalse();
+        assertThat(audit.getValue().usage().modelCalls()).isEmpty();
     }
 
     @Test
@@ -919,6 +1392,17 @@ class ModerationControllerTest {
                 "What do you think about NVIDIA stock?",
                 "valueinvestor",
                 "");
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().contentType()).isEqualTo("COMMENT");
+        assertThat(audit.getValue().input().parentPostTextLength())
+                .isEqualTo("What do you think about NVIDIA stock?".length());
+        assertThat(audit.getValue().input().parentPostTextRedacted()).isFalse();
+        assertThat(audit.getValue().input().authorUsernameLength())
+                .isEqualTo("valueinvestor".length());
+        assertThat(audit.getValue().input().authorUsernameRedacted()).isFalse();
+        assertThat(audit.getValue().decision().moderationPath()).isEqualTo("TEXT_AI");
     }
 
     @Test
@@ -952,32 +1436,221 @@ class ModerationControllerTest {
     }
 
     @Test
-    void returnsIndependentFinancialRiskAndClaimSignals() throws Exception {
+    void auditsIndependentFirstPassSignalsBeforeRejectingFailedTextAdjudication()
+            throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
+        Map<String, Object> classification = new java.util.LinkedHashMap<>(
+                uncertainContentClassification());
+        classification.put("domain", "investment_related");
+        classification.put("financialClaim", "factual_claim");
+        classification.put("financialRisk", "paid_promotion");
+        classification.put("politicalContext", "none");
         when(clients.analyzeText("post-risk", ContentType.POST, "Sponsored: buy this token."))
-                .thenReturn(successfulAiWithSignals(
-                        "investment_related",
-                        "factual_claim",
-                        "paid_promotion",
-                        "none",
-                        "none",
-                        "none"));
+                .thenReturn(semanticTextAi(
+                        Map.copyOf(classification), failedTextAdjudication()));
+
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "post-risk",
+                        "post",
+                        "Sponsored: buy this token.",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().decision().finalDecision()).isEqualTo("UNKNOWN");
+        assertThat(audit.getValue().decision().violation()).isEqualTo("ANALYZER_ERROR");
+        assertThat(audit.getValue().decision().finalReason()).isEqualTo("ANALYZER_ERROR");
+        assertThat(audit.getValue().decision().safetyAction()).isEqualTo("ALLOW");
+        assertThat(audit.getValue().decision().safety()).isEqualTo("NONE");
+        assertThat(audit.getValue().decision().financialClaim())
+                .isEqualTo("FACTUAL_CLAIM");
+        assertThat(audit.getValue().decision().financialRisk())
+                .isEqualTo("PAID_PROMOTION");
+    }
+
+    @Test
+    void strongerTextAdjudicationAllowsAnUncertainPostAndAuditsItsProvenance()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        String text = "Ambiguous investment context";
+        when(clients.analyzeText("post-adjudicated", ContentType.POST, text))
+                .thenReturn(semanticTextAi(
+                        uncertainContentClassification(),
+                        textAdjudication(ContentType.POST, Map.of())));
 
         ModerationResponse result = controller(clients).moderate(
-                "post-risk",
+                "post-adjudicated",
                 "post",
-                "Sponsored: buy this token.",
+                text,
+                null,
+                "post-adjudication-request",
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.violation()).isEqualTo(Violation.NONE);
+        assertThat(result.aiUsage().meteredCalls()).isEqualTo(2);
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().decision().decidingLayer()).isEqualTo("ADJUDICATOR");
+        assertThat(audit.getValue().ai().adjudicationStatus()).isEqualTo("ok");
+        assertThat(audit.getValue().ai().actualAdjudicationModel())
+                .isEqualTo("gpt-5.6-terra");
+        assertThat(audit.getValue().usage().meteredCalls()).isEqualTo(2);
+    }
+
+    @Test
+    void successfulTextAdjudicationResolvesLocalPossiblePoliticalEvidence()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        String text = "Test Minister discussed ETF allocation";
+        when(clients.analyzeText("post-local-possible", ContentType.POST, text))
+                .thenReturn(semanticTextAi(
+                        uncertainContentClassification(),
+                        textAdjudication(ContentType.POST, Map.of())));
+
+        ModerationResponse result = controller(clients).moderate(
+                "post-local-possible",
+                "post",
+                text,
                 null,
                 null,
                 new MockHttpServletResponse());
 
-        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
-        assertThat(result.violation()).isEqualTo(Violation.FINANCIAL_RISK);
-        assertThat(result.reason()).isEqualTo(FinalReason.FINANCIAL_RISK);
-        assertThat(result.safetyAction()).isEqualTo(Decision.ALLOW);
-        assertThat(result.safety()).isEqualTo(Safety.NONE);
-        assertThat(result.financialClaim()).isEqualTo(FinancialClaim.FACTUAL_CLAIM);
-        assertThat(result.financialRisk()).isEqualTo(FinancialRisk.PAID_PROMOTION);
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.violation()).isEqualTo(Violation.NONE);
+        assertThat(result.restrictedPoliticalEntity())
+                .isEqualTo(RestrictedPoliticalEntity.NONE);
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().decision().decidingLayer()).isEqualTo("ADJUDICATOR");
+        assertThat(audit.getValue().decision().localRestrictedPoliticalEntity())
+                .isEqualTo("POSSIBLE");
+        assertThat(audit.getValue().decision().restrictedPoliticalEntity())
+                .isEqualTo("NONE");
+    }
+
+    @Test
+    void strongerTextAdjudicationBlocksAnUncertainComment() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        String text = "Ambiguous promotion";
+        when(clients.analyzeText("comment-adjudicated", ContentType.COMMENT, text))
+                .thenReturn(semanticTextAi(
+                        uncertainContentClassification(),
+                        textAdjudication(
+                                ContentType.COMMENT,
+                                Map.of(
+                                        "action", "block",
+                                        "domain", "off_topic",
+                                        "finalReason", "off_topic"))));
+
+        ModerationResponse result = controller(clients).moderate(
+                "comment-adjudicated",
+                "comment",
+                text,
+                null,
+                "comment-adjudication-request",
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.OFF_TOPIC);
+        assertThat(result.reason()).isEqualTo(FinalReason.OFF_TOPIC);
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().contentType()).isEqualTo("COMMENT");
+        assertThat(audit.getValue().decision().decidingLayer()).isEqualTo("ADJUDICATOR");
+    }
+
+    @Test
+    void failedTextAdjudicationReturnsInvalidResponseForPostsAndComments()
+            throws Exception {
+        for (ContentType type : java.util.List.of(ContentType.POST, ContentType.COMMENT)) {
+            AnalyzerClients clients = mock(AnalyzerClients.class);
+            String contentId = type.name().toLowerCase(java.util.Locale.ROOT) + "-failed-adjudication";
+            String text = "Unresolved semantics";
+            when(clients.analyzeText(contentId, type, text))
+                    .thenReturn(semanticTextAi(
+                            uncertainContentClassification(),
+                            failedTextAdjudication()));
+
+            ModerationSystemException failure = assertThrows(
+                    ModerationSystemException.class,
+                    () -> controller(clients).moderate(
+                            contentId,
+                            type.name(),
+                            text,
+                            null,
+                            null,
+                            new MockHttpServletResponse()));
+
+            assertThat(failure.kind())
+                    .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
+            ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                    ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+            verify(clients).persistContentDecisionAudit(audit.capture());
+            assertThat(audit.getValue().decision().finalDecision()).isEqualTo("UNKNOWN");
+            assertThat(audit.getValue().decision().violation())
+                    .isEqualTo("ANALYZER_ERROR");
+            assertThat(audit.getValue().decision().decidingLayer())
+                    .isEqualTo("ANALYZER_UNAVAILABLE");
+            assertThat(audit.getValue().ai().adjudicationStatus()).isEqualTo("error");
+            assertThat(audit.getValue().ai().actualAdjudicationModel())
+                    .isEqualTo("gpt-5.6-terra");
+            assertThat(audit.getValue().usage().meteredCalls()).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void cachedTextAdjudicationKeepsTheDecisionButDoesNotDoubleCountUsage()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        String text = "Uncertain but ultimately relevant";
+        when(clients.analyzeText("post-adjudication-live", ContentType.POST, text))
+                .thenReturn(semanticTextAi(
+                        uncertainContentClassification(),
+                        textAdjudication(ContentType.POST, Map.of())));
+        ModerationController controller = controller(
+                clients, properties(), new InMemoryAiWorkCoordinator());
+
+        ModerationResponse live = controller.moderate(
+                "post-adjudication-live",
+                "post",
+                text,
+                null,
+                null,
+                new MockHttpServletResponse());
+        ModerationResponse cached = controller.moderate(
+                "post-adjudication-cache",
+                "post",
+                text,
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(live.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(live.aiUsage().meteredCalls()).isEqualTo(2);
+        assertThat(cached.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(cached.aiUsage())
+                .isEqualTo(com.example.moderation.gateway.api.AiUsage.noCalls());
+        verify(clients, times(1)).analyzeText(any(), eq(ContentType.POST), eq(text));
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients, times(2)).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getAllValues())
+                .extracting(value -> value.ai().verdictSource())
+                .containsExactly("LIVE", "CACHE");
+        assertThat(audit.getAllValues())
+                .extracting(value -> value.decision().decidingLayer())
+                .containsOnly("ADJUDICATOR");
     }
 
     @Test
@@ -992,23 +1665,30 @@ class ModerationControllerTest {
         when(clients.analyzeText("post-model", ContentType.POST, "ETF investment"))
                 .thenReturn(Map.copyOf(mismatched));
 
-        ModerationResponse result = controller(clients).moderate(
-                "post-model",
-                "post",
-                "ETF investment",
-                null,
-                null,
-                new MockHttpServletResponse());
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "post-model",
+                        "post",
+                        "ETF investment",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
 
-        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
-        assertThat(result.violation()).isEqualTo(Violation.ANALYZER_ERROR);
-        assertThat(result.aiUsage().meteredCalls()).isOne();
-        assertThat(result.aiUsage().inputTokens()).isEqualTo(100L);
-        assertThat(result.aiUsage().estimatedCostUsd())
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().decision().finalDecision()).isEqualTo("UNKNOWN");
+        assertThat(audit.getValue().decision().violation()).isEqualTo("ANALYZER_ERROR");
+        assertThat(audit.getValue().usage().meteredCalls()).isOne();
+        assertThat(audit.getValue().usage().inputTokens()).isEqualTo(100L);
+        assertThat(audit.getValue().usage().estimatedCostUsd())
                 .isEqualByComparingTo("0.000320000000");
-        assertThat(result.aiUsage().usageComplete()).isTrue();
-        assertThat(result.aiUsage().costComplete()).isTrue();
-        assertThat(result.aiUsage().modelCalls()).singleElement()
+        assertThat(audit.getValue().usage().usageComplete()).isTrue();
+        assertThat(audit.getValue().usage().costComplete()).isTrue();
+        assertThat(audit.getValue().usage().modelCalls()).singleElement()
                 .satisfies(call -> {
                     assertThat(call.resultStatus()).isEqualTo(AiCallResultStatus.ERROR);
                     assertThat(call.failureCode())
@@ -1027,24 +1707,31 @@ class ModerationControllerTest {
         when(clients.analyzeText("post-two-calls", ContentType.POST, "ETF investment"))
                 .thenReturn(Map.copyOf(mismatched));
 
-        ModerationResponse result = controller(clients).moderate(
-                "post-two-calls",
-                "post",
-                "ETF investment",
-                null,
-                null,
-                new MockHttpServletResponse());
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "post-two-calls",
+                        "post",
+                        "ETF investment",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
 
-        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
-        assertThat(result.aiUsage().meteredCalls()).isEqualTo(2);
-        assertThat(result.aiUsage().inputTokens()).isEqualTo(200L);
-        assertThat(result.aiUsage().outputTokens()).isEqualTo(20L);
-        assertThat(result.aiUsage().totalTokens()).isEqualTo(220L);
-        assertThat(result.aiUsage().estimatedCostUsd())
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().decision().finalDecision()).isEqualTo("UNKNOWN");
+        assertThat(audit.getValue().usage().meteredCalls()).isEqualTo(2);
+        assertThat(audit.getValue().usage().inputTokens()).isEqualTo(200L);
+        assertThat(audit.getValue().usage().outputTokens()).isEqualTo(20L);
+        assertThat(audit.getValue().usage().totalTokens()).isEqualTo(220L);
+        assertThat(audit.getValue().usage().estimatedCostUsd())
                 .isEqualByComparingTo("0.000640000000");
-        assertThat(result.aiUsage().usageComplete()).isTrue();
-        assertThat(result.aiUsage().costComplete()).isTrue();
-        assertThat(result.aiUsage().modelCalls())
+        assertThat(audit.getValue().usage().usageComplete()).isTrue();
+        assertThat(audit.getValue().usage().costComplete()).isTrue();
+        assertThat(audit.getValue().usage().modelCalls())
                 .extracting(call -> call.failureCode())
                 .containsOnly(AiCallFailureCode.CONFIGURATION_MISMATCH);
     }
@@ -1085,19 +1772,23 @@ class ModerationControllerTest {
                         eq(true)))
                 .thenReturn(Map.copyOf(mismatched));
 
-        ModerationResponse result = controller(clients).moderate(
-                "post-profile",
-                "post",
-                "Investment update",
-                image,
-                null,
-                new MockHttpServletResponse());
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "post-profile",
+                        "post",
+                        "Investment update",
+                        image,
+                        null,
+                        new MockHttpServletResponse()));
 
-        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
-        assertThat(result.violation()).isEqualTo(Violation.ANALYZER_ERROR);
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
         ArgumentCaptor<ImageDecisionAuditPayload> audit =
                 ArgumentCaptor.forClass(ImageDecisionAuditPayload.class);
         verify(clients).persistImageDecisionAudit(audit.capture());
+        assertThat(audit.getValue().finalDecision()).isEqualTo("UNKNOWN");
+        assertThat(audit.getValue().violation()).isEqualTo("ANALYZER_ERROR");
         assertThat(audit.getValue().aiConfigurationStatus()).isEqualTo("mismatch");
         assertThat(audit.getValue().configuredClassificationModel())
                 .isEqualTo("gpt-5.6-terra");
@@ -1243,7 +1934,7 @@ class ModerationControllerTest {
                         "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                         "gpt-5.6-terra",
                         "medium",
-                        "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505",
+                        "14d2daa25d8b31765be1b804c061ab1bfab761a1a854f379e2d331ae82f93132",
                         "java-imageio-first-frame-jpeg-png-static-gif-v1@java-21.0.11+10-LTS",
                         "b".repeat(64),
                         "orb-homography-specificity-v1",
@@ -1273,7 +1964,11 @@ class ModerationControllerTest {
                         "visual.connectTimeoutMillis=500",
                         "gateway.upstreamTimeoutSeconds=30",
                         "ai.moderationProfileSha256=",
-                        "ai.adjudicationProfileSha256=")
+                        "ai.adjudicationProfileSha256=",
+                        "ai.imageAdjudicationPromptVersion="
+                                + DecisionPolicy.IMAGE_ADJUDICATION_PROMPT_VERSION,
+                        "ai.imageAdjudicationPromptSha256=",
+                        "ai.imageAdjudicationProfileSha256=")
                 .hasSizeLessThanOrEqualTo(4096);
         assertThat(audit.getValue().decisionConfigurationDigest())
                 .isEqualTo(sha256(configurationSnapshot));
@@ -1282,6 +1977,192 @@ class ModerationControllerTest {
                 .contains("moderation.profileSha256=");
         assertThat(audit.getValue().observedAiConfigurationDigest())
                 .isEqualTo(sha256(audit.getValue().observedAiConfigurationSnapshot()));
+    }
+
+    @Test
+    void confirmedRevealingSwimwearIsBlockedByTheV7ImageAdjudicatorAndFullyAudited()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        MockMultipartFile image = new MockMultipartFile(
+                "image", "beach.jpg", "image/jpeg", new byte[] {9, 8, 7});
+        when(clients.analyzeMedia(
+                        any(byte[].class),
+                        eq("beach.jpg"),
+                        eq("image/jpeg"),
+                        eq("post-revealing")))
+                .thenReturn(completeMedia(
+                        Map.of("qualityAccepted", true),
+                        Map.of("status", "no_text")));
+        when(clients.analyzeImageAi(
+                        any(byte[].class),
+                        eq("beach.jpg"),
+                        eq("image/jpeg"),
+                        eq("post-revealing"),
+                        eq(ContentType.POST),
+                        eq("Investment personality update"),
+                        eq(""),
+                        eq("no_text"),
+                        eq(false),
+                        eq(false),
+                        any(Map.class),
+                        eq(false),
+                        eq(true)))
+                .thenReturn(confirmedRevealingSwimwearAi());
+
+        ModerationResponse result = controller(clients).moderate(
+                "post-revealing",
+                "POST",
+                "Investment personality update",
+                image,
+                "revealing-request",
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.SEXUAL);
+        assertThat(result.reason()).isEqualTo(FinalReason.SAFETY);
+        assertThat(result.safetyAction()).isEqualTo(Decision.BLOCK);
+        assertThat(result.safety()).isEqualTo(com.example.moderation.gateway.api.Safety.SEXUAL);
+        assertThat(result.aiUsage().meteredCalls()).isEqualTo(2);
+
+        ArgumentCaptor<ContentDecisionAuditPayload> contentAudit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(contentAudit.capture());
+        assertThat(contentAudit.getValue().decision().decidingLayer())
+                .isEqualTo("ADJUDICATOR");
+        assertThat(contentAudit.getValue().decision().finalDecision()).isEqualTo("BLOCK");
+        assertThat(contentAudit.getValue().decision().violation()).isEqualTo("SEXUAL");
+        assertThat(contentAudit.getValue().ai().adjudicationStatus()).isEqualTo("ok");
+        assertThat(contentAudit.getValue().ai().actualAdjudicationModel())
+                .isEqualTo("gpt-5.6-terra");
+        assertThat(contentAudit.getValue().ai().configuredAdjudicationPromptVersion())
+                .isEqualTo(DecisionPolicy.IMAGE_ADJUDICATION_PROMPT_VERSION);
+
+        ArgumentCaptor<ImageDecisionAuditPayload> imageAudit =
+                ArgumentCaptor.forClass(ImageDecisionAuditPayload.class);
+        verify(clients).persistImageDecisionAudit(imageAudit.capture());
+        assertThat(imageAudit.getValue().classifierProposedBlock()).isTrue();
+        assertThat(imageAudit.getValue().adjudicationStatus()).isEqualTo("ok");
+        assertThat(imageAudit.getValue().adjudicationMode())
+                .isEqualTo("classifier_block_recheck");
+        assertThat(imageAudit.getValue().adjudicationAction()).isEqualTo("block");
+        assertThat(imageAudit.getValue().adjudicationDisposition()).isEqualTo("confirmed");
+        assertThat(imageAudit.getValue().promptVersion())
+                .isEqualTo(DecisionPolicy.IMAGE_ADJUDICATION_PROMPT_VERSION);
+        assertThat(imageAudit.getValue().configuredAdjudicationPromptVersion())
+                .isEqualTo(DecisionPolicy.IMAGE_ADJUDICATION_PROMPT_VERSION);
+    }
+
+    @Test
+    void ordinaryNonRevealingImageRemainsAllowedByTheClassifierRule() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        MockMultipartFile image = new MockMultipartFile(
+                "image", "ordinary.jpg", "image/jpeg", new byte[] {6, 5, 4});
+        when(clients.analyzeMedia(
+                        any(byte[].class),
+                        eq("ordinary.jpg"),
+                        eq("image/jpeg"),
+                        eq("post-ordinary")))
+                .thenReturn(completeMedia(
+                        Map.of("qualityAccepted", true),
+                        Map.of("status", "no_text")));
+        when(clients.analyzeImageAi(
+                        any(byte[].class),
+                        eq("ordinary.jpg"),
+                        eq("image/jpeg"),
+                        eq("post-ordinary"),
+                        eq(ContentType.POST),
+                        eq("Ordinary investment conference photo"),
+                        eq(""),
+                        eq("no_text"),
+                        eq(false),
+                        eq(false),
+                        any(Map.class),
+                        eq(false),
+                        eq(true)))
+                .thenReturn(ordinaryNonRevealingImageAi());
+
+        ModerationResponse result = controller(clients).moderate(
+                "post-ordinary",
+                "POST",
+                "Ordinary investment conference photo",
+                image,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.violation()).isEqualTo(Violation.NONE);
+        ArgumentCaptor<ContentDecisionAuditPayload> contentAudit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(contentAudit.capture());
+        assertThat(contentAudit.getValue().decision().decidingLayer())
+                .isEqualTo("CLASSIFIER");
+        ArgumentCaptor<ImageDecisionAuditPayload> imageAudit =
+                ArgumentCaptor.forClass(ImageDecisionAuditPayload.class);
+        verify(clients).persistImageDecisionAudit(imageAudit.capture());
+        assertThat(imageAudit.getValue().classifierProposedBlock()).isFalse();
+        assertThat(imageAudit.getValue().adjudicationStatus()).isEqualTo("not_required");
+        assertThat(imageAudit.getValue().adjudicationModel()).isEqualTo("not_invoked");
+    }
+
+    @Test
+    void terraClearsTheConditionalProjectionRiskAndBlocksRevealingSwimwear()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        MockMultipartFile image = new MockMultipartFile(
+                "image", "projection.png", "image/png", new byte[] {7, 7, 7});
+        String text = "her ay 100 dollar investisiya etsen 50 il erzinde milyoner ola bilersen";
+        when(clients.analyzeMedia(
+                        any(byte[].class),
+                        eq("projection.png"),
+                        eq("image/png"),
+                        eq("post-projection")))
+                .thenReturn(completeMedia(
+                        Map.of("qualityAccepted", true),
+                        Map.of("status", "no_text")));
+        when(clients.analyzeImageAi(
+                        any(byte[].class),
+                        eq("projection.png"),
+                        eq("image/png"),
+                        eq("post-projection"),
+                        eq(ContentType.POST),
+                        eq(text),
+                        eq(""),
+                        eq("no_text"),
+                        eq(false),
+                        eq(false),
+                        any(Map.class),
+                        eq(false),
+                        eq(true)))
+                .thenReturn(resolvedConditionalProjectionWithSwimwearAi());
+
+        ModerationResponse result = controller(clients).moderate(
+                "post-projection",
+                "POST",
+                text,
+                image,
+                "projection-request",
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.SEXUAL);
+        assertThat(result.financialRisk())
+                .isEqualTo(com.example.moderation.gateway.api.FinancialRisk.NONE);
+
+        ArgumentCaptor<ContentDecisionAuditPayload> contentAudit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(contentAudit.capture());
+        assertThat(contentAudit.getValue().decision().decidingLayer())
+                .isEqualTo("ADJUDICATOR");
+        assertThat(contentAudit.getValue().decision().financialRisk()).isEqualTo("NONE");
+
+        ArgumentCaptor<ImageDecisionAuditPayload> imageAudit =
+                ArgumentCaptor.forClass(ImageDecisionAuditPayload.class);
+        verify(clients).persistImageDecisionAudit(imageAudit.capture());
+        assertThat(imageAudit.getValue().classifierProposedBlock()).isFalse();
+        assertThat(imageAudit.getValue().adjudicationMode())
+                .isEqualTo("classifier_unknown_recheck");
+        assertThat(imageAudit.getValue().adjudicationAction()).isEqualTo("block");
+        assertThat(imageAudit.getValue().adjudicationDisposition()).isEqualTo("confirmed");
     }
 
     @Test
@@ -1484,7 +2365,8 @@ class ModerationControllerTest {
     }
 
     @Test
-    void incompleteCandidateOcrSuppressesTerraAndStillReportsTheCandidate() throws Exception {
+    void incompleteCandidateOcrIsAuditedBeforeReturningUnprocessableImage()
+            throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         MockMultipartFile image = new MockMultipartFile(
                 "image", "post.png", "image/png", new byte[] {1, 2, 3});
@@ -1519,17 +2401,19 @@ class ModerationControllerTest {
                         eq(false)))
                 .thenReturn(successfulAi("related", "not_related"));
 
-        ModerationResponse result = controller(clients).moderate(
-                "post-ocr-low",
-                "post",
-                "Investment update",
-                image,
-                null,
-                new MockHttpServletResponse());
+        ResponseStatusException failure = assertThrows(
+                ResponseStatusException.class,
+                () -> controller(clients).moderate(
+                        "post-ocr-low",
+                        "post",
+                        "Investment update",
+                        image,
+                        null,
+                        new MockHttpServletResponse()));
 
-        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
-        assertThat(result.violation()).isEqualTo(Violation.EVIDENCE_UNAVAILABLE);
-        assertThat(result.imageMatch()).isEqualTo(ImageMatch.SIMILAR_CANDIDATE);
+        assertThat(failure.getStatusCode().value()).isEqualTo(422);
+        assertThat(failure.getReason())
+                .isEqualTo("image evidence is insufficient for moderation");
         verify(clients).analyzeImageAi(
                 any(byte[].class),
                 eq("post.png"),
@@ -1544,6 +2428,12 @@ class ModerationControllerTest {
                 eq(media),
                 eq(true),
                 eq(false));
+        ArgumentCaptor<ImageDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ImageDecisionAuditPayload.class);
+        verify(clients).persistImageDecisionAudit(audit.capture());
+        assertThat(audit.getValue().finalDecision()).isEqualTo("UNKNOWN");
+        assertThat(audit.getValue().violation()).isEqualTo("EVIDENCE_UNAVAILABLE");
+        assertThat(audit.getValue().imageMatch()).isEqualTo("SIMILAR_CANDIDATE");
     }
 
     @Test
@@ -1602,7 +2492,7 @@ class ModerationControllerTest {
     }
 
     @Test
-    void mediaFailureReturnsUnknownWithoutSpendingOnImageModels() throws Exception {
+    void mediaFailureReturnsUnavailableWithoutSpendingOnImageModels() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         MockMultipartFile image = new MockMultipartFile(
                 "image", "post.png", "image/png", new byte[] {1, 2, 3});
@@ -1610,17 +2500,18 @@ class ModerationControllerTest {
                         any(byte[].class), eq("post.png"), eq("image/png"), eq("post-media-error")))
                 .thenThrow(new RuntimeException("media unavailable"));
 
-        ModerationResponse result = controller(clients).moderate(
-                "post-media-error",
-                "post",
-                "Investment update",
-                image,
-                null,
-                new MockHttpServletResponse());
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "post-media-error",
+                        "post",
+                        "Investment update",
+                        image,
+                        null,
+                        new MockHttpServletResponse()));
 
-        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
-        assertThat(result.violation()).isEqualTo(Violation.ANALYZER_ERROR);
-        assertThat(result.imageMatch()).isEqualTo(ImageMatch.UNAVAILABLE);
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.UNAVAILABLE);
         verify(clients, never()).analyzeImageAi(
                 any(byte[].class),
                 any(String.class),
@@ -1638,13 +2529,219 @@ class ModerationControllerTest {
         ArgumentCaptor<ImageDecisionAuditPayload> audit =
                 ArgumentCaptor.forClass(ImageDecisionAuditPayload.class);
         verify(clients).persistImageDecisionAudit(audit.capture());
+        assertThat(audit.getValue().finalDecision()).isEqualTo("UNKNOWN");
+        assertThat(audit.getValue().violation()).isEqualTo("ANALYZER_ERROR");
+        assertThat(audit.getValue().imageMatch()).isEqualTo("UNAVAILABLE");
         assertThat(audit.getValue().adjudicationStatus()).isEqualTo("unavailable");
     }
 
     @Test
-    void malformedMediaEnvelopeReturnsUnknownWithoutSpendingOnImageModels()
+    void untypedMediaErrorBodyReturnsInvalidResponse() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        MockMultipartFile image = new MockMultipartFile(
+                "image", "post.png", "image/png", new byte[] {1, 2, 3});
+        when(clients.analyzeMedia(
+                        any(byte[].class),
+                        eq("post.png"),
+                        eq("image/png"),
+                        eq("post-media-untyped-error")))
+                .thenReturn(Map.of("status", "error"));
+
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "post-media-untyped-error",
+                        "post",
+                        "Investment update",
+                        image,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
+        verify(clients, never()).analyzeImageAi(
+                any(), any(), any(), any(), any(), any(), any(), any(),
+                anyBoolean(), anyBoolean(), any(), anyBoolean(), anyBoolean());
+        verify(clients).persistContentDecisionAudit(any());
+        verify(clients).persistImageDecisionAudit(any());
+    }
+
+    @Test
+    void ocrTimeoutReturnsTimeoutWithoutSpendingOnImageModels() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        MockMultipartFile image = new MockMultipartFile(
+                "image", "post.png", "image/png", new byte[] {1, 2, 3});
+        when(clients.analyzeMedia(
+                        any(byte[].class),
+                        eq("post.png"),
+                        eq("image/png"),
+                        eq("post-ocr-timeout")))
+                .thenReturn(completeMedia(
+                        Map.of("qualityAccepted", true),
+                        Map.of("status", "error", "failureKind", "TIMEOUT")));
+
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "post-ocr-timeout",
+                        "post",
+                        "Investment update",
+                        image,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind()).isEqualTo(ModerationSystemException.Kind.TIMEOUT);
+        verify(clients, never()).analyzeImageAi(
+                any(), any(), any(), any(), any(), any(), any(), any(),
+                anyBoolean(), anyBoolean(), any(), anyBoolean(), anyBoolean());
+        verify(clients).persistContentDecisionAudit(any());
+        verify(clients).persistImageDecisionAudit(any());
+    }
+
+    @Test
+    void mediaHttpFailuresKeepTimeoutAvailabilityAndContractTaxonomy() throws Exception {
+        assertMediaHttpFailure(
+                HttpStatus.REQUEST_TIMEOUT, ModerationSystemException.Kind.TIMEOUT);
+        assertMediaHttpFailure(
+                HttpStatus.BAD_GATEWAY, ModerationSystemException.Kind.INVALID_RESPONSE);
+        assertMediaHttpFailure(
+                HttpStatus.TOO_MANY_REQUESTS, ModerationSystemException.Kind.UNAVAILABLE);
+        assertMediaHttpFailure(
+                HttpStatus.PAYLOAD_TOO_LARGE,
+                ModerationSystemException.Kind.INVALID_RESPONSE);
+        assertMediaHttpFailure(
+                HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+                ModerationSystemException.Kind.INVALID_RESPONSE);
+        assertMediaHttpFailure(
+                HttpStatus.UNAUTHORIZED, ModerationSystemException.Kind.INVALID_RESPONSE);
+    }
+
+    @Test
+    void mediaImageValidationFailureRemainsARequestErrorWithoutDecisionAudit()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        MockMultipartFile image = new MockMultipartFile(
+                "image", "invalid.png", "image/png", new byte[] {1, 2, 3});
+        when(clients.analyzeMedia(
+                        any(byte[].class),
+                        eq("invalid.png"),
+                        eq("image/png"),
+                        eq("post-media-validation")))
+                .thenThrow(mediaHttpError(HttpStatus.UNPROCESSABLE_ENTITY));
+
+        ResponseStatusException failure = assertThrows(
+                ResponseStatusException.class,
+                () -> controller(clients).moderate(
+                        "post-media-validation",
+                        "post",
+                        "Investment update",
+                        image,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.getStatusCode().value()).isEqualTo(422);
+        verify(clients, never()).persistContentDecisionAudit(any());
+        verify(clients, never()).persistImageDecisionAudit(any());
+        verify(clients, never()).analyzeImageAi(
+                any(byte[].class),
+                any(String.class),
+                any(String.class),
+                any(String.class),
+                any(ContentType.class),
+                any(String.class),
+                any(String.class),
+                any(String.class),
+                anyBoolean(),
+                anyBoolean(),
+                any(Map.class),
+                anyBoolean(),
+                anyBoolean());
+    }
+
+    @Test
+    void malformedMediaEnvelopeReturnsInvalidResponseWithoutSpendingOnImageModels()
             throws Exception {
         assertThat(ModerationController.validMediaEnvelope(Map.of())).isFalse();
+        assertThat(ModerationController.validMediaEnvelope(completeMedia(
+                        Map.of(
+                                "qualityAccepted", true,
+                                "candidateFound", true,
+                                "candidates", java.util.List.of("not-a-candidate-map")),
+                        Map.of("status", "no_text"))))
+                .isFalse();
+        Map<String, Object> similarCandidate = Map.of(
+                "referenceId", "reference-1",
+                "decisionBasis", "VISUAL_REGION");
+        assertThat(ModerationController.validMediaEnvelope(completeMedia(
+                        Map.of(
+                                "qualityAccepted", true,
+                                "matched", false,
+                                "candidates", java.util.List.of(similarCandidate)),
+                        Map.of("status", "no_text"))))
+                .isFalse();
+        assertThat(ModerationController.validMediaEnvelope(completeMedia(
+                        Map.of(
+                                "qualityAccepted", true,
+                                "candidates", java.util.List.of(Map.of(
+                                        "referenceId", 7,
+                                        "decisionBasis", "VISUAL_REGION"))),
+                        Map.of("status", "no_text"))))
+                .isFalse();
+        assertThat(ModerationController.validMediaEnvelope(completeMedia(
+                        Map.of(
+                                "qualityAccepted", true,
+                                "candidates", java.util.List.of(
+                                        similarCandidate, similarCandidate)),
+                        Map.of("status", "no_text"))))
+                .isFalse();
+        Map<String, Object> exactReference = Map.of(
+                "referenceId", "exact-reference-1",
+                "exactSha256", true,
+                "decisionBasis", "EXACT_ASSET",
+                "status", "ACTIVE",
+                "policyVersion", DecisionPolicy.REFERENCE_ASSET_POLICY_VERSION);
+        assertThat(ModerationController.validMediaEnvelope(completeMedia(
+                        Map.of(
+                                "qualityAccepted", true,
+                                "authoritativeExactMatch", exactReference,
+                                "candidates", java.util.List.of(Map.of(
+                                        "referenceId", "exact-reference-1",
+                                        "decisionBasis", "VISUAL_REGION"))),
+                        Map.of("status", "no_text"))))
+                .isFalse();
+        Map<String, Object> complete = completeMedia(
+                Map.of("qualityAccepted", true), Map.of("status", "no_text"));
+        Map<String, Object> fractionalImage = new java.util.LinkedHashMap<>(complete);
+        Map<String, Object> fractionalDimensions = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(complete, "image"));
+        fractionalDimensions.put("width", 640.5);
+        fractionalImage.put("image", Map.copyOf(fractionalDimensions));
+        assertThat(ModerationController.validMediaEnvelope(Map.copyOf(fractionalImage)))
+                .isFalse();
+        Map<String, Object> oversizedImage = new java.util.LinkedHashMap<>(complete);
+        Map<String, Object> oversizedDimensions = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(complete, "image"));
+        oversizedDimensions.put("width", 5_000);
+        oversizedDimensions.put("height", 5_000);
+        oversizedImage.put("image", Map.copyOf(oversizedDimensions));
+        assertThat(ModerationController.validMediaEnvelope(Map.copyOf(oversizedImage)))
+                .isFalse();
+        Map<String, Object> overflowImage = new java.util.LinkedHashMap<>(complete);
+        Map<String, Object> overflowDimensions = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(complete, "image"));
+        overflowDimensions.put("width", Integer.MAX_VALUE);
+        overflowDimensions.put("height", Integer.MAX_VALUE);
+        overflowImage.put("image", Map.copyOf(overflowDimensions));
+        assertThat(ModerationController.validMediaEnvelope(Map.copyOf(overflowImage)))
+                .isFalse();
+        Map<String, Object> missingProvenance = new java.util.LinkedHashMap<>(complete);
+        Map<String, Object> incompletePdq = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(complete, "pdq"));
+        incompletePdq.remove("visualReferenceSnapshotDigest");
+        missingProvenance.put("pdq", Map.copyOf(incompletePdq));
+        assertThat(ModerationController.validMediaEnvelope(
+                        Map.copyOf(missingProvenance)))
+                .isFalse();
         AnalyzerClients clients = mock(AnalyzerClients.class);
         MockMultipartFile image = new MockMultipartFile(
                 "image", "post.png", "image/png", new byte[] {1, 2, 3});
@@ -1667,16 +2764,18 @@ class ModerationControllerTest {
                         "ocr", Map.of("unexpected", true),
                         "image", Map.of("unexpected", true)));
 
-        ModerationResponse result = controller(clients).moderate(
-                "post-malformed-media",
-                "post",
-                "Investment update",
-                image,
-                null,
-                new MockHttpServletResponse());
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "post-malformed-media",
+                        "post",
+                        "Investment update",
+                        image,
+                        null,
+                        new MockHttpServletResponse()));
 
-        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
-        assertThat(result.violation()).isEqualTo(Violation.ANALYZER_ERROR);
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
         verify(clients, never()).analyzeImageAi(
                 any(byte[].class),
                 any(String.class),
@@ -1691,6 +2790,11 @@ class ModerationControllerTest {
                 any(Map.class),
                 anyBoolean(),
                 anyBoolean());
+        ArgumentCaptor<ImageDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ImageDecisionAuditPayload.class);
+        verify(clients).persistImageDecisionAudit(audit.capture());
+        assertThat(audit.getValue().finalDecision()).isEqualTo("UNKNOWN");
+        assertThat(audit.getValue().violation()).isEqualTo("ANALYZER_ERROR");
     }
 
     @Test
@@ -1773,25 +2877,76 @@ class ModerationControllerTest {
                 .when(clients)
                 .persistImageDecisionAudit(any(ImageDecisionAuditPayload.class));
 
-        assertThatThrownBy(() -> controller(clients).moderate(
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
                         "post-audit",
                         "post",
                         "Investment update",
                         image,
                         null,
-                        new MockHttpServletResponse()))
-                .isInstanceOf(ResponseStatusException.class)
-                .satisfies(exception -> assertThat(
-                                ((ResponseStatusException) exception).getStatusCode().value())
-                        .isEqualTo(503))
-                .hasMessageContaining("decision audit unavailable");
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.UNAVAILABLE);
+        verify(clients).persistImageDecisionAudit(any(ImageDecisionAuditPayload.class));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"POST,post-audit-failure", "COMMENT,comment-audit-failure"})
+    void categoryAuditFailurePreventsReturningATextDecision(
+            String contentType, String contentId) {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        ContentType type = ContentType.valueOf(contentType);
+        when(clients.analyzeText(contentId, type, "ETF investment"))
+                .thenReturn(successfulAi("related", "not_related"));
+        when(clients.persistContentDecisionAudit(any(ContentDecisionAuditPayload.class)))
+                .thenThrow(new RuntimeException("audit database unavailable"));
+
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        contentId,
+                        contentType,
+                        "ETF investment",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.UNAVAILABLE);
+        verify(clients).persistContentDecisionAudit(any(ContentDecisionAuditPayload.class));
+    }
+
+    @Test
+    void localTerminalAuditFailurePreventsReturningTheDecision() throws Exception {
+        Path blocklist = temporaryDirectory.resolve("blocked_terms.txt");
+        Files.writeString(blocklist, "VULGAR|blocked phrase\n", StandardCharsets.UTF_8);
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.persistContentDecisionAudit(any(ContentDecisionAuditPayload.class)))
+                .thenThrow(new RuntimeException("audit database unavailable"));
+
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients, blocklist).moderate(
+                        "post-local-audit-failure",
+                        "POST",
+                        "blocked phrase",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.UNAVAILABLE);
+        verify(clients).persistContentDecisionAudit(any(ContentDecisionAuditPayload.class));
+        verify(clients, never()).analyzeText(any(), any(), any());
     }
 
     @Test
     void usernameReturnsOnlySafetyFields() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         when(clients.evaluateHandle(eq("normal_name"), any(), any(), any()))
-                .thenReturn(cleanHandleEvidence());
+                .thenReturn(cleanHandleEvidence("normal_name"));
         when(clients.analyzeText("user-1", ContentType.USERNAME, "normal_name"))
                 .thenReturn(successfulUsernameAi());
 
@@ -1816,10 +2971,163 @@ class ModerationControllerTest {
     }
 
     @Test
+    void strongerUsernameAdjudicationIsFinalAndFullyAudited() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("ambiguous_support"), any(), any(), any()))
+                .thenReturn(cleanHandleEvidence("ambiguous_support"));
+        when(clients.analyzeText(
+                        "user-adjudicated", ContentType.USERNAME, "ambiguous_support"))
+                .thenReturn(semanticTextAi(
+                        uncertainUsernameClassification(),
+                        textAdjudication(
+                                ContentType.USERNAME,
+                                Map.of(
+                                        "action", "block",
+                                        "impersonation", "clear",
+                                        "finalReason", "impersonation"))));
+
+        ModerationResponse result = controller(clients).moderate(
+                "user-adjudicated",
+                "username",
+                "ambiguous_support",
+                null,
+                "username-adjudication-request",
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.IMPERSONATION);
+        assertThat(result.impersonation()).isEqualTo(Impersonation.CLEAR);
+        assertThat(result.aiUsage().meteredCalls()).isEqualTo(2);
+        ArgumentCaptor<UsernameDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(UsernameDecisionAuditPayload.class);
+        verify(clients).persistUsernameDecisionAudit(audit.capture());
+        assertThat(audit.getValue().decidingLayer()).isEqualTo("ADJUDICATOR");
+        assertThat(audit.getValue().provenanceSchemaVersion())
+                .isEqualTo("username-decision-provenance-v5");
+        assertThat(audit.getValue().adjudicationStatus()).isEqualTo("ok");
+        assertThat(audit.getValue().actualAdjudicationModel())
+                .isEqualTo("gpt-5.6-terra");
+        assertThat(audit.getValue().configuredAdjudicationModel())
+                .isEqualTo("gpt-5.6-terra");
+        assertThat(audit.getValue().usage().meteredCalls()).isEqualTo(2);
+        assertThat(audit.getValue().verdictSource()).isEqualTo("LIVE");
+    }
+
+    @Test
+    void failedUsernameAdjudicationReturnsInvalidResponseAndIsNotCached()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("unresolved_support"), any(), any(), any()))
+                .thenReturn(cleanHandleEvidence("unresolved_support"));
+        when(clients.analyzeText(
+                        "user-adjudication-error",
+                        ContentType.USERNAME,
+                        "unresolved_support"))
+                .thenReturn(semanticTextAi(
+                        uncertainUsernameClassification(),
+                        failedTextAdjudication()));
+
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "user-adjudication-error",
+                        "username",
+                        "unresolved_support",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
+        ArgumentCaptor<UsernameDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(UsernameDecisionAuditPayload.class);
+        verify(clients).persistUsernameDecisionAudit(audit.capture());
+        assertThat(audit.getValue().finalDecision()).isEqualTo("UNKNOWN");
+        assertThat(audit.getValue().violation()).isEqualTo("ANALYZER_ERROR");
+        assertThat(audit.getValue().decidingLayer()).isEqualTo("ANALYZER_UNAVAILABLE");
+        assertThat(audit.getValue().adjudicationStatus()).isEqualTo("error");
+        assertThat(audit.getValue().actualAdjudicationModel())
+                .isEqualTo("gpt-5.6-terra");
+        assertThat(audit.getValue().usage().meteredCalls()).isEqualTo(2);
+        verify(clients, never()).recordHandleVerdict(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void preInvocationUsernameAdjudicationErrorDoesNotClaimTheConfiguredModel()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("deadline_support"), any(), any(), any()))
+                .thenReturn(cleanHandleEvidence("deadline_support"));
+        when(clients.analyzeText(
+                        "user-adjudication-pre-invocation",
+                        ContentType.USERNAME,
+                        "deadline_support"))
+                .thenReturn(semanticTextAi(
+                        uncertainUsernameClassification(),
+                        failedTextAdjudicationWithoutUsage()));
+
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "user-adjudication-pre-invocation",
+                        "username",
+                        "deadline_support",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.UNAVAILABLE);
+        ArgumentCaptor<UsernameDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(UsernameDecisionAuditPayload.class);
+        verify(clients).persistUsernameDecisionAudit(audit.capture());
+        assertThat(audit.getValue().finalDecision()).isEqualTo("UNKNOWN");
+        assertThat(audit.getValue().violation()).isEqualTo("ANALYZER_ERROR");
+        assertThat(audit.getValue().adjudicationStatus()).isEqualTo("error");
+        assertThat(audit.getValue().actualAdjudicationModel()).isEqualTo("unavailable");
+        assertThat(audit.getValue().usage().meteredCalls()).isOne();
+        assertThat(audit.getValue().usage().usageComplete()).isFalse();
+    }
+
+    @Test
+    void cachedUsernameAdjudicationKeepsItsLayerAndHasZeroRequestUsage()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        Map<String, Object> cachedVerdict = semanticTextAi(
+                uncertainUsernameClassification(),
+                textAdjudication(ContentType.USERNAME, Map.of()));
+        when(clients.evaluateHandle(eq("cached_ambiguous"), any(), any(), any()))
+                .thenReturn(handleEvidenceWith(
+                        "cached_ambiguous", "cachedVerdict", cachedVerdict));
+
+        ModerationResponse result = controller(clients).moderate(
+                "user-adjudication-cache",
+                "username",
+                "cached_ambiguous",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.aiUsage())
+                .isEqualTo(com.example.moderation.gateway.api.AiUsage.noCalls());
+        ArgumentCaptor<UsernameDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(UsernameDecisionAuditPayload.class);
+        verify(clients).persistUsernameDecisionAudit(audit.capture());
+        assertThat(audit.getValue().decidingLayer()).isEqualTo("ADJUDICATOR");
+        assertThat(audit.getValue().adjudicationStatus()).isEqualTo("ok");
+        assertThat(audit.getValue().verdictSource()).isEqualTo("CACHE");
+        assertThat(audit.getValue().usage())
+                .isEqualTo(com.example.moderation.gateway.api.AiUsage.noCalls());
+        verify(clients, never()).analyzeText(any(), any(), any());
+        verify(clients, never()).recordHandleVerdict(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void usernameWordsAreEvaluatedByAiWithoutALocalBlock() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         when(clients.evaluateHandle(eq("notrealadmin"), any(), any(), any()))
-                .thenReturn(cleanHandleEvidence());
+                .thenReturn(cleanHandleEvidence("notrealadmin"));
         when(clients.analyzeText("user-2", ContentType.USERNAME, "notrealadmin"))
                 .thenReturn(successfulUsernameAi());
 
@@ -1863,6 +3171,7 @@ class ModerationControllerTest {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         when(clients.evaluateHandle(eq("kapital_bank"), any(), any(), any()))
                 .thenReturn(handleEvidenceWith(
+                        "kapital_bank",
                         "protectedMatch",
                         Map.of(
                                 "protectedNameId", 7,
@@ -1888,43 +3197,175 @@ class ModerationControllerTest {
         verify(clients).persistUsernameDecisionAudit(any());
     }
 
+    @Test
+    void fractionalProtectedNameIdIsAnInvalidUpstreamResponse() throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("fractional_bank"), any(), any(), any()))
+                .thenReturn(handleEvidenceWith(
+                        "fractional_bank",
+                        "protectedMatch",
+                        Map.of(
+                                "protectedNameId", 7.5,
+                                "nameType", "BANK",
+                                "matchKind", "EXACT",
+                                "severity", "CLEAR")));
+
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "user-fractional-id",
+                        "username",
+                        "fractional_bank",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
+        verify(clients, never()).analyzeText(any(), any(), any());
+        verify(clients).persistUsernameDecisionAudit(any());
+    }
+
     /**
      * An unresolved registry similarity cannot allow, and it must not override a stronger
      * current-content conclusion either. It only applies when nothing else remains.
      */
     @Test
-    void anUnresolvedRegistrySimilarityBecomesUnknownOnlyWhenNothingElseDecides() throws Exception {
+    void anUnresolvedRegistrySimilarityReturnsInvalidResponseWhenNothingElseDecides()
+            throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         when(clients.evaluateHandle(eq("birbank_fan"), any(), any(), any()))
                 .thenReturn(handleEvidenceWith(
+                        "birbank_fan",
                         "protectedMatch",
                         Map.of(
                                 "protectedNameId", 9,
                                 "nameType", "BANK",
                                 "matchKind", "BRAND",
                                 "severity", "POSSIBLE")));
-        when(clients.analyzeText("user-possible", ContentType.USERNAME, "birbank_fan"))
+        // A registry near-miss is escalated, so the stub matches the forced-adjudication call.
+        when(clients.analyzeText(
+                        "user-possible", ContentType.USERNAME, "birbank_fan", "", "", "", true))
                 .thenReturn(successfulUsernameAi());
 
-        ModerationResponse result = controller(clients)
-                .moderate(
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
                         "user-possible",
                         "username",
                         "birbank_fan",
                         null,
                         null,
-                        new MockHttpServletResponse());
+                        new MockHttpServletResponse()));
 
-        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
-        assertThat(result.violation()).isEqualTo(Violation.IMPERSONATION);
-        assertThat(result.impersonation()).isEqualTo(Impersonation.POSSIBLE);
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
+        ArgumentCaptor<UsernameDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(UsernameDecisionAuditPayload.class);
+        verify(clients).persistUsernameDecisionAudit(audit.capture());
+        assertThat(audit.getValue().finalDecision()).isEqualTo("UNKNOWN");
+        assertThat(audit.getValue().violation()).isEqualTo("IMPERSONATION");
+        assertThat(audit.getValue().impersonation()).isEqualTo("POSSIBLE");
+        assertThat(audit.getValue().protectedNameId()).isEqualTo(9L);
+        assertThat(audit.getValue().usage().meteredCalls()).isOne();
+    }
+
+    @Test
+    void strongerUsernameAdjudicationResolvesAProtectedPossibleMatch()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("ambiguous_bank_fan"), any(), any(), any()))
+                .thenReturn(handleEvidenceWith(
+                        "ambiguous_bank_fan",
+                        "protectedMatch",
+                        Map.of(
+                                "protectedNameId", 19,
+                                "nameType", "BANK",
+                                "matchKind", "BRAND",
+                                "severity", "POSSIBLE")));
+        when(clients.analyzeText(
+                        "user-protected-adjudicated",
+                        ContentType.USERNAME,
+                        "ambiguous_bank_fan",
+                        "",
+                        "",
+                        "",
+                        true))
+                .thenReturn(semanticTextAi(
+                        uncertainUsernameClassification(),
+                        textAdjudication(ContentType.USERNAME, Map.of())));
+
+        ModerationResponse result = controller(clients).moderate(
+                "user-protected-adjudicated",
+                "username",
+                "ambiguous_bank_fan",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.violation()).isEqualTo(Violation.NONE);
+        assertThat(result.impersonation()).isEqualTo(Impersonation.NONE);
+        ArgumentCaptor<UsernameDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(UsernameDecisionAuditPayload.class);
+        verify(clients).persistUsernameDecisionAudit(audit.capture());
+        assertThat(audit.getValue().decidingLayer()).isEqualTo("ADJUDICATOR");
+    }
+
+    @Test
+    void forcedUsernameAdjudicationResolvesCombinedProtectedAndPoliticalPossibleEvidence()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        String handle = "test_minister_bank_fan";
+        when(clients.evaluateHandle(eq(handle), any(), any(), any()))
+                .thenReturn(handleEvidenceWith(
+                        handle,
+                        "protectedMatch",
+                        Map.of(
+                                "protectedNameId", 23,
+                                "nameType", "BANK",
+                                "matchKind", "BRAND",
+                                "severity", "POSSIBLE")));
+        when(clients.analyzeText(
+                        "user-protected-political-adjudicated",
+                        ContentType.USERNAME,
+                        handle,
+                        "",
+                        "",
+                        "",
+                        true))
+                .thenReturn(semanticTextAi(
+                        DecisionPolicy.nestedMap(successfulUsernameAi(), "classification"),
+                        textAdjudication(ContentType.USERNAME, Map.of())));
+
+        ModerationResponse result = controller(clients).moderate(
+                "user-protected-political-adjudicated",
+                "username",
+                handle,
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(result.violation()).isEqualTo(Violation.NONE);
+        assertThat(result.impersonation()).isEqualTo(Impersonation.NONE);
+        assertThat(result.restrictedPoliticalEntity())
+                .isEqualTo(RestrictedPoliticalEntity.NONE);
+        ArgumentCaptor<UsernameDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(UsernameDecisionAuditPayload.class);
+        verify(clients).persistUsernameDecisionAudit(audit.capture());
+        assertThat(audit.getValue().decidingLayer()).isEqualTo("ADJUDICATOR");
+        assertThat(audit.getValue().localRestrictedPoliticalEntity())
+                .isEqualTo("POSSIBLE");
+        assertThat(audit.getValue().restrictedPoliticalEntity()).isEqualTo("NONE");
     }
 
     @Test
     void aCachedUsernameVerdictStillDecidesWithoutCallingTheModel() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         when(clients.evaluateHandle(eq("cached_name"), any(), any(), any()))
-                .thenReturn(handleEvidenceWith("cachedVerdict", successfulUsernameAi()));
+                .thenReturn(handleEvidenceWith(
+                        "cached_name", "cachedVerdict", successfulUsernameAi()));
         ModerationResponse result = controller(clients)
                 .moderate(
                         "user-cached",
@@ -1946,14 +3387,10 @@ class ModerationControllerTest {
         Map<String, Object> cached = new java.util.LinkedHashMap<>(successfulUsernameAi());
         cached.put(
                 "moderation",
-                Map.of(
-                        "status", "ok",
-                        "model", "omni-moderation-2024-09-26",
-                        "flagged", false,
-                        "categories", Map.of("sexual", false),
-                        "categoryScores", Map.of("sexual", 0.5658521194151336)));
+                omniModeration(false, "sexual", 0.5658521194151336));
         when(clients.evaluateHandle(eq("licking_shiki"), any(), any(), any()))
-                .thenReturn(handleEvidenceWith("cachedVerdict", Map.copyOf(cached)));
+                .thenReturn(handleEvidenceWith(
+                        "licking_shiki", "cachedVerdict", Map.copyOf(cached)));
         ModerationResponse result = controller(clients)
                 .moderate(
                         "user-cached-score",
@@ -2005,7 +3442,7 @@ class ModerationControllerTest {
     void aFreshUsernameVerdictIsStillWrittenToItsExistingCache() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         when(clients.evaluateHandle(eq("fresh_name"), any(), any(), any()))
-                .thenReturn(cleanHandleEvidence());
+                .thenReturn(cleanHandleEvidence("fresh_name"));
         when(clients.analyzeText("user-fresh", ContentType.USERNAME, "fresh_name"))
                 .thenReturn(successfulUsernameAi());
 
@@ -2025,7 +3462,7 @@ class ModerationControllerTest {
     void usernameLegacyCacheMissesUseConfigurationBoundCoordination() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         when(clients.evaluateHandle(eq("coordinated_name"), any(), any(), any()))
-                .thenReturn(cleanHandleEvidence());
+                .thenReturn(cleanHandleEvidence("coordinated_name"));
         when(clients.analyzeText("user-first", ContentType.USERNAME, "coordinated_name"))
                 .thenReturn(successfulUsernameAi());
         ModerationController controller = controller(
@@ -2087,6 +3524,14 @@ class ModerationControllerTest {
                 .analyzeText("post-original", ContentType.POST, "ETF update");
         verify(clients, never())
                 .analyzeText("post-copy", ContentType.POST, "ETF update");
+        ArgumentCaptor<ContentDecisionAuditPayload> audits =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients, times(2)).persistContentDecisionAudit(audits.capture());
+        assertThat(audits.getAllValues())
+                .extracting(event -> event.ai().verdictSource())
+                .containsExactly("LIVE", "CACHE");
+        assertThat(audits.getAllValues().get(1).usage())
+                .isEqualTo(com.example.moderation.gateway.api.AiUsage.noCalls());
     }
 
     @Test
@@ -2189,6 +3634,105 @@ class ModerationControllerTest {
     }
 
     @Test
+    void ambiguousCachedEvidenceWithoutAdjudicationFallsBackToLiveAnalysis()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.analyzeText(
+                        "post-ambiguous-cache", ContentType.POST, "ETF allocation update"))
+                .thenReturn(successfulAi("related", "not_related"));
+        Map<String, Object> stale = new java.util.LinkedHashMap<>(
+                ConfigurationBoundAiWorkCoordinator.withoutUsage(
+                        semanticTextAi(
+                                uncertainContentClassification(),
+                                Map.of("status", "not_required"))));
+        stale.put(AiWorkCoordinator.CACHE_HIT_KEY, true);
+        AiWorkCoordinator poisoned = (identity, live) -> Map.copyOf(stale);
+
+        ModerationResponse response = controller(clients, properties(), poisoned).moderate(
+                "post-ambiguous-cache",
+                "POST",
+                "ETF allocation update",
+                null,
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(response.decision()).isEqualTo(Decision.ALLOW);
+        assertThat(response.violation()).isEqualTo(Violation.NONE);
+        assertThat(response.aiUsage().meteredCalls()).isOne();
+        verify(clients).analyzeText(
+                "post-ambiguous-cache", ContentType.POST, "ETF allocation update");
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().decision().finalDecision()).isEqualTo("ALLOW");
+        assertThat(audit.getValue().ai().verdictSource()).isEqualTo("LIVE");
+        assertThat(audit.getValue().usage().meteredCalls()).isOne();
+    }
+
+    @Test
+    void staleV5ImagePromptConfigurationCannotReplayAnAllowAfterTheV6Rule()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        Map<String, Object> media = completeMedia(
+                Map.of("qualityAccepted", true),
+                Map.of("status", "no_text"));
+        when(clients.analyzeMedia(
+                        any(), eq("beach.jpg"), eq("image/jpeg"), eq("post-stale-image")))
+                .thenReturn(media);
+        when(clients.analyzeImageAi(
+                        any(),
+                        eq("beach.jpg"),
+                        eq("image/jpeg"),
+                        eq("post-stale-image"),
+                        eq(ContentType.POST),
+                        eq("Investment personality update"),
+                        eq(""),
+                        eq("no_text"),
+                        eq(false),
+                        eq(false),
+                        any(Map.class),
+                        eq(false),
+                        eq(true)))
+                .thenReturn(confirmedRevealingSwimwearAi());
+
+        Map<String, Object> stale = new java.util.LinkedHashMap<>(
+                ConfigurationBoundAiWorkCoordinator.withoutUsage(
+                        ordinaryNonRevealingImageAi()));
+        Map<String, Object> staleConfiguration = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(stale, "configuration"));
+        staleConfiguration.put(
+                "imageAdjudicationPromptSha256",
+                "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505");
+        staleConfiguration.put(
+                "imageAdjudicationProfileSha256",
+                "9efc6b244bba4ab2cd0ab0747e7a9fbf8f83d4479cf1310cdbbdeb5c0e3e3eef");
+        stale.put("configuration", Map.copyOf(staleConfiguration));
+        stale.put(AiWorkCoordinator.CACHE_HIT_KEY, true);
+        AiWorkCoordinator poisoned = (identity, live) -> Map.copyOf(stale);
+
+        ModerationResponse result = controller(clients, properties(), poisoned).moderate(
+                "post-stale-image",
+                "POST",
+                "Investment personality update",
+                new MockMultipartFile(
+                        "image", "beach.jpg", "image/jpeg", new byte[] {9, 8, 7}),
+                null,
+                new MockHttpServletResponse());
+
+        assertThat(result.decision()).isEqualTo(Decision.BLOCK);
+        assertThat(result.violation()).isEqualTo(Violation.SEXUAL);
+        assertThat(result.aiUsage().meteredCalls()).isEqualTo(2);
+        verify(clients).analyzeImageAi(
+                any(), any(), any(), any(), any(), any(), any(), any(),
+                anyBoolean(), anyBoolean(), any(), anyBoolean(), anyBoolean());
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().ai().verdictSource()).isEqualTo("LIVE");
+        assertThat(audit.getValue().ai().aiConfigurationStatus()).isEqualTo("matched");
+    }
+
+    @Test
     void identicalImageRetryReusesAiButStillRevalidatesMediaAndAudits()
             throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
@@ -2247,48 +3791,80 @@ class ModerationControllerTest {
     }
 
     @Test
-    void unavailableHandleEvidenceIsUnknownAndNeverAllow() throws Exception {
+    void unavailableHandleEvidenceReturnsUnavailableAndNeverCallsAi() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         when(clients.evaluateHandle(eq("some_name"), any(), any(), any()))
                 .thenThrow(new RuntimeException("media unavailable"));
 
-        ModerationResponse result = controller(clients)
-                .moderate(
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
                         "user-unavailable",
                         "username",
                         "some_name",
                         null,
                         null,
-                        new MockHttpServletResponse());
+                        new MockHttpServletResponse()));
 
-        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
-        assertThat(result.violation()).isEqualTo(Violation.ANALYZER_ERROR);
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.UNAVAILABLE);
         verify(clients, never()).analyzeText(any(), any(), any());
+        ArgumentCaptor<UsernameDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(UsernameDecisionAuditPayload.class);
+        verify(clients).persistUsernameDecisionAudit(audit.capture());
+        assertThat(audit.getValue().finalDecision()).isEqualTo("UNKNOWN");
+        assertThat(audit.getValue().violation()).isEqualTo("ANALYZER_ERROR");
+        assertThat(audit.getValue().decidingLayer()).isEqualTo("ANALYZER_UNAVAILABLE");
+        assertThat(audit.getValue().usage().meteredCalls()).isZero();
+    }
+
+    @Test
+    void incompleteHandleRegistryEvidenceReturnsInvalidResponseAndNeverCallsAi()
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        when(clients.evaluateHandle(eq("kapital_bank_az"), any(), any(), any()))
+                .thenReturn(Map.of("status", "ok"));
+
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        "user-incomplete-registry",
+                        "username",
+                        "kapital_bank_az",
+                        null,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.INVALID_RESPONSE);
+        verify(clients, never()).analyzeText(any(), any(), any());
+        verify(clients).persistUsernameDecisionAudit(any());
     }
 
     @Test
     void anUnauditedHandleDecisionIsNeverReturned() {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         when(clients.evaluateHandle(eq("audit_name"), any(), any(), any()))
-                .thenReturn(cleanHandleEvidence());
+                .thenReturn(cleanHandleEvidence("audit_name"));
         when(clients.analyzeText("user-audit", ContentType.USERNAME, "audit_name"))
                 .thenReturn(successfulUsernameAi());
         doThrow(new RuntimeException("audit database unavailable"))
                 .when(clients)
                 .persistUsernameDecisionAudit(any(UsernameDecisionAuditPayload.class));
 
-        assertThatThrownBy(() -> controller(clients).moderate(
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
                         "user-audit",
                         "username",
                         "audit_name",
                         null,
                         null,
-                        new MockHttpServletResponse()))
-                .isInstanceOf(ResponseStatusException.class)
-                .satisfies(exception -> assertThat(
-                                ((ResponseStatusException) exception).getStatusCode().value())
-                        .isEqualTo(503))
-                .hasMessageContaining("decision audit unavailable");
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.UNAVAILABLE);
+        verify(clients).persistUsernameDecisionAudit(any(UsernameDecisionAuditPayload.class));
     }
 
     @Test
@@ -2396,7 +3972,7 @@ class ModerationControllerTest {
     void usernameWordsDoNotBlockBeforeAi() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         when(clients.evaluateHandle(eq("policy_marker_beta_user"), any(), any(), any()))
-                .thenReturn(cleanHandleEvidence());
+                .thenReturn(cleanHandleEvidence("policy_marker_beta_user"));
         when(clients.analyzeText(
                         "user-local", ContentType.USERNAME, "policy_marker_beta_user"))
                 .thenReturn(successfulUsernameAi());
@@ -2418,22 +3994,33 @@ class ModerationControllerTest {
     }
 
     @Test
-    void analyzerFailureReturnsUnknown() throws Exception {
+    void analyzerFailureReturnsUnavailableAfterPersistingFailureAudit() throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         when(clients.analyzeText("comment-4", ContentType.COMMENT, "ordinary comment"))
                 .thenThrow(new RuntimeException("upstream unavailable"));
 
-        ModerationResponse result = controller(clients)
-                .moderate(
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
                         "comment-4",
                         "comment",
                         "ordinary comment",
                         null,
                         null,
-                        new MockHttpServletResponse());
+                        new MockHttpServletResponse()));
 
-        assertThat(result.decision()).isEqualTo(Decision.UNKNOWN);
-        assertThat(result.violation()).isEqualTo(Violation.ANALYZER_ERROR);
+        assertThat(failure.kind())
+                .isEqualTo(ModerationSystemException.Kind.UNAVAILABLE);
+        ArgumentCaptor<ContentDecisionAuditPayload> audit =
+                ArgumentCaptor.forClass(ContentDecisionAuditPayload.class);
+        verify(clients).persistContentDecisionAudit(audit.capture());
+        assertThat(audit.getValue().contentType()).isEqualTo("COMMENT");
+        assertThat(audit.getValue().decision().violation()).isEqualTo("ANALYZER_ERROR");
+        assertThat(audit.getValue().decision().decidingLayer())
+                .isEqualTo("ANALYZER_UNAVAILABLE");
+        assertThat(audit.getValue().decision().finalDecision()).isEqualTo("UNKNOWN");
+        assertThat(audit.getValue().ai().verdictSource()).isEqualTo("LIVE");
+        assertThat(audit.getValue().ai().aiConfigurationStatus()).isEqualTo("unavailable");
     }
 
     @Test
@@ -2452,6 +4039,7 @@ class ModerationControllerTest {
                                 new MockHttpServletResponse()))
                 .isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("images are accepted only for POST");
+        verify(clients, never()).persistContentDecisionAudit(any());
     }
 
     private static ModerationProperties properties() {
@@ -2475,13 +4063,15 @@ class ModerationControllerTest {
                 "omni-moderation-2024-09-26",
                 "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                 "gpt-5.6-terra",
-                "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8",
-                "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d",
+                "3f16da31ae1f71763b2a5262e694b531abefddb1d626f4dbf731bcef56139928",
+                "8ba145c16b484d910a58755598552bf97107880b1dfef0a01d0825f941818b01",
                 "gpt-5.6-terra",
                 "medium",
-                "image-adjudication-v5",
-                "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505",
-                "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa",
+                "adjudication-prompts-v4",
+                "ac1640fbf75889a8071545ae80fca3adf25706f6b9f3e7b35a60201aa2d82d1c",
+                "c2855ff1698d969d213445a2e278557d8c2d8119a8d3ce5f01bf6d397f5f889e",
+                "14d2daa25d8b31765be1b804c061ab1bfab761a1a854f379e2d331ae82f93132",
+                "894d8c98443230496195e0e443b3293e0f4ec359b9a582f20d87dbb58f9fb699",
                 30,
                 blockedTermsFile,
                 "src/test/resources/restricted_political_entities.txt",
@@ -2503,7 +4093,8 @@ class ModerationControllerTest {
             throws Exception {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         when(clients.evaluateHandle(eq("legacy_miss"), any(), any(), any()))
-                .thenReturn(handleEvidenceWith("cachedVerdict", legacyVerdict));
+                .thenReturn(handleEvidenceWith(
+                        "legacy_miss", "cachedVerdict", legacyVerdict));
         when(clients.analyzeText("legacy-user", ContentType.USERNAME, "legacy_miss"))
                 .thenReturn(successfulUsernameAi());
         java.util.concurrent.atomic.AtomicInteger coordinatorCalls =
@@ -2553,10 +4144,12 @@ class ModerationControllerTest {
     }
 
     /** Deterministic handle evidence with no registry match, no collision, and no cached verdict. */
-    private static Map<String, Object> cleanHandleEvidence() {
+    private static Map<String, Object> cleanHandleEvidence(String handle) {
         return Map.of(
                 "status", "ok",
-                "skeleton", "skeleton",
+                "skeleton", HandleSkeleton.of(handle),
+                "skeletonProfileVersion", HandleSkeleton.PROFILE_VERSION,
+                "skeletonProfileSha256", HandleSkeleton.PROFILE_SHA256,
                 "registryVersion", "protected-name-registry-v1",
                 "registryDigest",
                 "0000000000000000000000000000000000000000000000000000000000000000",
@@ -2565,22 +4158,60 @@ class ModerationControllerTest {
     }
 
     /** Clean handle evidence plus one additional field. */
-    private static Map<String, Object> handleEvidenceWith(String key, Object value) {
+    private static Map<String, Object> handleEvidenceWith(
+            String handle, String key, Object value) {
         Map<String, Object> evidence =
-                new java.util.LinkedHashMap<>(cleanHandleEvidence());
+                new java.util.LinkedHashMap<>(cleanHandleEvidence(handle));
         evidence.put(key, value);
         return Map.copyOf(evidence);
+    }
+
+    private void assertMediaHttpFailure(
+            HttpStatus status, ModerationSystemException.Kind expectedKind)
+            throws Exception {
+        AnalyzerClients clients = mock(AnalyzerClients.class);
+        String contentId = "post-media-http-" + status.value();
+        MockMultipartFile image = new MockMultipartFile(
+                "image", "post.png", "image/png", new byte[] {1, 2, 3});
+        when(clients.analyzeMedia(
+                        any(byte[].class), eq("post.png"), eq("image/png"), eq(contentId)))
+                .thenThrow(mediaHttpError(status));
+
+        ModerationSystemException failure = assertThrows(
+                ModerationSystemException.class,
+                () -> controller(clients).moderate(
+                        contentId,
+                        "post",
+                        "Investment update",
+                        image,
+                        null,
+                        new MockHttpServletResponse()));
+
+        assertThat(failure.kind()).isEqualTo(expectedKind);
+        verify(clients).persistContentDecisionAudit(any());
+        verify(clients).persistImageDecisionAudit(any());
+    }
+
+    private static RestClientResponseException mediaHttpError(HttpStatus status) {
+        return status.is5xxServerError()
+                ? HttpServerErrorException.create(
+                        status,
+                        status.getReasonPhrase(),
+                        HttpHeaders.EMPTY,
+                        new byte[0],
+                        StandardCharsets.UTF_8)
+                : HttpClientErrorException.create(
+                        status,
+                        status.getReasonPhrase(),
+                        HttpHeaders.EMPTY,
+                        new byte[0],
+                        StandardCharsets.UTF_8);
     }
 
     private static Map<String, Object> successfulAi(
             String investment, String politics) {
         return Map.of(
-                "moderation",
-                Map.of(
-                        "status", "ok",
-                        "model", "omni-moderation-2024-09-26",
-                        "flagged", false,
-                        "categoryScores", Map.of()),
+                "moderation", omniModeration(false, null, 0),
                 "classification",
                 Map.ofEntries(
                         Map.entry("status", "ok"),
@@ -2601,12 +4232,7 @@ class ModerationControllerTest {
 
     private static Map<String, Object> successfulUsernameAi() {
         return Map.of(
-                "moderation",
-                Map.of(
-                        "status", "ok",
-                        "model", "omni-moderation-2024-09-26",
-                        "flagged", false,
-                        "categoryScores", Map.of()),
+                "moderation", omniModeration(false, null, 0),
                 "classification",
                 Map.ofEntries(
                         Map.entry("status", "ok"),
@@ -2620,6 +4246,125 @@ class ModerationControllerTest {
                         Map.entry("usage", modelUsage())),
                 "configuration",
                 aiConfiguration());
+    }
+
+    private static Map<String, Object> semanticTextAi(
+            Map<String, Object> classification,
+            Map<String, Object> adjudication) {
+        return Map.of(
+                "moderation", omniModeration(false, null, 0),
+                "classification",
+                classification,
+                "adjudication",
+                adjudication,
+                "configuration",
+                aiConfiguration());
+    }
+
+    private static Map<String, Object> omniModeration(
+            boolean flagged, String scoredCategory, double score) {
+        Map<String, Boolean> categories = new java.util.LinkedHashMap<>();
+        Map<String, Double> categoryScores = new java.util.LinkedHashMap<>();
+        for (String category : java.util.List.of(
+                "hate",
+                "hate/threatening",
+                "harassment",
+                "harassment/threatening",
+                "illicit",
+                "illicit/violent",
+                "self-harm",
+                "self-harm/instructions",
+                "self-harm/intent",
+                "sexual",
+                "sexual/minors",
+                "violence",
+                "violence/graphic")) {
+            categories.put(category, flagged && category.equals(scoredCategory));
+            categoryScores.put(category, category.equals(scoredCategory) ? score : 0.0);
+        }
+        return Map.of(
+                "status", "ok",
+                "model", "omni-moderation-2024-09-26",
+                "flagged", flagged,
+                "categories", Map.copyOf(categories),
+                "categoryScores", Map.copyOf(categoryScores));
+    }
+
+    private static Map<String, Object> uncertainContentClassification() {
+        return Map.ofEntries(
+                Map.entry("status", "ok"),
+                Map.entry("model", "gpt-5.6-terra"),
+                Map.entry("safetyAction", "allow"),
+                Map.entry("category", "none"),
+                Map.entry("domain", "uncertain"),
+                Map.entry("financialClaim", "uncertain"),
+                Map.entry("financialRisk", "none"),
+                Map.entry("financialPrivacy", "none"),
+                Map.entry("impersonation", "none"),
+                Map.entry("politicalContext", "uncertain"),
+                Map.entry("restrictedPoliticalEntity", "none"),
+                Map.entry("usage", modelUsage()));
+    }
+
+    private static Map<String, Object> uncertainUsernameClassification() {
+        return Map.ofEntries(
+                Map.entry("status", "ok"),
+                Map.entry("model", "gpt-5.6-terra"),
+                Map.entry("safetyAction", "allow"),
+                Map.entry("category", "none"),
+                Map.entry("financialRisk", "none"),
+                Map.entry("financialPrivacy", "none"),
+                Map.entry("impersonation", "possible"),
+                Map.entry("restrictedPoliticalEntity", "none"),
+                Map.entry("usage", modelUsage()));
+    }
+
+    private static Map<String, Object> textAdjudication(
+            ContentType contentType, Map<String, Object> overrides) {
+        Map<String, Object> adjudication = new java.util.LinkedHashMap<>();
+        adjudication.put("status", "ok");
+        adjudication.put("model", "gpt-5.6-terra");
+        adjudication.put("promptVersion", DecisionPolicy.TEXT_ADJUDICATION_PROMPT_VERSION);
+        adjudication.put("adjudicationMode", "text_unknown_recheck");
+        adjudication.put("action", "allow");
+        adjudication.put("safetyAction", "allow");
+        adjudication.put("category", "none");
+        adjudication.put("financialRisk", "none");
+        adjudication.put("financialPrivacy", "none");
+        adjudication.put("impersonation", "none");
+        adjudication.put("restrictedPoliticalEntity", "none");
+        adjudication.put("finalReason", "none");
+        if (contentType != ContentType.USERNAME) {
+            adjudication.put("domain", "investment_related");
+            adjudication.put("financialClaim", "none");
+            adjudication.put("politicalContext", "none");
+        }
+        adjudication.put("usage", modelUsage());
+        adjudication.putAll(overrides);
+        return Map.copyOf(adjudication);
+    }
+
+    private static Map<String, Object> failedTextAdjudication() {
+        return Map.of(
+                "status", "error",
+                "model", "gpt-5.6-terra",
+                "promptVersion", DecisionPolicy.TEXT_ADJUDICATION_PROMPT_VERSION,
+                "adjudicationMode", "error",
+                "action", "error",
+                "failureKind", "CONTRACT_INVALID",
+                "failureCode", "ADJUDICATION_CONTRACT_INCONSISTENT",
+                "usage", modelUsage());
+    }
+
+    private static Map<String, Object> failedTextAdjudicationWithoutUsage() {
+        return Map.of(
+                "status", "error",
+                "model", "gpt-5.6-terra",
+                "promptVersion", DecisionPolicy.TEXT_ADJUDICATION_PROMPT_VERSION,
+                "adjudicationMode", "error",
+                "action", "error",
+                "failureKind", "UNAVAILABLE",
+                "failureCode", "PROVIDER_RESPONSE_INVALID");
     }
 
     private static Map<String, Object> successfulAiWithRestrictedPoliticalEntity(
@@ -2664,22 +4409,108 @@ class ModerationControllerTest {
                 Map.entry("customModel", "gpt-5.6-terra"),
                 Map.entry(
                         "classificationPromptBundleSha256",
-                        "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8"),
+                        "3f16da31ae1f71763b2a5262e694b531abefddb1d626f4dbf731bcef56139928"),
                 Map.entry(
                         "classificationProfileSha256",
-                        "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d"),
+                        "8ba145c16b484d910a58755598552bf97107880b1dfef0a01d0825f941818b01"),
                 Map.entry("adjudicationModel", "gpt-5.6-terra"),
                 Map.entry("adjudicationReasoningEffort", "medium"),
-                Map.entry("adjudicationPromptVersion", "image-adjudication-v5"),
+                Map.entry("adjudicationPromptVersion", "adjudication-prompts-v4"),
                 Map.entry(
                         "adjudicationPromptSha256",
-                        "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505"),
+                        "ac1640fbf75889a8071545ae80fca3adf25706f6b9f3e7b35a60201aa2d82d1c"),
                 Map.entry(
                         "adjudicationProfileSha256",
-                        "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa"),
+                        "c2855ff1698d969d213445a2e278557d8c2d8119a8d3ce5f01bf6d397f5f889e"),
+                Map.entry(
+                        "imageAdjudicationPromptSha256",
+                        "14d2daa25d8b31765be1b804c061ab1bfab761a1a854f379e2d331ae82f93132"),
+                Map.entry(
+                        "imageAdjudicationProfileSha256",
+                        "894d8c98443230496195e0e443b3293e0f4ec359b9a582f20d87dbb58f9fb699"),
                 Map.entry("openAiTimeoutSeconds", 30L),
                 Map.entry("maxImageBytes", 8_388_608L),
                 Map.entry("maxImageRequestBytes", 9_437_184L));
+    }
+
+    private static Map<String, Object> confirmedRevealingSwimwearAi() {
+        Map<String, Object> result = new java.util.LinkedHashMap<>(
+                successfulAi("related", "not_related"));
+        Map<String, Object> classification = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(result, "classification"));
+        classification.put("safetyAction", "block");
+        classification.put("category", "sexual");
+        result.put("classification", Map.copyOf(classification));
+        result.put("adjudication", Map.ofEntries(
+                Map.entry("status", "ok"),
+                Map.entry("model", "gpt-5.6-terra"),
+                Map.entry(
+                        "promptVersion",
+                        DecisionPolicy.IMAGE_ADJUDICATION_PROMPT_VERSION),
+                Map.entry("adjudicationMode", "classifier_block_recheck"),
+                Map.entry("action", "block"),
+                Map.entry("safetyAction", "block"),
+                Map.entry("category", "sexual"),
+                Map.entry("domain", "investment_related"),
+                Map.entry("financialClaim", "none"),
+                Map.entry("financialRisk", "none"),
+                Map.entry("financialPrivacy", "none"),
+                Map.entry("impersonation", "none"),
+                Map.entry("politicalContext", "none"),
+                Map.entry("restrictedPoliticalEntity", "none"),
+                Map.entry("finalReason", "safety"),
+                Map.entry("candidateDisposition", "confirmed"),
+                Map.entry("evidenceBasis", "current_visual"),
+                Map.entry("reasonCode", "current_policy_violation"),
+                Map.entry("candidateIds", java.util.List.of()),
+                Map.entry("usage", modelUsage())));
+        return Map.copyOf(result);
+    }
+
+    private static Map<String, Object> ordinaryNonRevealingImageAi() {
+        Map<String, Object> result = new java.util.LinkedHashMap<>(
+                successfulAi("related", "not_related"));
+        result.put("adjudication", Map.of(
+                "status", "not_required",
+                "model", "gpt-5.6-terra",
+                "promptVersion", DecisionPolicy.IMAGE_ADJUDICATION_PROMPT_VERSION,
+                "adjudicationMode", "not_required",
+                "action", "not_required"));
+        return Map.copyOf(result);
+    }
+
+    private static Map<String, Object> resolvedConditionalProjectionWithSwimwearAi() {
+        Map<String, Object> result = new java.util.LinkedHashMap<>(
+                successfulAi("related", "not_related"));
+        Map<String, Object> classification = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(result, "classification"));
+        classification.put("financialClaim", "factual_claim");
+        classification.put("financialRisk", "potentially_misleading");
+        result.put("classification", Map.copyOf(classification));
+        result.put("adjudication", Map.ofEntries(
+                Map.entry("status", "ok"),
+                Map.entry("model", "gpt-5.6-terra"),
+                Map.entry(
+                        "promptVersion",
+                        DecisionPolicy.IMAGE_ADJUDICATION_PROMPT_VERSION),
+                Map.entry("adjudicationMode", "classifier_unknown_recheck"),
+                Map.entry("action", "block"),
+                Map.entry("safetyAction", "block"),
+                Map.entry("category", "sexual"),
+                Map.entry("domain", "investment_related"),
+                Map.entry("financialClaim", "opinion"),
+                Map.entry("financialRisk", "none"),
+                Map.entry("financialPrivacy", "none"),
+                Map.entry("impersonation", "none"),
+                Map.entry("politicalContext", "none"),
+                Map.entry("restrictedPoliticalEntity", "none"),
+                Map.entry("finalReason", "safety"),
+                Map.entry("candidateDisposition", "confirmed"),
+                Map.entry("evidenceBasis", "current_visual"),
+                Map.entry("reasonCode", "current_policy_violation"),
+                Map.entry("candidateIds", java.util.List.of()),
+                Map.entry("usage", modelUsage())));
+        return Map.copyOf(result);
     }
 
     private static Map<String, Object> candidateAllowAi() {
@@ -2688,7 +4519,9 @@ class ModerationControllerTest {
         result.put("adjudication", Map.ofEntries(
                 Map.entry("status", "ok"),
                 Map.entry("model", "gpt-5.6-terra"),
-                Map.entry("promptVersion", "image-adjudication-v5"),
+                Map.entry(
+                        "promptVersion",
+                        DecisionPolicy.IMAGE_ADJUDICATION_PROMPT_VERSION),
                 Map.entry("adjudicationMode", "candidate_recheck"),
                 Map.entry("action", "allow"),
                 Map.entry("safetyAction", "allow"),
@@ -2740,6 +4573,10 @@ class ModerationControllerTest {
         ocr.putIfAbsent("confidenceAccepted", false);
         ocr.putIfAbsent("truncated", false);
         ocr.putIfAbsent("engine", "tesseract-test-v1");
+        if (("error".equals(ocr.get("status")) || "busy".equals(ocr.get("status")))
+                && !ocr.containsKey("failureKind")) {
+            ocr.put("failureKind", "UNAVAILABLE");
+        }
         ocr.putIfAbsent("profileVersion", "ocr-policy-v1");
         ocr.putIfAbsent("enabled", true);
         ocr.putIfAbsent("languages", "aze+eng+rus+tur");

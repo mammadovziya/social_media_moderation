@@ -1,5 +1,7 @@
 package com.example.moderation.media;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.Types;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
@@ -9,13 +11,16 @@ import org.springframework.stereotype.Repository;
 @Repository
 class UsernameDecisionAuditRepository {
     private final JdbcClient jdbc;
+    private final ObjectMapper objectMapper;
 
-    UsernameDecisionAuditRepository(JdbcClient jdbc) {
+    UsernameDecisionAuditRepository(JdbcClient jdbc, ObjectMapper objectMapper) {
         this.jdbc = jdbc;
+        this.objectMapper = objectMapper;
     }
 
     /** Persists one decision and returns its immutable audit event ID. */
     long save(UsernameDecisionAuditRequest event) {
+        UsernameDecisionAuditRequest.UsageEvidence usage = event.usage();
         KeyHolder keys = new GeneratedKeyHolder();
         int inserted = jdbc.sql("""
                         INSERT INTO moderation_username_decision_audit_events (
@@ -52,6 +57,27 @@ class UsernameDecisionAuditRepository {
                             configured_classification_model,
                             configured_classification_prompt_bundle_sha256,
                             configured_classification_profile_sha256,
+                            adjudication_status,
+                            actual_adjudication_model,
+                            configured_adjudication_model,
+                            configured_adjudication_reasoning_effort,
+                            configured_adjudication_prompt_version,
+                            configured_adjudication_prompt_sha256,
+                            configured_adjudication_profile_sha256,
+                            ai_metered_calls,
+                            ai_free_moderation_calls,
+                            ai_input_tokens,
+                            ai_cached_input_tokens,
+                            ai_cache_write_tokens,
+                            ai_output_tokens,
+                            ai_reasoning_tokens,
+                            ai_total_tokens,
+                            ai_estimated_cost_usd,
+                            ai_currency,
+                            ai_pricing_version,
+                            ai_usage_complete,
+                            ai_cost_complete,
+                            ai_model_calls,
                             verdict_source,
                             provenance_schema_version,
                             latency_ms
@@ -89,6 +115,27 @@ class UsernameDecisionAuditRepository {
                             :configuredClassificationModel,
                             :configuredClassificationPromptBundleSha256,
                             :configuredClassificationProfileSha256,
+                            :adjudicationStatus,
+                            :actualAdjudicationModel,
+                            :configuredAdjudicationModel,
+                            :configuredAdjudicationReasoningEffort,
+                            :configuredAdjudicationPromptVersion,
+                            :configuredAdjudicationPromptSha256,
+                            :configuredAdjudicationProfileSha256,
+                            :aiMeteredCalls,
+                            :aiFreeModerationCalls,
+                            :aiInputTokens,
+                            :aiCachedInputTokens,
+                            :aiCacheWriteTokens,
+                            :aiOutputTokens,
+                            :aiReasoningTokens,
+                            :aiTotalTokens,
+                            :aiEstimatedCostUsd,
+                            :aiCurrency,
+                            :aiPricingVersion,
+                            :aiUsageComplete,
+                            :aiCostComplete,
+                            CAST(:aiModelCalls AS JSONB),
                             :verdictSource,
                             :provenanceSchemaVersion,
                             :latencyMs
@@ -148,6 +195,84 @@ class UsernameDecisionAuditRepository {
                         "configuredClassificationProfileSha256",
                         event.configuredClassificationProfileSha256(),
                         Types.CHAR)
+                .param("adjudicationStatus", event.adjudicationStatus(), Types.VARCHAR)
+                .param(
+                        "actualAdjudicationModel",
+                        event.actualAdjudicationModel(),
+                        Types.VARCHAR)
+                .param(
+                        "configuredAdjudicationModel",
+                        event.configuredAdjudicationModel(),
+                        Types.VARCHAR)
+                .param(
+                        "configuredAdjudicationReasoningEffort",
+                        event.configuredAdjudicationReasoningEffort(),
+                        Types.VARCHAR)
+                .param(
+                        "configuredAdjudicationPromptVersion",
+                        event.configuredAdjudicationPromptVersion(),
+                        Types.VARCHAR)
+                .param(
+                        "configuredAdjudicationPromptSha256",
+                        event.configuredAdjudicationPromptSha256(),
+                        Types.CHAR)
+                .param(
+                        "configuredAdjudicationProfileSha256",
+                        event.configuredAdjudicationProfileSha256(),
+                        Types.CHAR)
+                .param(
+                        "aiMeteredCalls",
+                        usage == null ? null : usage.meteredCalls(),
+                        Types.INTEGER)
+                .param(
+                        "aiFreeModerationCalls",
+                        usage == null ? null : usage.freeModerationCalls(),
+                        Types.INTEGER)
+                .param(
+                        "aiInputTokens",
+                        usage == null ? null : usage.inputTokens(),
+                        Types.BIGINT)
+                .param(
+                        "aiCachedInputTokens",
+                        usage == null ? null : usage.cachedInputTokens(),
+                        Types.BIGINT)
+                .param(
+                        "aiCacheWriteTokens",
+                        usage == null ? null : usage.cacheWriteTokens(),
+                        Types.BIGINT)
+                .param(
+                        "aiOutputTokens",
+                        usage == null ? null : usage.outputTokens(),
+                        Types.BIGINT)
+                .param(
+                        "aiReasoningTokens",
+                        usage == null ? null : usage.reasoningTokens(),
+                        Types.BIGINT)
+                .param(
+                        "aiTotalTokens",
+                        usage == null ? null : usage.totalTokens(),
+                        Types.BIGINT)
+                .param(
+                        "aiEstimatedCostUsd",
+                        usage == null ? null : usage.estimatedCostUsd(),
+                        Types.NUMERIC)
+                .param(
+                        "aiCurrency",
+                        usage == null ? null : usage.currency(),
+                        Types.VARCHAR)
+                .param(
+                        "aiPricingVersion",
+                        usage == null ? null : usage.pricingVersion(),
+                        Types.VARCHAR)
+                .param(
+                        "aiUsageComplete",
+                        usage == null ? null : usage.usageComplete(),
+                        Types.BOOLEAN)
+                .param(
+                        "aiCostComplete",
+                        usage == null ? null : usage.costComplete(),
+                        Types.BOOLEAN)
+                .param("aiModelCalls", modelCallsJson(usage), Types.VARCHAR)
                 .param("verdictSource", event.verdictSource())
                 .param(
                         "provenanceSchemaVersion",
@@ -162,5 +287,16 @@ class UsernameDecisionAuditRepository {
             throw new IllegalStateException("Username decision audit event returned no ID");
         }
         return id.longValue();
+    }
+
+    private String modelCallsJson(UsernameDecisionAuditRequest.UsageEvidence usage) {
+        if (usage == null) {
+            return null;
+        }
+        try {
+            return objectMapper.writeValueAsString(usage.modelCalls());
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("Could not serialize username decision AI usage", exception);
+        }
     }
 }

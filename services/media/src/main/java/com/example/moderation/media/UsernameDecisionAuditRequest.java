@@ -1,10 +1,17 @@
 package com.example.moderation.media;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.AssertTrue;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
+import java.math.BigDecimal;
+import java.util.List;
 
 /**
  * One audited handle decision.
@@ -12,6 +19,7 @@ import jakarta.validation.constraints.Size;
  * <p>The record stores the handle because it is the complete subject of the decision. It stores no
  * account identifier or other member data.
  */
+@JsonIgnoreProperties(ignoreUnknown = false)
 public record UsernameDecisionAuditRequest(
         @NotBlank @Size(max = 128) String requestId,
         @NotBlank @Size(max = 128) String contentId,
@@ -24,7 +32,7 @@ public record UsernameDecisionAuditRequest(
                 @Pattern(
                         regexp = "STRUCTURE|PROTECTED_NAME|BLOCKED_TERM"
                                 + "|RESTRICTED_POLITICAL_ENTITY|FINANCIAL_PRIVACY"
-                                + "|CLASSIFIER|ANALYZER_UNAVAILABLE")
+                                + "|CLASSIFIER|ADJUDICATOR|ANALYZER_UNAVAILABLE")
                 String decidingLayer,
         @Size(max = 32) String structureReason,
         Long protectedNameId,
@@ -47,7 +55,8 @@ public record UsernameDecisionAuditRequest(
         @Pattern(
                         regexp =
                                 "username-decision-provenance-v3"
-                                        + "|username-decision-provenance-v4")
+                                        + "|username-decision-provenance-v4"
+                                        + "|username-decision-provenance-v5")
                 String provenanceSchemaVersion,
         @NotBlank @Size(max = 64) String policyVersion,
         @NotBlank @Size(max = 64) String handleStructureVersion,
@@ -63,6 +72,22 @@ public record UsernameDecisionAuditRequest(
                 String configuredClassificationPromptBundleSha256,
         @NotBlank @Pattern(regexp = "^[0-9a-f]{64}$")
                 String configuredClassificationProfileSha256,
+        @Pattern(regexp = "ok|error|not_required|unavailable") String adjudicationStatus,
+        @Size(max = 128)
+                @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9._:+/@~-]{0,127}")
+                String actualAdjudicationModel,
+        @Size(max = 128)
+                @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9._:+/@~-]{0,127}")
+                String configuredAdjudicationModel,
+        @Size(max = 16)
+                @Pattern(regexp = "none|minimal|low|medium|high|xhigh")
+                String configuredAdjudicationReasoningEffort,
+        @Size(max = 64)
+                @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9._:+/@~-]{0,63}")
+                String configuredAdjudicationPromptVersion,
+        @Pattern(regexp = "^[0-9a-f]{64}$") String configuredAdjudicationPromptSha256,
+        @Pattern(regexp = "^[0-9a-f]{64}$") String configuredAdjudicationProfileSha256,
+        @Valid UsageEvidence usage,
         @NotBlank @Pattern(regexp = "LIVE|CACHE|NOT_INVOKED") String verdictSource,
         @Min(0) int latencyMs) {
 
@@ -70,6 +95,73 @@ public record UsernameDecisionAuditRequest(
             "username-decision-provenance-v3";
     static final String CURRENT_PROVENANCE_SCHEMA_VERSION =
             "username-decision-provenance-v4";
+    static final String ADJUDICATION_PROVENANCE_SCHEMA_VERSION =
+            "username-decision-provenance-v5";
+
+    @JsonIgnoreProperties(ignoreUnknown = false)
+    public record UsageEvidence(
+            @Min(0) @Max(3) int meteredCalls,
+            @Min(0) @Max(1) int freeModerationCalls,
+            @Min(0) long inputTokens,
+            @Min(0) long cachedInputTokens,
+            @Min(0) long cacheWriteTokens,
+            @Min(0) long outputTokens,
+            @Min(0) long reasoningTokens,
+            @Min(0) long totalTokens,
+            @DecimalMin("0") BigDecimal estimatedCostUsd,
+            @NotNull @Pattern(regexp = "USD") String currency,
+                    @NotNull
+                    @Size(max = 64)
+                    @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9._:+/@~-]{0,63}")
+                    String pricingVersion,
+            boolean usageComplete,
+            boolean costComplete,
+            @NotNull @Size(max = 3) List<@NotNull @Valid ModelUsageEvidence> modelCalls) {
+        public UsageEvidence {
+            modelCalls = modelCalls == null ? null : List.copyOf(modelCalls);
+        }
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = false)
+    public record ModelUsageEvidence(
+            @NotNull @Pattern(regexp = "classification|adjudication") String purpose,
+            @NotNull @Pattern(regexp = "OK|ERROR") String resultStatus,
+            @NotNull
+                    @Pattern(
+                            regexp =
+                                    "NONE|INCOMPLETE_RESPONSE|UNEXPECTED_OUTPUT|INVALID_OUTPUT_TEXT|AMBIGUOUS_OUTPUT|INVALID_STRUCTURED_OUTPUT|SCHEMA_FIELDS_MISMATCH|SCHEMA_VALUE_INVALID|DECISION_CONTRACT_INCONSISTENT|ADJUDICATION_CONTRACT_INCONSISTENT|PROVIDER_RESPONSE_INVALID|CONFIGURATION_MISMATCH")
+                    String failureCode,
+            @NotNull
+                    @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9._:+/@~-]{0,127}")
+                    String model,
+            @NotNull
+                    @Pattern(regexp = "[A-Za-z0-9][A-Za-z0-9._:+/@~-]{0,127}")
+                    String serviceTier,
+            boolean serviceTierAssumed,
+            @Min(0) long inputTokens,
+            @Min(0) long cachedInputTokens,
+            @Min(0) long cacheWriteTokens,
+            @Min(0) long outputTokens,
+            @Min(0) long reasoningTokens,
+            @Min(0) long totalTokens,
+            @DecimalMin("0") BigDecimal estimatedCostUsd,
+            boolean costComplete) {
+
+        @AssertTrue(message = "model call token totals and subsets must be coherent")
+        public boolean isTokenUsageCoherent() {
+            return cachedInputTokens <= inputTokens
+                    && cacheWriteTokens <= inputTokens - cachedInputTokens
+                    && reasoningTokens <= outputTokens
+                    && inputTokens <= Long.MAX_VALUE - outputTokens
+                    && totalTokens == inputTokens + outputTokens;
+        }
+
+        @AssertTrue(message = "model call result and cost evidence must be coherent")
+        public boolean isResultAndCostCoherent() {
+            return ("OK".equals(resultStatus) == "NONE".equals(failureCode))
+                    && (!costComplete || estimatedCostUsd != null);
+        }
+    }
 
     public UsernameDecisionAuditRequest {
         skeleton = blankToNull(skeleton);
@@ -86,6 +178,14 @@ public record UsernameDecisionAuditRequest(
         blockedTermsDigest = blankToNull(blockedTermsDigest);
         provenanceSchemaVersion = blankToNull(provenanceSchemaVersion);
         protectedNameRegistryDigest = blankToNull(protectedNameRegistryDigest);
+        adjudicationStatus = blankToNull(adjudicationStatus);
+        actualAdjudicationModel = blankToNull(actualAdjudicationModel);
+        configuredAdjudicationModel = blankToNull(configuredAdjudicationModel);
+        configuredAdjudicationReasoningEffort =
+                blankToNull(configuredAdjudicationReasoningEffort);
+        configuredAdjudicationPromptVersion = blankToNull(configuredAdjudicationPromptVersion);
+        configuredAdjudicationPromptSha256 = blankToNull(configuredAdjudicationPromptSha256);
+        configuredAdjudicationProfileSha256 = blankToNull(configuredAdjudicationProfileSha256);
     }
 
     /**
@@ -104,8 +204,174 @@ public record UsernameDecisionAuditRequest(
         if (LEGACY_PROVENANCE_SCHEMA_VERSION.equals(resolved)) {
             return blockedTermsDigest == null;
         }
-        return CURRENT_PROVENANCE_SCHEMA_VERSION.equals(resolved)
+        return (CURRENT_PROVENANCE_SCHEMA_VERSION.equals(resolved)
+                        || ADJUDICATION_PROVENANCE_SCHEMA_VERSION.equals(resolved))
                 && blockedTermsDigest != null;
+    }
+
+    @AssertTrue(message = "username v5 adjudication provenance must be complete and version-bound")
+    public boolean isAdjudicationProvenanceVersionCoherent() {
+        boolean v5 = ADJUDICATION_PROVENANCE_SCHEMA_VERSION.equals(
+                resolvedProvenanceSchemaVersion());
+        if (!v5) {
+            return adjudicationStatus == null
+                    && actualAdjudicationModel == null
+                    && configuredAdjudicationModel == null
+                    && configuredAdjudicationReasoningEffort == null
+                    && configuredAdjudicationPromptVersion == null
+                    && configuredAdjudicationPromptSha256 == null
+                    && configuredAdjudicationProfileSha256 == null
+                    && usage == null;
+        }
+        return adjudicationStatus != null
+                && actualAdjudicationModel != null
+                && configuredAdjudicationModel != null
+                && configuredAdjudicationReasoningEffort != null
+                && configuredAdjudicationPromptVersion != null
+                && configuredAdjudicationPromptSha256 != null
+                && configuredAdjudicationProfileSha256 != null
+                && usage != null;
+    }
+
+    @AssertTrue(message = "username ADJUDICATOR decisions require v5 provenance")
+    public boolean isAdjudicatorLayerVersionCoherent() {
+        return !"ADJUDICATOR".equals(decidingLayer)
+                || ADJUDICATION_PROVENANCE_SCHEMA_VERSION.equals(
+                        resolvedProvenanceSchemaVersion());
+    }
+
+    @AssertTrue(message = "username v5 model statuses and actual models must be coherent")
+    public boolean isModelProvenanceCoherent() {
+        if (!ADJUDICATION_PROVENANCE_SCHEMA_VERSION.equals(
+                resolvedProvenanceSchemaVersion())) {
+            return true;
+        }
+        return classificationModelMatchesStatus(
+                        classificationStatus, actualClassificationModel)
+                && adjudicationModelMatchesStatus(
+                        adjudicationStatus, actualAdjudicationModel);
+    }
+
+    @AssertTrue(message = "username AI usage aggregate must bind its model-call evidence")
+    public boolean isUsageCoherent() {
+        if (usage == null || usage.modelCalls() == null) {
+            return true;
+        }
+        if (usage.meteredCalls() != usage.modelCalls().size()
+                || (usage.costComplete() != (usage.estimatedCostUsd() != null))) {
+            return false;
+        }
+        if (!usage.usageComplete()) {
+            return !usage.costComplete();
+        }
+        try {
+            long input = 0;
+            long cached = 0;
+            long cacheWrite = 0;
+            long output = 0;
+            long reasoning = 0;
+            long total = 0;
+            for (ModelUsageEvidence call : usage.modelCalls()) {
+                input = Math.addExact(input, call.inputTokens());
+                cached = Math.addExact(cached, call.cachedInputTokens());
+                cacheWrite = Math.addExact(cacheWrite, call.cacheWriteTokens());
+                output = Math.addExact(output, call.outputTokens());
+                reasoning = Math.addExact(reasoning, call.reasoningTokens());
+                total = Math.addExact(total, call.totalTokens());
+            }
+            return input == usage.inputTokens()
+                    && cached == usage.cachedInputTokens()
+                    && cacheWrite == usage.cacheWriteTokens()
+                    && output == usage.outputTokens()
+                    && reasoning == usage.reasoningTokens()
+                    && total == usage.totalTokens();
+        } catch (ArithmeticException exception) {
+            return false;
+        }
+    }
+
+    @AssertTrue(message = "username deciding layer, adjudication, source, and usage must be coherent")
+    public boolean isAdjudicationInvocationCoherent() {
+        if (!ADJUDICATION_PROVENANCE_SCHEMA_VERSION.equals(
+                        resolvedProvenanceSchemaVersion())
+                || usage == null
+                || usage.modelCalls() == null) {
+            return true;
+        }
+        boolean noFreshUsage = hasNoFreshUsage(usage);
+        if (("CACHE".equals(verdictSource) || "NOT_INVOKED".equals(verdictSource))
+                && !noFreshUsage) {
+            return false;
+        }
+        if ("error".equals(adjudicationStatus)
+                && !"unavailable".equals(actualAdjudicationModel)
+                && !("LIVE".equals(verdictSource)
+                        && usage.modelCalls().stream()
+                                .anyMatch(call -> "adjudication".equals(call.purpose())
+                                        && "ERROR".equals(call.resultStatus())
+                                        && java.util.Objects.equals(
+                                                actualAdjudicationModel, call.model())))) {
+            return false;
+        }
+        if ("ADJUDICATOR".equals(decidingLayer)) {
+            if (!"ok".equals(classificationStatus)
+                    || !"ok".equals(adjudicationStatus)
+                    || !("LIVE".equals(verdictSource) || "CACHE".equals(verdictSource))) {
+                return false;
+            }
+            return "CACHE".equals(verdictSource)
+                    || usage.modelCalls().stream()
+                            .anyMatch(call -> "adjudication".equals(call.purpose())
+                                    && "OK".equals(call.resultStatus())
+                                    && java.util.Objects.equals(
+                                            actualAdjudicationModel, call.model()));
+        }
+        if ("CLASSIFIER".equals(decidingLayer)) {
+            if (!"ok".equals(classificationStatus)
+                    || !("LIVE".equals(verdictSource) || "CACHE".equals(verdictSource))
+                    || !"not_required".equals(adjudicationStatus)
+                    || !"not_invoked".equals(actualAdjudicationModel)) {
+                return false;
+            }
+            return "CACHE".equals(verdictSource)
+                    || usage.modelCalls().stream()
+                            .anyMatch(call -> "classification".equals(call.purpose())
+                                    && "OK".equals(call.resultStatus())
+                                    && java.util.Objects.equals(
+                                            actualClassificationModel, call.model()));
+        }
+        if ("ANALYZER_UNAVAILABLE".equals(decidingLayer)) {
+            return !"ok".equals(adjudicationStatus);
+        }
+        // A registry near-miss is resolved after the classifier has already run, and is escalated
+        // to the adjudicator, so this layer can legitimately carry live model provenance. An
+        // exact registry match still decides before any model call and carries none.
+        if ("PROTECTED_NAME".equals(decidingLayer)) {
+            return "NOT_INVOKED".equals(verdictSource)
+                    || (("LIVE".equals(verdictSource) || "CACHE".equals(verdictSource))
+                            && "ok".equals(classificationStatus));
+        }
+        return "NOT_INVOKED".equals(verdictSource)
+                && "unavailable".equals(classificationStatus)
+                && "unavailable".equals(actualClassificationModel)
+                && "not_required".equals(adjudicationStatus)
+                && "not_invoked".equals(actualAdjudicationModel)
+                && noFreshUsage;
+    }
+
+    @AssertTrue(message = "current username adjudicator policy signals must match reducer precedence")
+    public boolean isAdjudicatorPolicyCoherent() {
+        if (!"ADJUDICATOR".equals(decidingLayer)) {
+            return true;
+        }
+        if (restrictedPoliticalEntity == null) {
+            return false;
+        }
+        PolicyOutcome expected = reducedPolicyOutcome();
+        return expected != null
+                && java.util.Objects.equals(expected.decision(), finalDecision)
+                && java.util.Objects.equals(expected.violation(), violation)
+                && java.util.Objects.equals(expected.reason(), finalReason);
     }
 
     @AssertTrue(message = "current username classifier policy signals must match reducer precedence")
@@ -125,7 +391,7 @@ public record UsernameDecisionAuditRequest(
 
     @AssertTrue(message = "current username political evidence must match the deciding layer")
     public boolean isRestrictedPoliticalEvidenceCoherent() {
-        if ("CLASSIFIER".equals(decidingLayer)) {
+        if ("CLASSIFIER".equals(decidingLayer) || "ADJUDICATOR".equals(decidingLayer)) {
             return restrictedPoliticalEntity != null;
         }
         if ("ANALYZER_UNAVAILABLE".equals(decidingLayer)) {
@@ -202,7 +468,9 @@ public record UsernameDecisionAuditRequest(
                     && safetyAction == null
                     && "NONE".equals(safety);
         }
-        if ("VULGAR".equals(violation) || "OTHER".equals(violation)) {
+        if ("VULGAR".equals(violation)
+                || "HATE".equals(violation)
+                || "OTHER".equals(violation)) {
             return "BLOCK".equals(finalDecision)
                     && "SAFETY".equals(finalReason)
                     && "BLOCK".equals(safetyAction)
@@ -275,6 +543,43 @@ public record UsernameDecisionAuditRequest(
             case "PUMP_AND_DUMP", "MARKET_MANIPULATION" -> "FINANCIAL_RISK";
             default -> "FINANCIAL_RISK";
         };
+    }
+
+    private static boolean classificationModelMatchesStatus(String status, String model) {
+        if (status == null || model == null) {
+            return false;
+        }
+        return switch (status) {
+            case "ok" -> !"not_invoked".equals(model) && !"unavailable".equals(model);
+            case "not_required" -> "not_invoked".equals(model);
+            case "error", "unavailable" -> "unavailable".equals(model);
+            default -> false;
+        };
+    }
+
+    private static boolean adjudicationModelMatchesStatus(String status, String model) {
+        if (status == null || model == null) {
+            return false;
+        }
+        return switch (status) {
+            case "ok" -> !"not_invoked".equals(model) && !"unavailable".equals(model);
+            case "not_required" -> "not_invoked".equals(model);
+            case "unavailable" -> "unavailable".equals(model);
+            case "error" -> !"not_invoked".equals(model);
+            default -> false;
+        };
+    }
+
+    private static boolean hasNoFreshUsage(UsageEvidence value) {
+        return value.meteredCalls() == 0
+                && value.freeModerationCalls() == 0
+                && value.inputTokens() == 0
+                && value.cachedInputTokens() == 0
+                && value.cacheWriteTokens() == 0
+                && value.outputTokens() == 0
+                && value.reasoningTokens() == 0
+                && value.totalTokens() == 0
+                && value.modelCalls().isEmpty();
     }
 
     private static String blankToNull(String value) {

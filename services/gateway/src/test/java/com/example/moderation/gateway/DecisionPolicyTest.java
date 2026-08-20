@@ -41,13 +41,20 @@ class DecisionPolicyTest {
         possible.put("restrictedPoliticalEntity", "possible");
         DecisionPolicy.Result result = DecisionPolicy.decide(
                 null,
-                ai(Map.copyOf(possible)),
+                textAi(
+                        Map.copyOf(possible),
+                        textAdjudication(
+                                ContentType.POST,
+                                Map.of(
+                                        "action", "block",
+                                        "restrictedPoliticalEntity", "president",
+                                        "finalReason", "restricted_political_entity"))),
                 ContentType.POST,
                 Violation.NONE,
                 0.70);
 
         assertThat(result).isEqualTo(new DecisionPolicy.Result(
-                Decision.UNKNOWN,
+                Decision.BLOCK,
                 Violation.POLITICAL_CONTENT,
                 FinalReason.POLITICAL_CONTENT));
         assertThat(DecisionPolicy.classifierProposedBlock(
@@ -269,6 +276,10 @@ class DecisionPolicyTest {
                 candidateAi("allow", "none", "rejected", "current_text"));
         ai.put("classification", classification(
                 "unknown", "other", "investment_related"));
+        Map<String, Object> adjudication = new java.util.LinkedHashMap<>(
+                DecisionPolicy.nestedMap(ai, "adjudication"));
+        adjudication.put("adjudicationMode", "both");
+        ai.put("adjudication", Map.copyOf(adjudication));
 
         DecisionPolicy.Result result = DecisionPolicy.decide(
                 Map.of(
@@ -415,6 +426,95 @@ class DecisionPolicyTest {
     }
 
     @Test
+    void clearRevealingSwimwearProposalRequiresAndAcceptsV7TerraConfirmation() {
+        Map<String, Object> classification =
+                classification("block", "sexual", "investment_related");
+        assertThat(DecisionPolicy.classifierProposedBlock(
+                        classification, ContentType.POST))
+                .isTrue();
+
+        DecisionPolicy.Result unavailable = DecisionPolicy.decide(
+                noCandidateMedia(),
+                classifierBlockAi("sexual", Map.of("status", "error")),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+        assertThat(unavailable).isEqualTo(new DecisionPolicy.Result(
+                Decision.UNKNOWN,
+                Violation.EVIDENCE_UNAVAILABLE,
+                FinalReason.EVIDENCE_UNAVAILABLE));
+
+        DecisionPolicy.Result confirmed = DecisionPolicy.decide(
+                noCandidateMedia(),
+                classifierBlockAi("sexual", adjudication(Map.of(
+                        "status", "ok",
+                        "adjudicationMode", "classifier_block_recheck",
+                        "action", "block",
+                        "category", "sexual",
+                        "candidateDisposition", "confirmed",
+                        "evidenceBasis", "current_visual",
+                        "reasonCode", "current_policy_violation",
+                        "candidateIds", java.util.List.of()),
+                        "investment_related")),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(confirmed).isEqualTo(new DecisionPolicy.Result(
+                Decision.BLOCK, Violation.SEXUAL, FinalReason.SAFETY));
+    }
+
+    @Test
+    void ordinaryNonRevealingImageSignalRemainsAllowedWithoutAdjudication() {
+        Map<String, Object> classification =
+                classification("allow", "none", "investment_related");
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(ai(classification));
+        ai.put("adjudication", Map.of(
+                "status", "not_required",
+                "promptVersion", DecisionPolicy.IMAGE_ADJUDICATION_PROMPT_VERSION,
+                "adjudicationMode", "not_required",
+                "action", "not_required"));
+
+        assertThat(DecisionPolicy.classifierProposedBlock(
+                        classification, ContentType.POST))
+                .isFalse();
+        assertThat(DecisionPolicy.decide(
+                        noCandidateMedia(),
+                        Map.copyOf(ai),
+                        ContentType.POST,
+                        Violation.NONE,
+                        0.70))
+                .isEqualTo(new DecisionPolicy.Result(
+                        Decision.ALLOW, Violation.NONE, FinalReason.NONE));
+    }
+
+    @Test
+    void staleImageAdjudicationPromptCannotConfirmAClassifierBlock() {
+        Map<String, Object> stale = new java.util.LinkedHashMap<>(adjudication(Map.of(
+                "status", "ok",
+                "adjudicationMode", "classifier_block_recheck",
+                "action", "block",
+                "category", "sexual",
+                "candidateDisposition", "confirmed",
+                "evidenceBasis", "current_visual",
+                "reasonCode", "current_policy_violation",
+                "candidateIds", java.util.List.of()),
+                "investment_related"));
+        stale.put("promptVersion", "image-adjudication-v5");
+
+        assertThat(DecisionPolicy.decide(
+                        noCandidateMedia(),
+                        classifierBlockAi("sexual", Map.copyOf(stale)),
+                        ContentType.POST,
+                        Violation.NONE,
+                        0.70))
+                .isEqualTo(new DecisionPolicy.Result(
+                        Decision.UNKNOWN,
+                        Violation.ANALYZER_ERROR,
+                        FinalReason.ANALYZER_ERROR));
+    }
+
+    @Test
     void terraCanConfirmARestrictedPoliticalImageWithoutCandidates() {
         DecisionPolicy.Result result = DecisionPolicy.decide(
                 noCandidateMedia(),
@@ -449,7 +549,7 @@ class DecisionPolicyTest {
     }
 
     @Test
-    void terraKeepsAPossibleRestrictedPoliticalImageFailClosed() {
+    void successfulV7TerraCannotReturnAPossibleRestrictedPoliticalResult() {
         DecisionPolicy.Result result = DecisionPolicy.decide(
                 noCandidateMedia(),
                 politicalImageAi(
@@ -478,8 +578,8 @@ class DecisionPolicyTest {
 
         assertThat(result).isEqualTo(new DecisionPolicy.Result(
                 Decision.UNKNOWN,
-                Violation.POLITICAL_CONTENT,
-                FinalReason.POLITICAL_CONTENT));
+                Violation.ANALYZER_ERROR,
+                FinalReason.ANALYZER_ERROR));
     }
 
     @Test
@@ -897,23 +997,20 @@ class DecisionPolicyTest {
     }
 
     @Test
-    void investmentUncertaintyIsNotReportedAsGenericSafetyUncertainty() {
+    void unavailableInvestmentUncertaintyAdjudicationFailsClosed() {
         DecisionPolicy.Result result = DecisionPolicy.decide(
                 null,
-                Map.of(
-                        "moderation",
-                        Map.of(
-                                "status", "ok",
-                                "flagged", false,
-                                "categoryScores", Map.of()),
-                        "classification",
-                        classification("allow", "none", "uncertain")),
+                textAi(
+                        classification("allow", "none", "uncertain"),
+                        Map.of("status", "error")),
                 ContentType.POST,
                 Violation.NONE,
                 0.70);
 
-        assertThat(result).isEqualTo(
-                new DecisionPolicy.Result(Decision.UNKNOWN, Violation.OFF_TOPIC));
+        assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                Decision.UNKNOWN,
+                Violation.ANALYZER_ERROR,
+                FinalReason.ANALYZER_ERROR));
     }
 
     @Test
@@ -932,12 +1029,218 @@ class DecisionPolicyTest {
     void customUnknownReturnsUnknown() {
         DecisionPolicy.Result result = DecisionPolicy.decide(
                 null,
-                ai("unknown", "hate"),
+                textAi(
+                        classification("unknown", "hate", "investment_related"),
+                        Map.of(
+                                "status", "error",
+                                "adjudicationMode", "error",
+                                "action", "error")),
                 ContentType.COMMENT,
                 Violation.NONE,
                 0.70);
         assertThat(result)
-                .isEqualTo(new DecisionPolicy.Result(Decision.UNKNOWN, Violation.HATE));
+                .isEqualTo(new DecisionPolicy.Result(
+                        Decision.UNKNOWN,
+                        Violation.ANALYZER_ERROR,
+                        FinalReason.ANALYZER_ERROR));
+    }
+
+    @Test
+    void strongerTextAdjudicationCanAllowAnUncertainPost() {
+        Map<String, Object> ai = textAi(
+                classification("allow", "none", "uncertain"),
+                textAdjudication(ContentType.POST, Map.of()));
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                null,
+                ai,
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                Decision.ALLOW, Violation.NONE, FinalReason.NONE));
+        assertThat(DecisionPolicy.successfulTextAdjudication(
+                        ai, ContentType.POST, result, 0.70))
+                .isTrue();
+    }
+
+    @Test
+    void antiFraudWarningAllowsWhileDirectScamSolicitationBlocksAfterRecheck() {
+        Map<String, Object> ambiguousFirstPass = new java.util.LinkedHashMap<>(
+                classification("unknown", "spam_scam", "uncertain"));
+        ambiguousFirstPass.put("financialRisk", "uncertain");
+
+        for (ContentType contentType : java.util.List.of(
+                ContentType.POST, ContentType.COMMENT)) {
+            DecisionPolicy.Result warning = DecisionPolicy.decide(
+                    null,
+                    textAi(
+                            Map.copyOf(ambiguousFirstPass),
+                            textAdjudication(
+                                    contentType,
+                                    Map.of("domain", "investment_adjacent"))),
+                    contentType,
+                    Violation.NONE,
+                    0.70);
+            DecisionPolicy.Result directSolicitation = DecisionPolicy.decide(
+                    null,
+                    textAi(
+                            Map.copyOf(ambiguousFirstPass),
+                            textAdjudication(
+                                    contentType,
+                                    Map.of(
+                                            "action", "block",
+                                            "safetyAction", "block",
+                                            "category", "spam_scam",
+                                            "domain", "investment_adjacent",
+                                            "financialRisk", "investment_scam",
+                                            "finalReason", "safety"))),
+                    contentType,
+                    Violation.NONE,
+                    0.70);
+
+            assertThat(warning).isEqualTo(new DecisionPolicy.Result(
+                    Decision.ALLOW, Violation.NONE, FinalReason.NONE));
+            assertThat(directSolicitation).isEqualTo(new DecisionPolicy.Result(
+                    Decision.BLOCK, Violation.SPAM_SCAM, FinalReason.SAFETY));
+        }
+    }
+
+    @Test
+    void providerModerationRemainsTheWinnerOverAnOtherwiseValidTextAdjudication() {
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(textAi(
+                classification("allow", "none", "uncertain"),
+                textAdjudication(ContentType.POST, Map.of())));
+        ai.put(
+                "moderation",
+                Map.of(
+                        "status", "ok",
+                        "flagged", true,
+                        "categories", Map.of("hate", true),
+                        "categoryScores", Map.of("hate", 0.99)));
+
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                null,
+                Map.copyOf(ai),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                Decision.BLOCK, Violation.HATE, FinalReason.SAFETY));
+        assertThat(DecisionPolicy.successfulTextAdjudication(
+                        Map.copyOf(ai), ContentType.POST, result, 0.70))
+                .isFalse();
+    }
+
+    @Test
+    void strongerTextAdjudicationCanBlockAnUncertainComment() {
+        Map<String, Object> firstPass = new java.util.LinkedHashMap<>(
+                classification("allow", "none", "investment_related"));
+        firstPass.put("financialRisk", "potentially_misleading");
+
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                null,
+                textAi(
+                        Map.copyOf(firstPass),
+                        textAdjudication(
+                                ContentType.COMMENT,
+                                Map.of(
+                                        "action", "block",
+                                        "financialRisk", "guaranteed_return",
+                                        "finalReason", "financial_risk"))),
+                ContentType.COMMENT,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                Decision.BLOCK,
+                Violation.SPAM_SCAM,
+                FinalReason.FINANCIAL_RISK));
+    }
+
+    @Test
+    void strongerTextAdjudicationUsesTheUsernameSpecificSignalShape() {
+        Map<String, Object> firstPass = new java.util.LinkedHashMap<>(
+                usernameClassification("allow", "none"));
+        firstPass.put("impersonation", "possible");
+
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                null,
+                textAi(
+                        Map.copyOf(firstPass),
+                        textAdjudication(
+                                ContentType.USERNAME,
+                                Map.of(
+                                        "action", "block",
+                                        "impersonation", "clear",
+                                        "finalReason", "impersonation"))),
+                ContentType.USERNAME,
+                Violation.NONE,
+                0.70);
+
+        assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                Decision.BLOCK,
+                Violation.IMPERSONATION,
+                FinalReason.IMPERSONATION));
+    }
+
+    @Test
+    void malformedOrNonBinaryTextAdjudicationFailsClosed() {
+        Map<String, Object> malformed = new java.util.LinkedHashMap<>(
+                textAdjudication(ContentType.POST, Map.of()));
+        malformed.put("action", "unknown");
+
+        for (Map<String, Object> adjudication : java.util.List.<Map<String, Object>>of(
+                Map.<String, Object>of(
+                        "status", "error",
+                        "adjudicationMode", "error",
+                        "action", "error"),
+                Map.copyOf(malformed))) {
+            DecisionPolicy.Result result = DecisionPolicy.decide(
+                    null,
+                    textAi(
+                            classification("allow", "none", "uncertain"),
+                            adjudication),
+                    ContentType.POST,
+                    Violation.NONE,
+                    0.70);
+
+            assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                    Decision.UNKNOWN,
+                    Violation.ANALYZER_ERROR,
+                    FinalReason.ANALYZER_ERROR));
+        }
+    }
+
+    @Test
+    void normalTextAllowAndBlockIgnoreAnUnexpectedAdjudication() {
+        DecisionPolicy.Result allow = DecisionPolicy.decide(
+                null,
+                textAi(
+                        classification("allow", "none", "investment_related"),
+                        textAdjudication(
+                                ContentType.POST,
+                                Map.of(
+                                        "action", "block",
+                                        "financialRisk", "investment_scam",
+                                        "finalReason", "financial_risk"))),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+        DecisionPolicy.Result block = DecisionPolicy.decide(
+                null,
+                textAi(
+                        classification("block", "hate", "investment_related"),
+                        textAdjudication(ContentType.POST, Map.of())),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(allow).isEqualTo(new DecisionPolicy.Result(
+                Decision.ALLOW, Violation.NONE, FinalReason.NONE));
+        assertThat(block).isEqualTo(new DecisionPolicy.Result(
+                Decision.BLOCK, Violation.HATE, FinalReason.SAFETY));
     }
 
     @Test
@@ -1011,17 +1314,19 @@ class DecisionPolicyTest {
     }
 
     @Test
-    void uncertainPostReturnsUnknown() {
+    void uncertainPostWithUnavailableAdjudicationFailsClosed() {
         DecisionPolicy.Result result = DecisionPolicy.decide(
                 null,
-                postAi("uncertain"),
+                textAi(
+                        classification("allow", "none", "uncertain"),
+                        Map.of("status", "error")),
                 ContentType.POST,
                 Violation.NONE,
                 0.70);
 
         assertThat(result)
                 .isEqualTo(new DecisionPolicy.Result(
-                        Decision.UNKNOWN, Violation.OFF_TOPIC));
+                        Decision.UNKNOWN, Violation.ANALYZER_ERROR));
     }
 
     @Test
@@ -1092,33 +1397,81 @@ class DecisionPolicyTest {
     }
 
     @Test
-    void misleadingClaimAndPaidPromotionRequireReview() {
+    void strongerAdjudicationCanClearFirstPassFinancialRiskUncertainty() {
         for (String financialRisk : java.util.List.of(
                 "potentially_misleading", "paid_promotion")) {
             DecisionPolicy.Result result = DecisionPolicy.decide(
                     null,
-                    ai(classification(
-                            "allow",
-                            "none",
-                            "investment_related",
-                            "factual_claim",
-                            financialRisk,
-                            "none",
-                            "none",
-                            "none")),
+                    textAi(
+                            classification(
+                                    "allow",
+                                    "none",
+                                    "investment_related",
+                                    "factual_claim",
+                                    financialRisk,
+                                    "none",
+                                    "none",
+                                    "none"),
+                            textAdjudication(ContentType.POST, Map.of())),
                     ContentType.POST,
                     Violation.NONE,
                     0.70);
 
             assertThat(result).isEqualTo(new DecisionPolicy.Result(
-                    Decision.UNKNOWN,
-                    Violation.FINANCIAL_RISK,
-                    FinalReason.FINANCIAL_RISK));
+                    Decision.ALLOW,
+                    Violation.NONE,
+                    FinalReason.NONE));
         }
     }
 
     @Test
-    void imageAdjudicationCanResolvePossiblePrivacyAsItsUnknownReason() {
+    void imageTerraClearsConditionalLongHorizonProjectionFromFinancialRisk() {
+        Map<String, Object> firstPass = classification(
+                "allow",
+                "none",
+                "investment_related",
+                "factual_claim",
+                "potentially_misleading",
+                "none",
+                "none",
+                "none");
+        Map<String, Object> resolved = adjudication(
+                Map.of(
+                        "status", "ok",
+                        "adjudicationMode", "classifier_unknown_recheck",
+                        "action", "allow",
+                        "category", "none",
+                        "candidateDisposition", "rejected",
+                        "evidenceBasis", "current_text",
+                        "reasonCode", "current_content_safe",
+                        "candidateIds", java.util.List.of()),
+                "investment_related");
+
+        DecisionPolicy.Result result = DecisionPolicy.decide(
+                noCandidateMedia(),
+                Map.of(
+                        "moderation",
+                        Map.of(
+                                "status", "ok",
+                                "flagged", false,
+                                "categoryScores", Map.of()),
+                        "classification", firstPass,
+                        "adjudication", resolved),
+                ContentType.POST,
+                Violation.NONE,
+                0.70);
+
+        assertThat(DecisionPolicy.classifierProposedBlock(
+                        firstPass, ContentType.POST))
+                .isFalse();
+        assertThat(result).isEqualTo(new DecisionPolicy.Result(
+                Decision.ALLOW,
+                Violation.NONE,
+                FinalReason.NONE));
+    }
+
+    @Test
+    void successfulV7ImageAdjudicationRejectsPossiblePrivacyAndUnknownAction() {
         Map<String, Object> adjudication = new java.util.LinkedHashMap<>(adjudication(
                 Map.of(
                         "status", "ok",
@@ -1151,8 +1504,8 @@ class DecisionPolicyTest {
 
         assertThat(result).isEqualTo(new DecisionPolicy.Result(
                 Decision.UNKNOWN,
-                Violation.FINANCIAL_PRIVACY,
-                FinalReason.FINANCIAL_PRIVACY));
+                Violation.ANALYZER_ERROR,
+                FinalReason.ANALYZER_ERROR));
     }
 
     @Test
@@ -1346,6 +1699,21 @@ class DecisionPolicyTest {
                 classification);
     }
 
+    private static Map<String, Object> textAi(
+            Map<String, Object> classification,
+            Map<String, Object> adjudication) {
+        return Map.of(
+                "moderation",
+                Map.of(
+                        "status", "ok",
+                        "flagged", false,
+                        "categoryScores", Map.of()),
+                "classification",
+                classification,
+                "adjudication",
+                adjudication);
+    }
+
     private static Map<String, Object> candidateAi(
             String action, String category, String disposition, String evidenceBasis) {
         return Map.of(
@@ -1391,13 +1759,21 @@ class DecisionPolicyTest {
         Map<String, Object> classification = new java.util.LinkedHashMap<>(
                 classification("allow", "none", "investment_related"));
         classification.put("restrictedPoliticalEntity", restrictedPoliticalEntity);
+        Map<String, Object> versionedAdjudication =
+                new java.util.LinkedHashMap<>(adjudication);
+        if ("ok".equals(versionedAdjudication.get("status"))) {
+            versionedAdjudication.putIfAbsent("model", "gpt-5.6-terra");
+            versionedAdjudication.putIfAbsent(
+                    "promptVersion",
+                    DecisionPolicy.IMAGE_ADJUDICATION_PROMPT_VERSION);
+        }
         return Map.of(
                 "moderation", Map.of(
                         "status", "ok",
                         "flagged", false,
                         "categoryScores", Map.of()),
                 "classification", Map.copyOf(classification),
-                "adjudication", adjudication);
+                "adjudication", Map.copyOf(versionedAdjudication));
     }
 
     private static Map<String, Object> noCandidateMedia() {
@@ -1457,6 +1833,42 @@ class DecisionPolicyTest {
                 Map.entry("restrictedPoliticalEntity", "none"));
     }
 
+    private static Map<String, Object> usernameClassification(
+            String action, String category) {
+        return Map.ofEntries(
+                Map.entry("status", "ok"),
+                Map.entry("safetyAction", action),
+                Map.entry("category", category),
+                Map.entry("financialRisk", "none"),
+                Map.entry("financialPrivacy", "none"),
+                Map.entry("impersonation", "none"),
+                Map.entry("restrictedPoliticalEntity", "none"));
+    }
+
+    private static Map<String, Object> textAdjudication(
+            ContentType contentType, Map<String, Object> overrides) {
+        Map<String, Object> result = new java.util.LinkedHashMap<>();
+        result.put("status", "ok");
+        result.put("model", "gpt-5.6-terra");
+        result.put("promptVersion", DecisionPolicy.TEXT_ADJUDICATION_PROMPT_VERSION);
+        result.put("adjudicationMode", "text_unknown_recheck");
+        result.put("action", "allow");
+        result.put("safetyAction", "allow");
+        result.put("category", "none");
+        result.put("financialRisk", "none");
+        result.put("financialPrivacy", "none");
+        result.put("impersonation", "none");
+        result.put("restrictedPoliticalEntity", "none");
+        result.put("finalReason", "none");
+        if (contentType != ContentType.USERNAME) {
+            result.put("domain", "investment_related");
+            result.put("financialClaim", "none");
+            result.put("politicalContext", "none");
+        }
+        result.putAll(overrides);
+        return Map.copyOf(result);
+    }
+
     private static Map<String, Object> classification(
             String action,
             String category,
@@ -1479,6 +1891,9 @@ class DecisionPolicyTest {
     private static Map<String, Object> adjudication(
             Map<String, Object> base, String domain) {
         Map<String, Object> result = new java.util.LinkedHashMap<>(base);
+        result.putIfAbsent("model", "gpt-5.6-terra");
+        result.putIfAbsent(
+                "promptVersion", DecisionPolicy.IMAGE_ADJUDICATION_PROMPT_VERSION);
         String normalizedDomain = domain(domain);
         String action = String.valueOf(result.get("action"));
         String category = String.valueOf(result.get("category"));

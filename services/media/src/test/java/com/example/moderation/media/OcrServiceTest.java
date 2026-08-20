@@ -43,6 +43,7 @@ class OcrServiceTest {
         assertThat(service.analyze(image).asMap())
                 .containsEntry("status", "disabled")
                 .containsEntry("spans", List.of())
+                .doesNotContainKey("failureKind")
                 .doesNotContainKey("text");
         verifyNoInteractions(engine);
     }
@@ -70,7 +71,8 @@ class OcrServiceTest {
                 .containsEntry("status", "ok")
                 .containsEntry("text", "Salam Bakı fikir")
                 .containsEntry("normalizedText", "Salam Bakı fikir")
-                .containsEntry("confidence", 92.5);
+                .containsEntry("confidence", 92.5)
+                .doesNotContainKey("failureKind");
         assertThat(response.get("digest")).asString().hasSize(64);
         assertThat((List<?>) response.get("spans"))
                 .singleElement()
@@ -96,6 +98,7 @@ class OcrServiceTest {
         assertThat(service.analyze(image).asMap())
                 .containsEntry("status", "no_text")
                 .containsEntry("spans", List.of())
+                .doesNotContainKey("failureKind")
                 .doesNotContainKey("text");
     }
 
@@ -135,7 +138,7 @@ class OcrServiceTest {
     }
 
     @Test
-    void engineFailureDoesNotFailTheMediaRequest() throws Exception {
+    void engineFailureReturnsTypedUnavailableEvidence() throws Exception {
         OcrEngine engine = mock(OcrEngine.class);
         markReady(engine);
         when(engine.extract(image, "aze+eng+rus+tur", Duration.ofSeconds(10), 20_000, 512))
@@ -144,6 +147,39 @@ class OcrServiceTest {
 
         assertThat(service.analyze(image).asMap())
                 .containsEntry("status", "error")
+                .containsEntry("failureKind", "UNAVAILABLE")
+                .doesNotContainKey("text");
+    }
+
+    @Test
+    void engineTimeoutReturnsTypedTimeoutEvidence() throws Exception {
+        OcrEngine engine = mock(OcrEngine.class);
+        markReady(engine);
+        when(engine.extract(image, "aze+eng+rus+tur", Duration.ofSeconds(10), 20_000, 512))
+                .thenThrow(new java.util.concurrent.TimeoutException("provider detail"));
+        OcrService service = service(properties(true, 20_000, 512, 2), engine);
+
+        assertThat(service.analyze(image).asMap())
+                .containsEntry("status", "error")
+                .containsEntry("failureKind", "TIMEOUT")
+                .doesNotContainKey("text")
+                .doesNotContainValue("provider detail");
+    }
+
+    @Test
+    void runtimeProfileDriftReturnsTypedContractInvalidEvidence() throws Exception {
+        OcrEngine engine = mock(OcrEngine.class);
+        markReady(engine);
+        when(engine.extract(image, "aze+eng+rus+tur", Duration.ofSeconds(10), 20_000, 512))
+                .thenReturn(new OcrDocument(
+                        List.of(new OcrSpan("text", 90.0, 1, 1, 8, 8)),
+                        false,
+                        "different-runtime-profile"));
+        OcrService service = service(properties(true, 20_000, 512, 2), engine);
+
+        assertThat(service.analyze(image).asMap())
+                .containsEntry("status", "error")
+                .containsEntry("failureKind", "CONTRACT_INVALID")
                 .doesNotContainKey("text");
     }
 
@@ -154,7 +190,10 @@ class OcrServiceTest {
 
         assertThat(service.ready()).isFalse();
         assertThat(service.readinessStatus()).isEqualTo("unavailable");
-        assertThat(service.analyze(image).status()).isEqualTo("error");
+        assertThat(service.analyze(image).asMap())
+                .containsEntry("status", "error")
+                .containsEntry("failureKind", "UNAVAILABLE")
+                .doesNotContainKey("text");
         verify(engine, never())
                 .extract(image, "aze+eng+rus+tur", Duration.ofSeconds(10), 20_000, 512);
     }
@@ -179,7 +218,10 @@ class OcrServiceTest {
         Thread thread = Thread.ofVirtual().start(() -> first.set(service.analyze(image)));
 
         assertThat(entered.await(1, TimeUnit.SECONDS)).isTrue();
-        assertThat(service.analyze(image).status()).isEqualTo("busy");
+        assertThat(service.analyze(image).asMap())
+                .containsEntry("status", "busy")
+                .containsEntry("failureKind", "UNAVAILABLE")
+                .doesNotContainKey("text");
         release.countDown();
         thread.join(2_000);
         assertThat(first.get().status()).isEqualTo("ok");

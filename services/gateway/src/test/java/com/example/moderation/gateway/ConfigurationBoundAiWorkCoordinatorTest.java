@@ -33,6 +33,84 @@ class ConfigurationBoundAiWorkCoordinatorTest {
             List.of("configuration"));
 
     @Test
+    void successfulTextAdjudicationRemainsCacheableAfterUsageIsStripped() {
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(successfulAi());
+        ai.put(
+                "adjudication",
+                Map.of(
+                        "status", "ok",
+                        "adjudicationMode", "text_unknown_recheck",
+                        "action", "allow",
+                        "usage", Map.of("inputTokens", 10, "outputTokens", 2)));
+
+        Map<String, Object> stored =
+                ConfigurationBoundAiWorkCoordinator.withoutUsage(Map.copyOf(ai));
+
+        assertThat(ConfigurationBoundAiWorkCoordinator.cacheable(stored)).isTrue();
+        assertThat(DecisionPolicy.nestedMap(stored, "adjudication"))
+                .doesNotContainKey("usage");
+    }
+
+    @Test
+    void failedTextAdjudicationIsNeverCacheable() {
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(successfulAi());
+        ai.put(
+                "adjudication",
+                Map.of(
+                        "status", "error",
+                        "adjudicationMode", "error",
+                        "action", "error"));
+
+        assertThat(ConfigurationBoundAiWorkCoordinator.cacheable(Map.copyOf(ai)))
+                .isFalse();
+    }
+
+    @Test
+    void emptyModerationEvidenceIsNeverCacheable() {
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(successfulAi());
+        ai.put(
+                "moderation",
+                Map.of(
+                        "status", "ok",
+                        "model", "omni-moderation-2024-09-26",
+                        "flagged", false,
+                        "categories", Map.of(),
+                        "categoryScores", Map.of()));
+
+        assertThat(ConfigurationBoundAiWorkCoordinator.cacheable(Map.copyOf(ai)))
+                .isFalse();
+    }
+
+    @Test
+    void ambiguousFirstPassWithoutAdjudicationIsNeverCacheable() {
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(successfulAi());
+        ai.put(
+                "classification",
+                Map.of(
+                        "status", "ok",
+                        "model", "gpt-5.4-mini",
+                        "safetyAction", "unknown",
+                        "financialRisk", "uncertain"));
+
+        assertThat(ConfigurationBoundAiWorkCoordinator.cacheable(Map.copyOf(ai)))
+                .isFalse();
+    }
+
+    @Test
+    void successfulButNonBinaryAdjudicationIsNeverCacheable() {
+        Map<String, Object> ai = new java.util.LinkedHashMap<>(successfulAi());
+        ai.put(
+                "adjudication",
+                Map.of(
+                        "status", "ok",
+                        "adjudicationMode", "text_unknown_recheck",
+                        "action", "unknown"));
+
+        assertThat(ConfigurationBoundAiWorkCoordinator.cacheable(Map.copyOf(ai)))
+                .isFalse();
+    }
+
+    @Test
     void liveOwnerStoresUsageStrippedEvidenceButRetainsLiveAccounting() {
         AnalyzerClients clients = mock(AnalyzerClients.class);
         when(clients.claimAiWork(any(), anyString(), anyInt(), anyInt(), anyInt()))
@@ -385,7 +463,7 @@ class ConfigurationBoundAiWorkCoordinatorTest {
                     }))
                     .isInstanceOf(
                             ConfigurationBoundAiWorkCoordinator
-                                    .CoordinationUnavailableException.class)
+                                    .CoordinationTimeoutException.class)
                     .hasMessageContaining("analysis deadline expired");
         }
 
@@ -537,10 +615,49 @@ class ConfigurationBoundAiWorkCoordinatorTest {
                 "reasoningTokens", 0,
                 "totalTokens", 12);
         return Map.of(
-                "moderation", Map.of("status", "ok", "flagged", false),
-                "classification", Map.of(
-                        "status", "ok", "model", "gpt-5.4-mini", "usage", usage),
+                "moderation", moderationEvidence(),
+                "classification", Map.ofEntries(
+                        Map.entry("status", "ok"),
+                        Map.entry("model", "gpt-5.4-mini"),
+                        Map.entry("safetyAction", "allow"),
+                        Map.entry("category", "none"),
+                        Map.entry("domain", "investment_related"),
+                        Map.entry("financialClaim", "none"),
+                        Map.entry("financialRisk", "none"),
+                        Map.entry("financialPrivacy", "none"),
+                        Map.entry("impersonation", "none"),
+                        Map.entry("politicalContext", "none"),
+                        Map.entry("restrictedPoliticalEntity", "none"),
+                        Map.entry("usage", usage)),
                 "adjudication", Map.of("status", "not_required"));
+    }
+
+    private static Map<String, Object> moderationEvidence() {
+        Map<String, Boolean> categories = new java.util.LinkedHashMap<>();
+        Map<String, Double> scores = new java.util.LinkedHashMap<>();
+        for (String category : List.of(
+                "hate",
+                "hate/threatening",
+                "harassment",
+                "harassment/threatening",
+                "illicit",
+                "illicit/violent",
+                "self-harm",
+                "self-harm/instructions",
+                "self-harm/intent",
+                "sexual",
+                "sexual/minors",
+                "violence",
+                "violence/graphic")) {
+            categories.put(category, false);
+            scores.put(category, 0.0);
+        }
+        return Map.of(
+                "status", "ok",
+                "model", "omni-moderation-2024-09-26",
+                "flagged", false,
+                "categories", Map.copyOf(categories),
+                "categoryScores", Map.copyOf(scores));
     }
 
     private static ModerationProperties properties() {
@@ -563,13 +680,15 @@ class ConfigurationBoundAiWorkCoordinatorTest {
                 "omni-moderation-2024-09-26",
                 "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                 "gpt-5.4-mini",
-                "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8",
-                "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d",
+                "3f16da31ae1f71763b2a5262e694b531abefddb1d626f4dbf731bcef56139928",
+                "8ba145c16b484d910a58755598552bf97107880b1dfef0a01d0825f941818b01",
                 "gpt-5.6-terra",
                 "medium",
-                "image-adjudication-v5",
-                "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505",
-                "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa",
+                "adjudication-prompts-v4",
+                "ac1640fbf75889a8071545ae80fca3adf25706f6b9f3e7b35a60201aa2d82d1c",
+                "c2855ff1698d969d213445a2e278557d8c2d8119a8d3ce5f01bf6d397f5f889e",
+                "14d2daa25d8b31765be1b804c061ab1bfab761a1a854f379e2d331ae82f93132",
+                "894d8c98443230496195e0e443b3293e0f4ec359b9a582f20d87dbb58f9fb699",
                 expectedOpenAiTimeoutSeconds,
                 "src/test/resources/blocked_terms.txt",
                 "src/test/resources/restricted_political_entities.txt",

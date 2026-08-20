@@ -28,4 +28,55 @@ class GatewayExceptionHandlerTest {
         assertThat(response.getHeader("X-Request-ID"))
                 .isEqualTo(result.getBody().requestId());
     }
+
+    @Test
+    void invalidRequiredServiceResponseIsABadGatewayWithASafeBody() {
+        assertSystemFailure(
+                ModerationSystemException.Kind.INVALID_RESPONSE,
+                HttpStatus.BAD_GATEWAY,
+                ErrorCode.UPSTREAM_FAILURE,
+                "A required moderation service returned an invalid response.",
+                "handler-invalid-response");
+    }
+
+    @Test
+    void unavailableRequiredServiceIsServiceUnavailableWithASafeBody() {
+        assertSystemFailure(
+                ModerationSystemException.Kind.UNAVAILABLE,
+                HttpStatus.SERVICE_UNAVAILABLE,
+                ErrorCode.SERVICE_UNAVAILABLE,
+                "A required moderation service is not available.",
+                "handler-unavailable");
+    }
+
+    @Test
+    void requiredServiceTimeoutIsGatewayTimeoutWithASafeBody() {
+        assertSystemFailure(
+                ModerationSystemException.Kind.TIMEOUT,
+                HttpStatus.GATEWAY_TIMEOUT,
+                ErrorCode.UPSTREAM_TIMEOUT,
+                "A required moderation service timed out.",
+                "handler-timeout");
+    }
+
+    private void assertSystemFailure(
+            ModerationSystemException.Kind kind,
+            HttpStatus expectedStatus,
+            ErrorCode expectedCode,
+            String expectedMessage,
+            String requestId) {
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.addHeader("X-Request-ID", requestId);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        var result = handler.handle(new ModerationSystemException(kind), request, response);
+
+        assertThat(result.getStatusCode()).isEqualTo(expectedStatus);
+        assertThat(result.getBody()).isNotNull();
+        assertThat(result.getBody().error()).isEqualTo(expectedCode);
+        assertThat(result.getBody().message()).isEqualTo(expectedMessage);
+        assertThat(result.getBody().requestId()).isEqualTo(requestId);
+        assertThat(response.getHeader("X-Request-ID")).isEqualTo(requestId);
+        assertThat(response.getHeader("Cache-Control")).isEqualTo("no-store, private");
+    }
 }

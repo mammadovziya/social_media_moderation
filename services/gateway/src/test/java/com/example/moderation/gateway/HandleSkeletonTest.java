@@ -13,11 +13,11 @@ class HandleSkeletonTest {
      * copy and a migration that recomputes stored skeletons.
      */
     private static final String PINNED_PROFILE_SHA256 =
-            "8f3044b7919e6fee4398fb6058be18cc8d320e8ffa3574902210e49bfe72714e";
+            "831db15c3799a4f866ee7e94025e23e65b51e25355b9e07e180747cd99db15d7";
 
     @Test
     void profileDigestIsPinned() {
-        assertThat(HandleSkeleton.PROFILE_VERSION).isEqualTo("handle-skeleton-v1");
+        assertThat(HandleSkeleton.PROFILE_VERSION).isEqualTo("handle-skeleton-v2");
         assertThat(HandleSkeleton.PROFILE_SHA256).isEqualTo(PINNED_PROFILE_SHA256);
     }
 
@@ -30,17 +30,40 @@ class HandleSkeletonTest {
     }
 
     @Test
-    void digitAndSymbolLookalikesFoldToTheirLetter() {
-        assertThat(HandleSkeleton.of("adm1n")).isEqualTo(HandleSkeleton.of("admin"));
-        assertThat(HandleSkeleton.of("p4sha.bank")).isEqualTo(HandleSkeleton.of("PASHA Bank"));
-        assertThat(HandleSkeleton.of("inve5tor")).isEqualTo(HandleSkeleton.of("investor"));
-        assertThat(HandleSkeleton.of("0fficial")).isEqualTo(HandleSkeleton.of("official"));
+    void primarySkeletonPreservesRealLettersAndDigits() {
+        assertThat(HandleSkeleton.of("ziya.murad")).isEqualTo("ziyamurad");
+        assertThat(HandleSkeleton.of("zlya.murad")).isEqualTo("zlyamurad");
+        assertThat(HandleSkeleton.of("ziya.murad"))
+                .isNotEqualTo(HandleSkeleton.of("zlya.murad"));
+        assertThat(HandleSkeleton.of("adm1n")).isEqualTo("adm1n");
     }
 
     @Test
-    void confusableCopyOfAnotherHandleCollides() {
-        assertThat(HandleSkeleton.of("vaIue_inve5tor"))
-                .isEqualTo(HandleSkeleton.of("value.investor"));
+    void explicitLookalikesProduceBoundedComparisonCandidates() {
+        assertThat(HandleSkeleton.comparisonCandidates("adm1n"))
+                .containsExactly("adm1n", "admin", "admln");
+        assertThat(HandleSkeleton.comparisonCandidates("p4sha.bank"))
+                .contains("p4shabank", "pashabank");
+        assertThat(HandleSkeleton.comparisonCandidates("inve5tor"))
+                .contains("inve5tor", "investor");
+        assertThat(HandleSkeleton.comparisonCandidates("0fficial"))
+                .contains("0ficial", "oficial");
+    }
+
+    @Test
+    void genuineIAndLNeverExpandIntoEachOther() {
+        assertThat(HandleSkeleton.comparisonCandidates("ziya.murad"))
+                .containsExactly("ziyamurad")
+                .doesNotContain("zlyamurad");
+        assertThat(HandleSkeleton.comparisonCandidates("zlya.murad"))
+                .containsExactly("zlyamurad")
+                .doesNotContain("ziyamurad");
+    }
+
+    @Test
+    void confusableExpansionStaysBounded() {
+        assertThat(HandleSkeleton.comparisonCandidates("1".repeat(256)))
+                .hasSizeLessThanOrEqualTo(64);
     }
 
     @Test

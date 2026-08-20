@@ -9,7 +9,8 @@ target/
 *.swp
 __pycache__/
 *.py[cod]
-docs/
+docs/*
+!docs/backend-handoff.md
 
 # Architect demo corpus, evaluators, and reports are intentionally local-only.
 local-demo/

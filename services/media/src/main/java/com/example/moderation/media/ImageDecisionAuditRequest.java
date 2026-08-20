@@ -51,7 +51,7 @@ public record ImageDecisionAuditRequest(
                 @Pattern(regexp = "PRESIDENT|MINISTER|YAP|MULTIPLE|POSSIBLE")
                 String localRestrictedPoliticalEntity,
         Boolean localPolicyTerminal,
-        @Size(max = 64) @Pattern(regexp = "VULGAR|POLITICAL_CONTENT|OTHER")
+        @Size(max = 64) @Pattern(regexp = "VULGAR|HATE|POLITICAL_CONTENT|OTHER")
                 String localPolicyViolation,
         @NotNull @Pattern(regexp =
                         "EXACT_MATCH|SIMILAR_CANDIDATE|MATCHED|NOT_MATCHED|LOW_QUALITY|UNAVAILABLE")
@@ -145,7 +145,7 @@ public record ImageDecisionAuditRequest(
         @NotNull @Pattern(regexp = "ok|error|not_required|unavailable")
                 String adjudicationStatus,
         @NotNull @Pattern(regexp =
-                        "candidate_recheck|classifier_block_recheck|both|not_required|unavailable|error")
+                        "candidate_recheck|classifier_block_recheck|classifier_unknown_recheck|both|not_required|unavailable|error")
                 String adjudicationMode,
         @NotNull @Pattern(regexp = "block|allow|unknown|not_required|unavailable|error")
                 String adjudicationAction,
@@ -188,13 +188,27 @@ public record ImageDecisionAuditRequest(
             return true;
         }
         boolean hasCandidates = candidateIds != null && !candidateIds.isEmpty();
-        String expected = hasCandidates
-                ? (Boolean.TRUE.equals(classifierProposedBlock)
-                        ? "both"
-                        : "candidate_recheck")
-                : "classifier_block_recheck";
-        return expected.equals(adjudicationMode)
-                && (hasCandidates || Boolean.TRUE.equals(classifierProposedBlock));
+        if (hasCandidates) {
+            return Boolean.TRUE.equals(classifierProposedBlock)
+                    ? "both".equals(adjudicationMode)
+                    : "candidate_recheck".equals(adjudicationMode)
+                            || "both".equals(adjudicationMode);
+        }
+        return Boolean.TRUE.equals(classifierProposedBlock)
+                ? "classifier_block_recheck".equals(adjudicationMode)
+                : "classifier_unknown_recheck".equals(adjudicationMode);
+    }
+
+    @AssertTrue(message = "image-adjudication-v7 successful results must be binary")
+    public boolean isV7BinaryAdjudicationCoherent() {
+        if (!"image-adjudication-v7".equals(promptVersion)
+                || !"ok".equals(adjudicationStatus)) {
+            return true;
+        }
+        return ("allow".equals(adjudicationAction)
+                        && "rejected".equals(adjudicationDisposition))
+                || ("block".equals(adjudicationAction)
+                        && "confirmed".equals(adjudicationDisposition));
     }
 
     @AssertTrue(message = "adjudication action and disposition must match status")
@@ -474,7 +488,8 @@ public record ImageDecisionAuditRequest(
 
     private boolean isEvidenceUnavailableWorkflowCoherent(PolicyOutcome reduced) {
         boolean hasRecheckTrigger = Boolean.TRUE.equals(classifierProposedBlock)
-                || (candidateIds != null && !candidateIds.isEmpty());
+                || (candidateIds != null && !candidateIds.isEmpty())
+                || "classifier_unknown_recheck".equals(adjudicationMode);
         if (!hasRecheckTrigger || !"ok".equals(classificationStatus)) {
             return false;
         }
@@ -553,7 +568,8 @@ public record ImageDecisionAuditRequest(
             return false;
         }
         boolean hasRecheckTrigger = Boolean.TRUE.equals(classifierProposedBlock)
-                || (candidateIds != null && !candidateIds.isEmpty());
+                || (candidateIds != null && !candidateIds.isEmpty())
+                || "classifier_unknown_recheck".equals(adjudicationMode);
         return hasRecheckTrigger
                 ? "ok".equals(adjudicationStatus)
                         && "allow".equals(adjudicationAction)

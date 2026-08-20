@@ -14,18 +14,22 @@ import org.junit.jupiter.api.Test;
  */
 class HandleSkeletonParityTest {
     private static final String PINNED_PROFILE_SHA256 =
-            "8f3044b7919e6fee4398fb6058be18cc8d320e8ffa3574902210e49bfe72714e";
+            "831db15c3799a4f866ee7e94025e23e65b51e25355b9e07e180747cd99db15d7";
 
     @Test
     void profileMatchesTheGatewayCopy() {
-        assertThat(HandleSkeleton.PROFILE_VERSION).isEqualTo("handle-skeleton-v1");
+        assertThat(HandleSkeleton.PROFILE_VERSION).isEqualTo("handle-skeleton-v2");
         assertThat(HandleSkeleton.PROFILE_SHA256).isEqualTo(PINNED_PROFILE_SHA256);
     }
 
     @Test
     void foldsTheSameWayAsTheGateway() {
-        assertThat(HandleSkeleton.of("Kapital Bank")).isEqualTo("kapltalbank");
-        assertThat(HandleSkeleton.of("adm1n")).isEqualTo("admln");
-        assertThat(HandleSkeleton.of("p4sha.bank")).isEqualTo("pashabank");
+        assertThat(HandleSkeleton.of("Kapital Bank")).isEqualTo("kapitalbank");
+        assertThat(HandleSkeleton.of("adm1n")).isEqualTo("adm1n");
+        assertThat(HandleSkeleton.of("p4sha.bank")).isEqualTo("p4shabank");
+        assertThat(HandleSkeleton.comparisonCandidates("adm1n"))
+                .containsExactly("adm1n", "admin", "admln");
+        assertThat(HandleSkeleton.comparisonCandidates("p4sha.bank"))
+                .contains("p4shabank", "pashabank");
     }
 }

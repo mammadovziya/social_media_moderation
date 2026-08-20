@@ -11,6 +11,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -83,7 +84,7 @@ class OcrService {
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             log.warn("OCR admission wait was interrupted");
-            return OcrResult.error();
+            return OcrResult.error("TIMEOUT");
         }
 
         try {
@@ -96,18 +97,21 @@ class OcrService {
                     properties.ocrMaxSpans());
             if (!runtimeProfile.equals(extracted.engine())) {
                 log.warn("OCR runtime profile changed after readiness");
-                return OcrResult.error();
+                return OcrResult.error("CONTRACT_INVALID");
             }
             return normalize(extracted, image);
         } catch (MediaDeadlineExceededException exception) {
             throw exception;
+        } catch (TimeoutException exception) {
+            log.warn("OCR request timed out");
+            return OcrResult.error("TIMEOUT");
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             log.warn("OCR request was interrupted");
-            return OcrResult.error();
+            return OcrResult.error("TIMEOUT");
         } catch (Exception exception) {
             log.warn("OCR request failed");
-            return OcrResult.error();
+            return OcrResult.error("UNAVAILABLE");
         } finally {
             slots.release();
         }

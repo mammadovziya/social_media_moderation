@@ -86,6 +86,43 @@ record PolicySignals(
                         RestrictedPoliticalEntity.class));
     }
 
+    /** Parses the stronger text adjudicator's content-type-specific contract. */
+    static PolicySignals textAdjudicated(
+            Map<String, Object> source, ContentType contentType) {
+        requiredEnum(source, "action", Decision.class);
+        Decision safetyDecision = requiredEnum(source, "safetyAction", Decision.class);
+        Safety safety = requiredEnum(source, "category", Safety.class);
+        validateSafety(safetyDecision, safety);
+        if (contentType == ContentType.USERNAME) {
+            return new PolicySignals(
+                    safetyDecision,
+                    safety,
+                    null,
+                    null,
+                    requiredEnum(source, "financialRisk", FinancialRisk.class),
+                    requiredEnum(source, "financialPrivacy", FinancialPrivacy.class),
+                    requiredEnum(source, "impersonation", Impersonation.class),
+                    null,
+                    requiredEnum(
+                            source,
+                            "restrictedPoliticalEntity",
+                            RestrictedPoliticalEntity.class));
+        }
+        return adjudicated(source);
+    }
+
+    /** Successful text adjudication must remove every first-pass uncertainty. */
+    boolean isDecisiveTextAdjudication() {
+        return safetyDecision != Decision.UNKNOWN
+                && !isUncertainFinancialRisk(financialRisk)
+                && financialPrivacy != FinancialPrivacy.POSSIBLE
+                && impersonation != Impersonation.POSSIBLE
+                && restrictedPoliticalEntity != RestrictedPoliticalEntity.POSSIBLE
+                && domain != Domain.UNCERTAIN
+                && financialClaim != FinancialClaim.UNCERTAIN
+                && politicalContext != PoliticalContext.UNCERTAIN;
+    }
+
     PolicySignals withFinancialPrivacy(FinancialPrivacy localPrivacy) {
         FinancialPrivacy strongest = privacyRank(localPrivacy) > privacyRank(financialPrivacy)
                 ? localPrivacy

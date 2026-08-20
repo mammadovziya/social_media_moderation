@@ -66,7 +66,7 @@ class HandlePolicyTest {
 
     @Test
     void profileDigestCoversTheSkeletonProfile() {
-        assertThat(HandlePolicy.PROFILE_VERSION).isEqualTo("handle-structure-v1");
+        assertThat(HandlePolicy.PROFILE_VERSION).isEqualTo("handle-structure-v2");
         assertThat(HandlePolicy.PROFILE_SHA256).hasSize(64).matches("[0-9a-f]{64}");
     }
 }

@@ -78,3 +78,8 @@ ai-work-idempotency:
   security:
     internal-token: ${AI_WORK_IDEMPOTENCY_INTERNAL_TOKEN:}
     allow-unauthenticated: ${AI_WORK_IDEMPOTENCY_ALLOW_UNAUTHENTICATED:false}
+
+policy-distribution:
+  security:
+    internal-token: ${POLICY_DISTRIBUTION_INTERNAL_TOKEN:}
+    allow-unauthenticated: ${POLICY_DISTRIBUTION_ALLOW_UNAUTHENTICATED:false}

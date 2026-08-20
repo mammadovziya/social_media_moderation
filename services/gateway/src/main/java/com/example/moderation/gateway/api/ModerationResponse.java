@@ -10,8 +10,8 @@ public record ModerationResponse(
         @JsonView(Internal.class) @Schema(hidden = true) ContentType contentType,
         @JsonView(Public.class)
                 @Schema(
-                        description =
-                                "Final action. UNKNOWN is fail-closed and must never be treated as ALLOW.",
+                        description = "Final action. Technical failures are returned as HTTP errors.",
+                        allowableValues = {"ALLOW", "BLOCK"},
                         example = "ALLOW",
                         requiredMode = Schema.RequiredMode.REQUIRED)
                 Decision decision,

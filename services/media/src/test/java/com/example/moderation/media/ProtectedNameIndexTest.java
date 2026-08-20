@@ -63,10 +63,10 @@ class ProtectedNameIndexTest {
     void oneEditFromALongInstitutionNameIsNear() {
         ProtectedNameIndex index = indexOf(KAPITAL_BANK);
 
-        assertThat(index.match("kapitalbanc"))
-                .get()
-                .extracting(ProtectedNameIndex.Match::kind)
-                .isEqualTo(ProtectedNameIndex.Kind.NEAR);
+        assertThat(index.match("kapitalbanc")).get().satisfies(match -> {
+            assertThat(match.kind()).isEqualTo(ProtectedNameIndex.Kind.NEAR);
+            assertThat(match.severity()).isEqualTo(ProtectedName.Severity.POSSIBLE);
+        });
     }
 
     /**
@@ -160,11 +160,17 @@ class ProtectedNameIndexTest {
      * is the attack the skeleton exists to catch.
      */
     @Test
-    void aLongBrandStillMatchesThroughFolding() {
+    void aLongBrandSeparatesLiteralEditsFromExplicitLookalikes() {
         ProtectedNameIndex index = indexOf(KAPITAL_BANK);
 
-        assertThat(index.match("kapltalbank")).isPresent();
-        assertThat(index.match("kap1tal.bank")).isPresent();
+        assertThat(index.match("kapltalbank")).get().satisfies(match -> {
+            assertThat(match.kind()).isEqualTo(ProtectedNameIndex.Kind.NEAR);
+            assertThat(match.severity()).isEqualTo(ProtectedName.Severity.POSSIBLE);
+        });
+        assertThat(index.match("kap1tal.bank")).get().satisfies(match -> {
+            assertThat(match.kind()).isEqualTo(ProtectedNameIndex.Kind.EXACT);
+            assertThat(match.severity()).isEqualTo(ProtectedName.Severity.CLEAR);
+        });
     }
 
     @Test

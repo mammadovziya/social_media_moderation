@@ -23,6 +23,8 @@ public record ModerationProperties(
         String expectedAdjudicationPromptVersion,
         String expectedAdjudicationPromptSha256,
         String expectedAdjudicationProfileSha256,
+        String expectedImageAdjudicationPromptSha256,
+        String expectedImageAdjudicationProfileSha256,
         long expectedOpenAiTimeoutSeconds,
         String blockedTermsFile,
         String restrictedPoliticalEntitiesFile,
@@ -89,6 +91,12 @@ public record ModerationProperties(
         expectedAdjudicationProfileSha256 = validatedSha256(
                 expectedAdjudicationProfileSha256,
                 "OPENAI_ADJUDICATION_PROFILE_SHA256");
+        expectedImageAdjudicationPromptSha256 = validatedSha256(
+                expectedImageAdjudicationPromptSha256,
+                "OPENAI_IMAGE_ADJUDICATION_PROMPT_SHA256");
+        expectedImageAdjudicationProfileSha256 = validatedSha256(
+                expectedImageAdjudicationProfileSha256,
+                "OPENAI_IMAGE_ADJUDICATION_PROFILE_SHA256");
         if (expectedOpenAiTimeoutSeconds < 1 || expectedOpenAiTimeoutSeconds > 300) {
             throw new IllegalArgumentException(
                     "OPENAI_TIMEOUT_SECONDS must be between 1 and 300");

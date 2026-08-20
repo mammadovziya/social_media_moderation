@@ -115,7 +115,7 @@ public class AnalyzerClients {
     @SuppressWarnings("unchecked")
     public Map<String, Object> analyzeText(
             String contentId, ContentType contentType, String text) {
-        return analyzeText(contentId, contentType, text, "", "", "");
+        return analyzeText(contentId, contentType, text, "", "", "", false);
     }
 
     @SuppressWarnings("unchecked")
@@ -126,6 +126,25 @@ public class AnalyzerClients {
             String parentPostText,
             String authorUsername,
             String quotedText) {
+        return analyzeText(
+                contentId, contentType, text, parentPostText, authorUsername, quotedText, false);
+    }
+
+    /**
+     * Analyzes text, optionally forcing adjudication.
+     *
+     * <p>A caller sets {@code requiresAdjudication} when it holds uncertainty the classifier
+     * cannot observe, so a confident first pass is still escalated to the stronger model.
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> analyzeText(
+            String contentId,
+            ContentType contentType,
+            String text,
+            String parentPostText,
+            String authorUsername,
+            String quotedText,
+            boolean requiresAdjudication) {
         return GatewayMetrics.timed("ai.text", () -> aiAnalysisClient.post()
                 .uri("/internal/v1/analyze/text")
                 .contentType(MediaType.APPLICATION_JSON)
@@ -135,7 +154,8 @@ public class AnalyzerClients {
                         "text", text,
                         "parentPostText", parentPostText,
                         "authorUsername", authorUsername,
-                        "quotedText", quotedText))
+                        "quotedText", quotedText,
+                        "requiresAdjudication", requiresAdjudication))
                 .retrieve()
                 .body(Map.class));
     }
@@ -233,22 +253,78 @@ public class AnalyzerClients {
     }
 
     @SuppressWarnings("unchecked")
+    public Map<String, Object> persistContentDecisionAudit(
+            ContentDecisionAuditPayload event) {
+        String stage = switch (event.contentType()) {
+            case "POST" -> "media.audit.post";
+            case "COMMENT" -> "media.audit.comment";
+            default -> throw new IllegalArgumentException("Unsupported audited content type");
+        };
+        Map<String, Object> acknowledgement = GatewayMetrics.timed(stage, () -> mediaClient.post()
+                .uri("/internal/v1/audit/content-decision")
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(event)
+                .retrieve()
+                .body(Map.class));
+        return requireAuditAcknowledgement(
+                acknowledgement, event.requestId(), event.contentType(), true);
+    }
+
+    @SuppressWarnings("unchecked")
     public Map<String, Object> persistUsernameDecisionAudit(UsernameDecisionAuditPayload event) {
-        return GatewayMetrics.timed("media.audit.username", () -> mediaClient.post()
+        Map<String, Object> acknowledgement = GatewayMetrics.timed(
+                "media.audit.username", () -> mediaClient.post()
                 .uri("/internal/v1/audit/username-decision")
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(event)
                 .retrieve()
                 .body(Map.class));
+        return requireAuditAcknowledgement(
+                acknowledgement, event.requestId(), null, true);
     }
 
+    @SuppressWarnings("unchecked")
     public void persistImageDecisionAudit(ImageDecisionAuditPayload event) {
-        GatewayMetrics.timed("media.audit.image", () -> mediaClient.post()
+        Map<String, Object> acknowledgement = GatewayMetrics.timed(
+                "media.audit.image", () -> mediaClient.post()
                 .uri("/internal/v1/audit/image-decision")
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(event)
                 .retrieve()
-                .toBodilessEntity());
+                .body(Map.class));
+        requireAuditAcknowledgement(
+                acknowledgement, event.requestId(), null, false);
+    }
+
+    static Map<String, Object> requireAuditAcknowledgement(
+            Map<String, Object> acknowledgement,
+            String requestId,
+            String contentType,
+            boolean requireEventId) {
+        Set<String> expectedKeys = contentType != null
+                ? Set.of("status", "requestId", "contentType", "auditEventId")
+                : requireEventId
+                ? Set.of("status", "requestId", "auditEventId")
+                : Set.of("status", "requestId");
+        boolean valid = acknowledgement != null
+                && acknowledgement.keySet().equals(expectedKeys)
+                && "persisted".equals(acknowledgement.get("status"))
+                && requestId.equals(acknowledgement.get("requestId"))
+                && (contentType == null
+                        || contentType.equals(acknowledgement.get("contentType")));
+        if (valid && requireEventId) {
+            Object rawId = acknowledgement.get("auditEventId");
+            valid = (rawId instanceof Byte
+                            || rawId instanceof Short
+                            || rawId instanceof Integer
+                            || rawId instanceof Long)
+                    && ((Number) rawId).longValue() > 0;
+        }
+        if (!valid) {
+            throw new ModerationSystemException(
+                    ModerationSystemException.Kind.INVALID_RESPONSE);
+        }
+        return Map.copyOf(acknowledgement);
     }
 
     @SuppressWarnings("unchecked")
@@ -329,6 +405,21 @@ public class AnalyzerClients {
 
     public void completeAiWork(
             String keySha256, String ownerToken, Map<String, Object> result) {
+        completeAiWork(
+                mediaClient,
+                aiWorkSecurity,
+                keySha256,
+                ownerToken,
+                result);
+    }
+
+    /** Package-visible transport seam for exercising the exact durable-completion JSON contract. */
+    static void completeAiWork(
+            RestClient mediaClient,
+            AiWorkIdempotencySecurityProperties aiWorkSecurity,
+            String keySha256,
+            String ownerToken,
+            Map<String, Object> result) {
         GatewayMetrics.timed("media.ai_work.complete", () -> authenticatedAiWorkRequest(
                         mediaClient.post().uri("/internal/v1/idempotency/ai-work/complete"),
                         aiWorkSecurity)

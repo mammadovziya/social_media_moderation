@@ -120,6 +120,42 @@ class ImageDecisionAuditTest {
     }
 
     @Test
+    void validatesV7BinaryUnknownRecheckAuditContract() {
+        ImageDecisionAuditRequest resolvedAllow = mutateValid(json -> {
+            setPolicyOutcome(
+                    json,
+                    "ALLOW",
+                    "NONE",
+                    "NONE",
+                    "INVESTMENT_RELATED",
+                    "ALLOW",
+                    "NONE",
+                    "NONE",
+                    "NONE",
+                    "NONE");
+            json.putArray("candidateIds");
+            json.put("classifierProposedBlock", false);
+            json.put("adjudicationMode", "classifier_unknown_recheck");
+            json.put("adjudicationAction", "allow");
+            json.put("adjudicationDisposition", "rejected");
+            json.put("promptVersion", "image-adjudication-v7");
+        });
+        assertThat(validator.validate(resolvedAllow)).isEmpty();
+
+        ImageDecisionAuditRequest forgedUnknown = mutateValid(json -> {
+            json.putArray("candidateIds");
+            json.put("classifierProposedBlock", false);
+            json.put("adjudicationMode", "classifier_unknown_recheck");
+            json.put("adjudicationAction", "unknown");
+            json.put("adjudicationDisposition", "inconclusive");
+            json.put("promptVersion", "image-adjudication-v7");
+        });
+        assertThat(validator.validate(forgedUnknown))
+                .extracting(violation -> violation.getMessage())
+                .contains("image-adjudication-v7 successful results must be binary");
+    }
+
+    @Test
     void mapsTheValidatedRequestToBoundedPersistenceFields() {
         ImageDecisionAuditRepository repository = mock(ImageDecisionAuditRepository.class);
         ImageDecisionAuditController controller = new ImageDecisionAuditController(repository);
@@ -718,6 +754,8 @@ class ImageDecisionAuditTest {
                 resource("db/migration/V10__add_public_policy_signals_to_image_audit.sql");
         String restrictedPoliticalPolicy =
                 resource("db/migration/V15__add_restricted_political_entity_policy.sql");
+        String binaryUnknownAdjudication = resource(
+                "db/migration/V26__support_binary_image_unknown_adjudication.sql");
 
         assertThat(migration)
                 .contains("CREATE TABLE moderation_image_decision_audit_events")
@@ -823,6 +861,20 @@ class ImageDecisionAuditTest {
                         "NEW.classification_status <> 'ok'",
                         "analyzer-unavailable username decisions must fail closed")
                 .doesNotContain("raw_image", "image_bytes", "ocr_text", "post_text");
+        assertThat(binaryUnknownAdjudication)
+                .contains(
+                        "classifier_unknown_recheck",
+                        "moderation_image_audit_v7_binary_result",
+                        "prompt_version <> 'image-adjudication-v7'",
+                        "adjudication_action IN ('allow', 'block')",
+                        "NEW.local_policy_violation IN ('VULGAR', 'HATE', 'OTHER')")
+                .doesNotContain(
+                        "UPDATE moderation_image_decision_audit_events",
+                        "DELETE FROM moderation_image_decision_audit_events",
+                        "raw_image",
+                        "image_bytes",
+                        "ocr_text",
+                        "post_text");
         assertThat(List.of(ImageDecisionAuditEvent.class.getRecordComponents()).stream()
                         .map(component -> component.getName()))
                 .noneMatch(name -> name.toLowerCase(java.util.Locale.ROOT)

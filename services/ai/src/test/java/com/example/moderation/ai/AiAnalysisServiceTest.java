@@ -36,6 +36,13 @@ class AiAnalysisServiceTest {
             assertThat(provider.parentPostText).isNull();
             assertThat(provider.authorUsername).isEqualTo("value_investor");
             assertThat(provider.quotedText).isNull();
+            assertThat((Map<String, Object>) result.get("adjudication"))
+                    .containsEntry("status", "not_required")
+                    .containsEntry("model", "gpt-5.6-terra")
+                    .containsEntry("promptVersion", "text-adjudication-v3")
+                    .containsEntry("adjudicationMode", "not_required")
+                    .containsEntry("action", "not_required");
+            assertThat(provider.textAdjudicationCalls).isZero();
             assertThat((Map<String, Object>) result.get("configuration"))
                     .containsEntry("moderationModel", "omni-moderation-2024-09-26")
                     .containsEntry(
@@ -44,22 +51,211 @@ class AiAnalysisServiceTest {
                     .containsEntry("customModel", "gpt-5.6-terra")
                     .containsEntry(
                             "classificationPromptBundleSha256",
-                            "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8")
+                            "3f16da31ae1f71763b2a5262e694b531abefddb1d626f4dbf731bcef56139928")
                     .containsEntry(
                             "classificationProfileSha256",
-                            "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d")
+                            "8ba145c16b484d910a58755598552bf97107880b1dfef0a01d0825f941818b01")
                     .containsEntry("adjudicationModel", "gpt-5.6-terra")
                     .containsEntry("adjudicationReasoningEffort", "medium")
-                    .containsEntry("adjudicationPromptVersion", "image-adjudication-v5")
+                    .containsEntry(
+                            "adjudicationPromptVersion", "adjudication-prompts-v4")
                     .containsEntry(
                             "adjudicationPromptSha256",
-                            "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505")
+                            "ac1640fbf75889a8071545ae80fca3adf25706f6b9f3e7b35a60201aa2d82d1c")
+                    .containsEntry(
+                            "adjudicationPromptBundleSha256",
+                            "ac1640fbf75889a8071545ae80fca3adf25706f6b9f3e7b35a60201aa2d82d1c")
+                    .containsEntry(
+                            "imageAdjudicationPromptSha256",
+                            "14d2daa25d8b31765be1b804c061ab1bfab761a1a854f379e2d331ae82f93132")
+                    .containsEntry(
+                            "textAdjudicationPromptSha256",
+                            "f1da3665f157dabc5c87bfc85105d892aec73c5696c21b47b4fc7bef8097c7f1")
                     .containsEntry(
                             "adjudicationProfileSha256",
-                            "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa")
+                            "c2855ff1698d969d213445a2e278557d8c2d8119a8d3ce5f01bf6d397f5f889e")
+                    .containsEntry(
+                            "imageAdjudicationProfileSha256",
+                            "894d8c98443230496195e0e443b3293e0f4ec359b9a582f20d87dbb58f9fb699")
+                    .containsEntry(
+                            "textAdjudicationProfileSha256",
+                            "a82b417a84d77a5179bdd876cd228c4337991c8c6b6947e0e1916b3330daa250")
                     .containsEntry("openAiTimeoutSeconds", 30L)
                     .containsEntry("maxImageBytes", 8_388_608L)
                     .containsEntry("maxImageRequestBytes", 9_437_184L);
+        } finally {
+            service.close();
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void invokesBinaryTextAdjudicationForPostCommentAndUsernameAmbiguity() {
+        for (ContentType contentType : ContentType.values()) {
+            FakeAiProvider provider = new FakeAiProvider();
+            if (contentType == ContentType.POST) {
+                provider.classificationDomain = "uncertain";
+            } else if (contentType == ContentType.COMMENT) {
+                provider.classificationFinancialPrivacy = "possible";
+            } else {
+                provider.classificationImpersonation = "possible";
+            }
+            AiAnalysisService service = service(provider);
+            try {
+                Map<String, Object> result = service.analyzeText(
+                        contentType,
+                        "Current ambiguous text",
+                        "Parent investment post",
+                        "value_investor",
+                        "Quoted analysis");
+                Map<String, Object> adjudication =
+                        (Map<String, Object>) result.get("adjudication");
+
+                assertThat(adjudication)
+                        .containsEntry("status", "ok")
+                        .containsEntry("model", "gpt-5.6-terra")
+                        .containsEntry("promptVersion", "text-adjudication-v3")
+                        .containsEntry("adjudicationMode", "text_unknown_recheck")
+                        .containsEntry("action", "allow")
+                        .containsEntry("safetyAction", "allow")
+                        .containsEntry("category", "none")
+                        .containsEntry("finalReason", "none")
+                        .containsKey("usage")
+                        .doesNotContainKeys(
+                                "candidateDisposition",
+                                "candidateIds",
+                                "evidenceBasis",
+                                "reasonCode");
+                if (contentType == ContentType.USERNAME) {
+                    assertThat(adjudication).doesNotContainKeys(
+                            "domain", "financialClaim", "politicalContext");
+                } else {
+                    assertThat(adjudication)
+                            .containsEntry("domain", "investment_related")
+                            .containsEntry("financialClaim", "analysis")
+                            .containsEntry("politicalContext", "none");
+                }
+                assertThat(provider.textAdjudicationCalls).isOne();
+                assertThat(provider.textAdjudicationContentType).isEqualTo(contentType);
+                assertThat(provider.textAdjudicationCurrentText)
+                        .isEqualTo("Current ambiguous text");
+                assertThat(provider.textAdjudicationParentPostText)
+                        .isEqualTo("Parent investment post");
+                assertThat(provider.textAdjudicationAuthorUsername)
+                        .isEqualTo("value_investor");
+                assertThat(provider.textAdjudicationQuotedText)
+                        .isEqualTo("Quoted analysis");
+            } finally {
+                service.close();
+            }
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void doesNotEscalateTerminalTextAllowBlockOrHardModerationBlock() {
+        FakeAiProvider allowed = new FakeAiProvider();
+        FakeAiProvider blocked = new FakeAiProvider();
+        blocked.classificationFinancialRisk = "investment_scam";
+        FakeAiProvider hardModerationBlock = new FakeAiProvider();
+        hardModerationBlock.classificationFinancialPrivacy = "possible";
+        hardModerationBlock.moderationFlagged = true;
+
+        for (FakeAiProvider provider : java.util.List.of(
+                allowed, blocked, hardModerationBlock)) {
+            AiAnalysisService service = service(provider);
+            try {
+                Map<String, Object> result = service.analyzeText(
+                        ContentType.POST, "Current text", null, "author", null);
+                assertThat((Map<String, Object>) result.get("adjudication"))
+                        .containsEntry("status", "not_required")
+                        .containsEntry("adjudicationMode", "not_required")
+                        .containsEntry("action", "not_required");
+                assertThat(provider.textAdjudicationCalls).isZero();
+            } finally {
+                service.close();
+            }
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void textAnalyzerFailureDoesNotEscalateAndReturnsErrorSignal() {
+        FakeAiProvider provider = new FakeAiProvider();
+        provider.classificationFails = true;
+        AiAnalysisService service = service(provider);
+        try {
+            Map<String, Object> result = service.analyzeText(
+                    ContentType.COMMENT,
+                    "Current text",
+                    "Parent",
+                    "author",
+                    null);
+
+            assertThat((Map<String, Object>) result.get("classification"))
+                    .containsEntry("status", "error")
+                    .containsEntry("failureKind", "UNAVAILABLE");
+            assertThat((Map<String, Object>) result.get("adjudication"))
+                    .containsEntry("status", "error")
+                    .containsEntry("failureKind", "UNAVAILABLE")
+                    .containsEntry("promptVersion", "text-adjudication-v3")
+                    .containsEntry("adjudicationMode", "error")
+                    .containsEntry("action", "error");
+            assertThat(provider.textAdjudicationCalls).isZero();
+        } finally {
+            service.close();
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void textAdjudicationProviderFailureIsFailClosedAndPreservesUsage() {
+        FakeAiProvider provider = new FakeAiProvider();
+        provider.classificationRestrictedPoliticalEntity = "possible";
+        provider.textAdjudicationFails = true;
+        AiAnalysisService service = service(provider);
+        try {
+            Map<String, Object> result = service.analyzeText(
+                    ContentType.USERNAME, "ambiguous_handle", null, null, null);
+            Map<String, Object> adjudication =
+                    (Map<String, Object>) result.get("adjudication");
+
+            assertThat(adjudication)
+                    .containsEntry("status", "error")
+                    .containsEntry("error", "provider_response_invalid")
+                    .containsEntry("failureCode", "INVALID_STRUCTURED_OUTPUT")
+                    .containsEntry("failureKind", "CONTRACT_INVALID")
+                    .containsEntry("model", "gpt-5.6-terra")
+                    .containsEntry("promptVersion", "text-adjudication-v3")
+                    .containsEntry("adjudicationMode", "error")
+                    .containsEntry("action", "error")
+                    .containsKey("usage")
+                    .doesNotContainValue("sensitive provider output");
+            assertThat(provider.textAdjudicationCalls).isOne();
+        } finally {
+            service.close();
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void malformedSuccessfulTextAdjudicationBecomesContractError() {
+        FakeAiProvider provider = new FakeAiProvider();
+        provider.classificationFinancialRisk = "uncertain";
+        provider.textAdjudicationMalformed = true;
+        AiAnalysisService service = service(provider);
+        try {
+            Map<String, Object> result = service.analyzeText(
+                    ContentType.POST, "Ambiguous claim", null, "author", null);
+            assertThat((Map<String, Object>) result.get("adjudication"))
+                    .containsEntry("status", "error")
+                    .containsEntry(
+                            "failureCode", "ADJUDICATION_CONTRACT_INCONSISTENT")
+                    .containsEntry("failureKind", "CONTRACT_INVALID")
+                    .containsEntry("adjudicationMode", "error")
+                    .containsEntry("action", "error")
+                    .containsKey("usage");
+            assertThat(provider.textAdjudicationCalls).isOne();
         } finally {
             service.close();
         }
@@ -85,9 +281,41 @@ class AiAnalysisServiceTest {
                     .containsEntry("error", "provider_response_invalid")
                     .containsEntry(
                             "failureCode", "DECISION_CONTRACT_INCONSISTENT")
+                    .containsEntry("failureKind", "CONTRACT_INVALID")
                     .containsEntry("model", "gpt-4o-mini")
                     .containsKey("usage")
                     .doesNotContainValue("sensitive provider output");
+        } finally {
+            service.close();
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void timeoutSignalPreservesUsageWithoutExposingProviderError() {
+        FakeAiProvider provider = new FakeAiProvider();
+        provider.classificationFailureKind =
+                OpenAiRestClient.OpenAiFailureKind.TIMEOUT;
+        AiAnalysisService service = service(provider);
+        try {
+            Map<String, Object> result = service.analyzeText(
+                    ContentType.POST,
+                    "An ETF investment post.",
+                    null,
+                    "value_investor",
+                    null);
+
+            assertThat((Map<String, Object>) result.get("classification"))
+                    .containsEntry("status", "error")
+                    .containsEntry("error", "provider_response_invalid")
+                    .containsEntry("failureCode", "PROVIDER_RESPONSE_INVALID")
+                    .containsEntry("failureKind", "TIMEOUT")
+                    .containsEntry("model", "gpt-4o-mini")
+                    .containsKey("usage")
+                    .doesNotContainValue("sensitive provider output");
+            assertThat((Map<String, Object>) result.get("adjudication"))
+                    .containsEntry("status", "error")
+                    .containsEntry("failureKind", "TIMEOUT");
         } finally {
             service.close();
         }
@@ -121,7 +349,7 @@ class AiAnalysisServiceTest {
             assertThat((Map<String, Object>) result.get("adjudication"))
                     .containsEntry("status", "not_required")
                     .containsEntry("model", "gpt-5.6-terra")
-                    .containsEntry("promptVersion", "image-adjudication-v5")
+                    .containsEntry("promptVersion", "image-adjudication-v7")
                     .containsEntry("action", "not_required")
                     .containsEntry("candidateDisposition", "not_required");
         } finally {
@@ -219,6 +447,74 @@ class AiAnalysisServiceTest {
             assertThat(provider.classifierSignal)
                     .containsEntry("safetyAction", "block")
                     .containsEntry("category", "vulgar");
+        } finally {
+            service.close();
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void governedRevealingSwimwearSexualBlockUsesTheV7TerraRecheck() {
+        FakeAiProvider provider = new FakeAiProvider();
+        provider.classificationSafetyAction = "block";
+        provider.classificationCategory = "sexual";
+        AiAnalysisService service = service(provider);
+        try {
+            Map<String, Object> result = service.analyzeImage(
+                    ContentType.POST,
+                    new byte[] {1, 2, 3},
+                    "image/png",
+                    "Editorial beach photograph",
+                    "",
+                    "no_text",
+                    false,
+                    false,
+                    "{}",
+                    false,
+                    true);
+
+            assertThat(provider.classifierSignal)
+                    .containsEntry("safetyAction", "block")
+                    .containsEntry("category", "sexual");
+            assertThat((Map<String, Object>) result.get("adjudication"))
+                    .containsEntry("status", "ok")
+                    .containsEntry("adjudicationMode", "classifier_block_recheck")
+                    .containsEntry("promptVersion", "image-adjudication-v7");
+            assertThat(provider.adjudicationCalls).isOne();
+        } finally {
+            service.close();
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void imageSemanticUnknownInvokesTerraAndReturnsABinaryDecision() {
+        FakeAiProvider provider = new FakeAiProvider();
+        provider.classificationFinancialRisk = "potentially_misleading";
+        AiAnalysisService service = service(provider);
+        try {
+            Map<String, Object> result = service.analyzeImage(
+                    ContentType.POST,
+                    new byte[] {1, 2, 3},
+                    "image/png",
+                    "Hər ay 100 dollar investisiya etsən, 50 il ərzində milyonçu ola bilərsən",
+                    "",
+                    "no_text",
+                    false,
+                    false,
+                    "{\"pdq\":{\"candidates\":[]}}",
+                    false,
+                    true);
+
+            assertThat((Map<String, Object>) result.get("classification"))
+                    .containsEntry("financialRisk", "potentially_misleading");
+            assertThat((Map<String, Object>) result.get("adjudication"))
+                    .containsEntry("status", "ok")
+                    .containsEntry("adjudicationMode", "classifier_unknown_recheck")
+                    .containsEntry("action", "allow")
+                    .containsEntry("financialRisk", "none")
+                    .containsEntry("promptVersion", "image-adjudication-v7");
+            assertThat(provider.adjudicationCalls).isOne();
         } finally {
             service.close();
         }
@@ -351,11 +647,13 @@ class AiAnalysisServiceTest {
 
             assertThat((Map<String, Object>) result.get("adjudication"))
                     .containsEntry("status", "error")
+                    .containsEntry("failureKind", "UNAVAILABLE")
                     .containsEntry("adjudicationMode", "error")
                     .containsEntry("action", "error")
                     .containsEntry("candidateDisposition", "error");
             assertThat((Map<String, Object>) result.get("classification"))
-                    .containsEntry("failureCode", "PROVIDER_RESPONSE_INVALID");
+                    .containsEntry("failureCode", "PROVIDER_RESPONSE_INVALID")
+                    .containsEntry("failureKind", "UNAVAILABLE");
             assertThat(provider.adjudicationCalls).isZero();
         } finally {
             service.close();
@@ -514,10 +812,19 @@ class AiAnalysisServiceTest {
         private volatile String parentPostText;
         private volatile String authorUsername;
         private volatile String quotedText;
+        private volatile ContentType textAdjudicationContentType;
+        private volatile String textAdjudicationCurrentText;
+        private volatile String textAdjudicationParentPostText;
+        private volatile String textAdjudicationAuthorUsername;
+        private volatile String textAdjudicationQuotedText;
         private volatile boolean classificationFails;
         private volatile OpenAiRestClient.OpenAiFailureCode classificationFailureCode;
+        private volatile OpenAiRestClient.OpenAiFailureKind classificationFailureKind;
+        private volatile boolean textAdjudicationFails;
+        private volatile boolean textAdjudicationMalformed;
         private volatile boolean moderationFlagged;
         private volatile int adjudicationCalls;
+        private volatile int textAdjudicationCalls;
         private volatile int imagePreparationCalls;
 
         @Override
@@ -541,18 +848,33 @@ class AiAnalysisServiceTest {
             details.put("customModel", "gpt-5.6-terra");
             details.put(
                     "classificationPromptBundleSha256",
-                    "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8");
+                    "3f16da31ae1f71763b2a5262e694b531abefddb1d626f4dbf731bcef56139928");
             details.put(
                     "classificationProfileSha256",
-                    "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d");
+                    "8ba145c16b484d910a58755598552bf97107880b1dfef0a01d0825f941818b01");
             details.put("adjudicationModel", "gpt-5.6-terra");
             details.put("adjudicationReasoningEffort", "medium");
             details.put(
                     "adjudicationPromptSha256",
-                    "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505");
+                    "ac1640fbf75889a8071545ae80fca3adf25706f6b9f3e7b35a60201aa2d82d1c");
+            details.put(
+                    "adjudicationPromptBundleSha256",
+                    "ac1640fbf75889a8071545ae80fca3adf25706f6b9f3e7b35a60201aa2d82d1c");
+            details.put(
+                    "imageAdjudicationPromptSha256",
+                    "14d2daa25d8b31765be1b804c061ab1bfab761a1a854f379e2d331ae82f93132");
+            details.put(
+                    "textAdjudicationPromptSha256",
+                    "f1da3665f157dabc5c87bfc85105d892aec73c5696c21b47b4fc7bef8097c7f1");
             details.put(
                     "adjudicationProfileSha256",
-                    "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa");
+                    "c2855ff1698d969d213445a2e278557d8c2d8119a8d3ce5f01bf6d397f5f889e");
+            details.put(
+                    "imageAdjudicationProfileSha256",
+                    "894d8c98443230496195e0e443b3293e0f4ec359b9a582f20d87dbb58f9fb699");
+            details.put(
+                    "textAdjudicationProfileSha256",
+                    "a82b417a84d77a5179bdd876cd228c4337991c8c6b6947e0e1916b3330daa250");
             details.put("openAiTimeoutSeconds", 30L);
             return Map.copyOf(details);
         }
@@ -589,7 +911,56 @@ class AiAnalysisServiceTest {
             parentPostText = currentParentPostText;
             authorUsername = currentAuthorUsername;
             quotedText = currentQuotedText;
+            if (classificationFails) {
+                throw new RuntimeException("classification failed");
+            }
             return classification(contentType);
+        }
+
+        @Override
+        public Map<String, Object> adjudicateText(
+                ContentType contentType,
+                String text,
+                String currentParentPostText,
+                String currentAuthorUsername,
+                String currentQuotedText,
+                Map<String, Object> currentClassifierSignal) {
+            textAdjudicationCalls++;
+            textAdjudicationContentType = contentType;
+            textAdjudicationCurrentText = text;
+            textAdjudicationParentPostText = currentParentPostText;
+            textAdjudicationAuthorUsername = currentAuthorUsername;
+            textAdjudicationQuotedText = currentQuotedText;
+            classifierSignal = currentClassifierSignal;
+            if (textAdjudicationFails) {
+                throw new OpenAiRestClient.OpenAiResponseException(
+                                OpenAiRestClient.OpenAiFailureCode.INVALID_STRUCTURED_OUTPUT,
+                                "sensitive provider output")
+                        .withUsage(
+                                "gpt-5.6-terra",
+                                Map.of("inputTokens", 21L, "outputTokens", 5L));
+            }
+            java.util.LinkedHashMap<String, Object> result = new java.util.LinkedHashMap<>();
+            result.put("status", "ok");
+            result.put("model", "gpt-5.6-terra");
+            result.put("adjudicationMode", "text_unknown_recheck");
+            result.put("action", textAdjudicationMalformed ? "unknown" : "allow");
+            result.put("safetyAction", "allow");
+            result.put("category", "none");
+            if (contentType != ContentType.USERNAME) {
+                result.put("domain", "investment_related");
+                result.put("financialClaim", "analysis");
+            }
+            result.put("financialRisk", "none");
+            result.put("financialPrivacy", "none");
+            result.put("impersonation", "none");
+            result.put("restrictedPoliticalEntity", "none");
+            if (contentType != ContentType.USERNAME) {
+                result.put("politicalContext", "none");
+            }
+            result.put("finalReason", "none");
+            result.put("usage", Map.of("inputTokens", 21L, "outputTokens", 5L));
+            return Map.copyOf(result);
         }
 
         @Override
@@ -629,13 +1000,18 @@ class AiAnalysisServiceTest {
             classifierSignal = currentClassifierSignal;
             boolean classifierTrigger =
                     AiAnalysisService.classifierRequiresAdjudication(currentClassifierSignal);
+            boolean classifierUnknownTrigger =
+                    AiAnalysisService.classifierRequiresUnknownAdjudication(
+                            currentClassifierSignal);
             return Map.ofEntries(
                     Map.entry("status", "ok"),
                     Map.entry(
                             "adjudicationMode",
                             candidateTrigger
                                     ? (classifierTrigger ? "both" : "candidate_recheck")
-                                    : "classifier_block_recheck"),
+                                    : classifierUnknownTrigger
+                                            ? "classifier_unknown_recheck"
+                                            : "classifier_block_recheck"),
                     Map.entry("action", "allow"),
                     Map.entry("safetyAction", "allow"),
                     Map.entry("category", "none"),
@@ -665,6 +1041,14 @@ class AiAnalysisServiceTest {
         }
 
         private Map<String, Object> classification(ContentType contentType) {
+            if (classificationFailureKind != null) {
+                throw new OpenAiRestClient.OpenAiResponseException(
+                                classificationFailureKind,
+                                "sensitive provider output")
+                        .withUsage(
+                                "gpt-4o-mini",
+                                Map.of("inputTokens", 12L, "outputTokens", 4L));
+            }
             if (classificationFailureCode != null) {
                 throw new OpenAiRestClient.OpenAiResponseException(
                                 classificationFailureCode,
@@ -678,9 +1062,9 @@ class AiAnalysisServiceTest {
             result.put("safetyAction", classificationSafetyAction);
             result.put(
                     "category",
-                    "block".equals(classificationSafetyAction)
-                            ? classificationCategory
-                            : "none");
+                    "allow".equals(classificationSafetyAction)
+                            ? "none"
+                            : classificationCategory);
             if (contentType != ContentType.USERNAME) {
                 result.put("domain", classificationDomain);
                 result.put("financialClaim", "analysis");

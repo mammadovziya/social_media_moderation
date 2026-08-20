@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -39,12 +40,12 @@ public class ProtectedNameIndex {
     /**
      * Shortest skeleton that may be compared as a skeleton at all.
      *
-     * <p>Folding is what makes {@code kapltalbank} and {@code kapitalbank} compare equal, and at
-     * that length the collision is unambiguously an attack. At three or four characters the fold
-     * has no signal left: {@code ABB} folds to {@code ab}, which would also capture {@code a.b},
-     * {@code aab}, and {@code a4b}. Below this length the entry is matched against the handle with
-     * separators removed and nothing else folded, so {@code abb} and {@code a_b_b} are refused
-     * while ordinary short handles are not.
+     * <p>Explicit digit and symbol substitutions are expanded into comparison candidates, while a
+     * genuine letter difference such as {@code i} versus {@code l} remains a near match rather
+     * than an exact collision. At three or four characters even that comparison has too little
+     * signal: {@code ABB} would also capture {@code a.b}, {@code aab}, and {@code a4b}. Below this
+     * length the entry is matched against the handle with separators removed and nothing else
+     * folded, so {@code abb} and {@code a_b_b} are refused while ordinary short handles are not.
      */
     private static final int MIN_SKELETON_MATCH_LENGTH = 5;
 
@@ -92,12 +93,18 @@ public class ProtectedNameIndex {
             return Optional.empty();
         }
         Snapshot current = snapshot;
-        String skeleton = HandleSkeleton.of(handle);
-        if (skeleton.isEmpty()) {
+        Set<String> skeletons = HandleSkeleton.comparisonCandidates(handle);
+        if (skeletons.isEmpty()) {
             return Optional.empty();
         }
 
-        ProtectedName exact = current.bySkeleton().get(skeleton);
+        ProtectedName exact = null;
+        for (String skeleton : skeletons) {
+            exact = current.bySkeleton().get(skeleton);
+            if (exact != null) {
+                break;
+            }
+        }
         if (exact == null) {
             exact = current.byCompactForm().get(compact(handle));
         }
@@ -105,16 +112,19 @@ public class ProtectedNameIndex {
             return Optional.of(new Match(exact, Kind.EXACT, exact.severity()));
         }
 
-        for (ProtectedName candidate : current.entries()) {
-            if (candidate.skeleton().length() >= MIN_NEAR_LENGTH
-                    && skeleton.length() >= MIN_NEAR_LENGTH
-                    && withinOneEdit(skeleton, candidate.skeleton())) {
-                return Optional.of(new Match(candidate, Kind.NEAR, candidate.severity()));
+        for (String skeleton : skeletons) {
+            for (ProtectedName candidate : current.entries()) {
+                if (candidate.skeleton().length() >= MIN_NEAR_LENGTH
+                        && skeleton.length() >= MIN_NEAR_LENGTH
+                        && withinOneEdit(skeleton, candidate.skeleton())) {
+                    return Optional.of(
+                            new Match(candidate, Kind.NEAR, ProtectedName.Severity.POSSIBLE));
+                }
             }
         }
 
-        ProtectedName institution = containedInstitution(current, skeleton);
-        if (institution != null && containedRole(current, skeleton) != null) {
+        ProtectedName institution = containedInstitution(current, skeletons);
+        if (institution != null && containedRole(current, skeletons) != null) {
             return Optional.of(
                     new Match(institution, Kind.BRAND_ROLE, ProtectedName.Severity.CLEAR));
         }
@@ -133,22 +143,24 @@ public class ProtectedNameIndex {
         return Optional.empty();
     }
 
-    private static ProtectedName containedInstitution(Snapshot current, String skeleton) {
+    private static ProtectedName containedInstitution(Snapshot current, Set<String> skeletons) {
         for (ProtectedName candidate : current.entries()) {
             if (candidate.nameType().institution()
                     && candidate.skeleton().length() >= MIN_INSTITUTION_CONTAINMENT_LENGTH
-                    && skeleton.contains(candidate.skeleton())) {
+                    && skeletons.stream().anyMatch(
+                            skeleton -> skeleton.contains(candidate.skeleton()))) {
                 return candidate;
             }
         }
         return null;
     }
 
-    private static ProtectedName containedRole(Snapshot current, String skeleton) {
+    private static ProtectedName containedRole(Snapshot current, Set<String> skeletons) {
         for (ProtectedName candidate : current.entries()) {
             if (candidate.nameType() == ProtectedName.NameType.STAFF_ROLE
                     && candidate.skeleton().length() >= MIN_ROLE_CONTAINMENT_LENGTH
-                    && skeleton.contains(candidate.skeleton())) {
+                    && skeletons.stream().anyMatch(
+                            skeleton -> skeleton.contains(candidate.skeleton()))) {
                 return candidate;
             }
         }
@@ -211,13 +223,13 @@ public class ProtectedNameIndex {
 
     private void seed() {
         List<ProtectedNameRepository.SeedEntry> entries = readSeed();
-        int inserted = repository.insertMissing(
+        int insertedOrProfileRefreshed = repository.insertMissing(
                 entries, REGISTRY_VERSION, HandleSkeleton.PROFILE_VERSION);
         int deactivated = repository.deactivateMissing(entries, REGISTRY_VERSION);
         log.info(
-                "protected name seed applied entries={} inserted={} deactivated={}",
+                "protected name seed applied entries={} insertedOrProfileRefreshed={} deactivated={}",
                 entries.size(),
-                inserted,
+                insertedOrProfileRefreshed,
                 deactivated);
     }
 
@@ -271,9 +283,9 @@ public class ProtectedNameIndex {
 
     /** How the handle matched the registry entry. */
     public enum Kind {
-        /** The whole handle folds to the protected skeleton. */
+        /** The primary skeleton or an explicit digit/symbol candidate equals the protected key. */
         EXACT,
-        /** The whole handle is one edit from the protected skeleton. */
+        /** The whole handle is one edit from the protected key and requires semantic review. */
         NEAR,
         /** The handle contains an institution name together with a staff role. */
         BRAND_ROLE,

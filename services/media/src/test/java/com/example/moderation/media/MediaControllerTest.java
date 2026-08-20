@@ -93,6 +93,7 @@ class MediaControllerTest {
         Map<?, ?> ocrResponse = (Map<?, ?>) response.get("ocr");
         assertThat(ocrResponse.get("status")).isEqualTo("ok");
         assertThat(ocrResponse.get("text")).isEqualTo("Salam Bakı");
+        assertThat(ocrResponse.containsKey("failureKind")).isFalse();
         assertThat(ocrResponse.get("profileVersion")).isEqualTo("ocr-policy-v1");
         assertThat(ocrResponse.get("minConfidenceThreshold")).isEqualTo(45.0);
         Map<?, ?> imageResponse = (Map<?, ?>) response.get("image");
@@ -171,7 +172,7 @@ class MediaControllerTest {
     }
 
     @Test
-    void keepsMediaResponseOkWhenOcrFails() throws Exception {
+    void keepsMediaResponseOkAndExposesTypedEvidenceWhenOcrFails() throws Exception {
         BufferedImage decodedImage =
                 new BufferedImage(24, 12, BufferedImage.TYPE_INT_RGB);
         MockMultipartFile upload =
@@ -189,6 +190,7 @@ class MediaControllerTest {
         assertThat(response).containsEntry("status", "ok");
         Map<?, ?> ocrResponse = (Map<?, ?>) response.get("ocr");
         assertThat(ocrResponse.get("status")).isEqualTo("error");
+        assertThat(ocrResponse.get("failureKind")).isEqualTo("UNAVAILABLE");
         assertThat(ocrResponse.containsKey("text")).isFalse();
     }
 

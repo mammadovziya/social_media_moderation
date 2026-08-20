@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.aMapWithSize;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
@@ -13,7 +14,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.example.moderation.gateway.api.ApiError;
+import com.example.moderation.gateway.api.ContentType;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.net.SocketTimeoutException;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -56,6 +61,108 @@ class GatewayErrorResponseTest {
                 .andExpect(jsonPath("$", aMapWithSize(2)))
                 .andExpect(jsonPath("$.decision").value("BLOCK"))
                 .andExpect(jsonPath("$.violation").value("OTHER"));
+    }
+
+    @Test
+    void invalidAnalyzerEnvelopeReturnsSafeBadGatewayErrorInsteadOfUnknown()
+            throws Exception {
+        when(clients.analyzeText(
+                        "post-invalid-upstream", ContentType.POST, "ordinary investment analysis"))
+                .thenReturn(Map.of());
+
+        mockMvc.perform(multipart("/v1/moderate")
+                        .param("contentId", "post-invalid-upstream")
+                        .param("contentType", "POST")
+                        .param("text", "ordinary investment analysis")
+                        .header("X-Request-ID", "request-invalid-upstream"))
+                .andExpect(status().isBadGateway())
+                .andExpect(header().string("X-Request-ID", "request-invalid-upstream"))
+                .andExpect(header().string("Cache-Control", "no-store, private"))
+                .andExpect(jsonPath("$", aMapWithSize(3)))
+                .andExpect(jsonPath("$.error").value("UPSTREAM_FAILURE"))
+                .andExpect(jsonPath("$.message")
+                        .value("A required moderation service returned an invalid response."))
+                .andExpect(jsonPath("$.requestId").value("request-invalid-upstream"))
+                .andExpect(jsonPath("$.decision").doesNotExist());
+        verify(clients).persistContentDecisionAudit(any(ContentDecisionAuditPayload.class));
+    }
+
+    @Test
+    void unavailableAnalyzerReturnsSafeServiceUnavailableErrorInsteadOfUnknown()
+            throws Exception {
+        when(clients.analyzeText(
+                        "post-unavailable", ContentType.POST, "ordinary investment analysis"))
+                .thenThrow(new IllegalStateException("provider secret response body"));
+
+        mockMvc.perform(multipart("/v1/moderate")
+                        .param("contentId", "post-unavailable")
+                        .param("contentType", "POST")
+                        .param("text", "ordinary investment analysis")
+                        .header("X-Request-ID", "request-unavailable"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(header().string("X-Request-ID", "request-unavailable"))
+                .andExpect(header().string("Cache-Control", "no-store, private"))
+                .andExpect(jsonPath("$", aMapWithSize(3)))
+                .andExpect(jsonPath("$.error").value("SERVICE_UNAVAILABLE"))
+                .andExpect(jsonPath("$.message")
+                        .value("A required moderation service is not available."))
+                .andExpect(jsonPath("$.requestId").value("request-unavailable"))
+                .andExpect(jsonPath("$.decision").doesNotExist());
+        verify(clients).persistContentDecisionAudit(any(ContentDecisionAuditPayload.class));
+    }
+
+    @Test
+    void malformedAnalyzerJsonReturnsSafeBadGatewayErrorInsteadOfUnknown()
+            throws Exception {
+        when(clients.analyzeText(
+                        "post-malformed-json",
+                        ContentType.POST,
+                        "ordinary investment analysis"))
+                .thenThrow(new IllegalStateException(
+                        "response conversion failed",
+                        new JsonProcessingException("raw provider response") {}));
+
+        mockMvc.perform(multipart("/v1/moderate")
+                        .param("contentId", "post-malformed-json")
+                        .param("contentType", "POST")
+                        .param("text", "ordinary investment analysis")
+                        .header("X-Request-ID", "request-malformed-json"))
+                .andExpect(status().isBadGateway())
+                .andExpect(header().string("X-Request-ID", "request-malformed-json"))
+                .andExpect(header().string("Cache-Control", "no-store, private"))
+                .andExpect(jsonPath("$", aMapWithSize(3)))
+                .andExpect(jsonPath("$.error").value("UPSTREAM_FAILURE"))
+                .andExpect(jsonPath("$.message")
+                        .value("A required moderation service returned an invalid response."))
+                .andExpect(jsonPath("$.requestId").value("request-malformed-json"))
+                .andExpect(jsonPath("$.decision").doesNotExist());
+        verify(clients).persistContentDecisionAudit(any(ContentDecisionAuditPayload.class));
+    }
+
+    @Test
+    void analyzerTimeoutReturnsSafeGatewayTimeoutErrorInsteadOfUnknown()
+            throws Exception {
+        when(clients.analyzeText(
+                        "post-timeout", ContentType.POST, "ordinary investment analysis"))
+                .thenThrow(new IllegalStateException(
+                        "provider secret response body",
+                        new SocketTimeoutException("provider socket timed out")));
+
+        mockMvc.perform(multipart("/v1/moderate")
+                        .param("contentId", "post-timeout")
+                        .param("contentType", "POST")
+                        .param("text", "ordinary investment analysis")
+                        .header("X-Request-ID", "request-timeout"))
+                .andExpect(status().isGatewayTimeout())
+                .andExpect(header().string("X-Request-ID", "request-timeout"))
+                .andExpect(header().string("Cache-Control", "no-store, private"))
+                .andExpect(jsonPath("$", aMapWithSize(3)))
+                .andExpect(jsonPath("$.error").value("UPSTREAM_TIMEOUT"))
+                .andExpect(jsonPath("$.message")
+                        .value("A required moderation service timed out."))
+                .andExpect(jsonPath("$.requestId").value("request-timeout"))
+                .andExpect(jsonPath("$.decision").doesNotExist());
+        verify(clients).persistContentDecisionAudit(any(ContentDecisionAuditPayload.class));
     }
 
     @Test
@@ -169,7 +276,7 @@ class GatewayErrorResponseTest {
         when(clients.analyzeMedia(
                         any(byte[].class), eq("bad.png"), eq("image/png"), eq("post-bad")))
                 .thenThrow(HttpClientErrorException.create(
-                        HttpStatus.BAD_REQUEST,
+                        HttpStatus.UNPROCESSABLE_ENTITY,
                         "bad image",
                         HttpHeaders.EMPTY,
                         new byte[0],

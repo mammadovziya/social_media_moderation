@@ -73,19 +73,49 @@ class ModerationPropertiesTest {
                         "unsafe model id",
                         "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                         "gpt-4o-mini",
-                        "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8",
-                        "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d",
+                        "3f16da31ae1f71763b2a5262e694b531abefddb1d626f4dbf731bcef56139928",
+                        "8ba145c16b484d910a58755598552bf97107880b1dfef0a01d0825f941818b01",
                         "gpt-5.6-terra",
                         "medium",
-                        "image-adjudication-v5",
-                        "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505",
-                        "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa",
+                        "adjudication-prompts-v4",
+                        "ac1640fbf75889a8071545ae80fca3adf25706f6b9f3e7b35a60201aa2d82d1c",
+                        "c2855ff1698d969d213445a2e278557d8c2d8119a8d3ce5f01bf6d397f5f889e",
+                        "14d2daa25d8b31765be1b804c061ab1bfab761a1a854f379e2d331ae82f93132",
+                        "894d8c98443230496195e0e443b3293e0f4ec359b9a582f20d87dbb58f9fb699",
                         30,
                         "./config/blocked_terms.txt",
                         "./config/restricted_political_entities.txt",
                         ""))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("OPENAI_MODERATION_MODEL");
+    }
+
+    @Test
+    void rejectsMalformedImageAdjudicationPins() {
+        assertThatThrownBy(() -> properties(
+                        0.70,
+                        8_388_608,
+                        9_437_184,
+                        30,
+                        "http://ai",
+                        "./config/blocked_terms.txt",
+                        3_000,
+                        "not-a-sha256",
+                        "894d8c98443230496195e0e443b3293e0f4ec359b9a582f20d87dbb58f9fb699"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("OPENAI_IMAGE_ADJUDICATION_PROMPT_SHA256");
+        assertThatThrownBy(() -> properties(
+                        0.70,
+                        8_388_608,
+                        9_437_184,
+                        30,
+                        "http://ai",
+                        "./config/blocked_terms.txt",
+                        3_000,
+                        "14d2daa25d8b31765be1b804c061ab1bfab761a1a854f379e2d331ae82f93132",
+                        "NOT-A-SHA256"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("OPENAI_IMAGE_ADJUDICATION_PROFILE_SHA256");
     }
 
     @Test
@@ -116,13 +146,15 @@ class ModerationPropertiesTest {
                         "omni-moderation-2024-09-26",
                         "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                         "gpt-5.6-terra",
-                        "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8",
-                        "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d",
+                        "3f16da31ae1f71763b2a5262e694b531abefddb1d626f4dbf731bcef56139928",
+                        "8ba145c16b484d910a58755598552bf97107880b1dfef0a01d0825f941818b01",
                         "gpt-5.6-terra",
                         "medium",
-                        "image-adjudication-v5",
-                        "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505",
-                        "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa",
+                        "adjudication-prompts-v4",
+                        "ac1640fbf75889a8071545ae80fca3adf25706f6b9f3e7b35a60201aa2d82d1c",
+                        "c2855ff1698d969d213445a2e278557d8c2d8119a8d3ce5f01bf6d397f5f889e",
+                        "14d2daa25d8b31765be1b804c061ab1bfab761a1a854f379e2d331ae82f93132",
+                        "894d8c98443230496195e0e443b3293e0f4ec359b9a582f20d87dbb58f9fb699",
                         30,
                         "./config/blocked_terms.txt",
                         "./config/restricted_political_entities.txt",
@@ -171,6 +203,28 @@ class ModerationPropertiesTest {
             String aiUrl,
             String blockedTermsFile,
             long finalizationReserveMs) {
+        return properties(
+                threshold,
+                maxImageBytes,
+                maxImageRequestBytes,
+                timeoutSeconds,
+                aiUrl,
+                blockedTermsFile,
+                finalizationReserveMs,
+                "14d2daa25d8b31765be1b804c061ab1bfab761a1a854f379e2d331ae82f93132",
+                "894d8c98443230496195e0e443b3293e0f4ec359b9a582f20d87dbb58f9fb699");
+    }
+
+    private static ModerationProperties properties(
+            double threshold,
+            long maxImageBytes,
+            long maxImageRequestBytes,
+            long timeoutSeconds,
+            String aiUrl,
+            String blockedTermsFile,
+            long finalizationReserveMs,
+            String imageAdjudicationPromptSha256,
+            String imageAdjudicationProfileSha256) {
         return new ModerationProperties(
                 aiUrl,
                 "http://media",
@@ -182,13 +236,15 @@ class ModerationPropertiesTest {
                 "omni-moderation-2024-09-26",
                 "25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073",
                 "gpt-5.6-terra",
-                "89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8",
-                "d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d",
+                "3f16da31ae1f71763b2a5262e694b531abefddb1d626f4dbf731bcef56139928",
+                "8ba145c16b484d910a58755598552bf97107880b1dfef0a01d0825f941818b01",
                 "gpt-5.6-terra",
                 "medium",
-                "image-adjudication-v5",
-                "d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505",
-                "d7d7df020d0bdbbccf20f2262a9c5bbe363cba03426227a0497726c8651460aa",
+                "adjudication-prompts-v4",
+                "ac1640fbf75889a8071545ae80fca3adf25706f6b9f3e7b35a60201aa2d82d1c",
+                "c2855ff1698d969d213445a2e278557d8c2d8119a8d3ce5f01bf6d397f5f889e",
+                imageAdjudicationPromptSha256,
+                imageAdjudicationProfileSha256,
                 30,
                 blockedTermsFile,
                 "./config/restricted_political_entities.txt",

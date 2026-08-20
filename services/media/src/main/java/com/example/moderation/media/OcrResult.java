@@ -12,7 +12,8 @@ record OcrResult(
         String digest,
         List<OcrSpan> spans,
         boolean truncated,
-        String engine) {
+        String engine,
+        String failureKind) {
     OcrResult {
         spans = List.copyOf(spans);
     }
@@ -37,7 +38,8 @@ record OcrResult(
                 digest,
                 spans,
                 truncated,
-                engine);
+                engine,
+                null);
     }
 
     static OcrResult noText() {
@@ -46,18 +48,26 @@ record OcrResult(
 
     static OcrResult noText(boolean truncated, String engine) {
         return new OcrResult(
-                "no_text", null, null, false, null, List.of(), truncated, engine);
+                "no_text", null, null, false, null, List.of(), truncated, engine, null);
     }
 
     static OcrResult error() {
-        return empty("error");
+        return error("UNAVAILABLE");
+    }
+
+    static OcrResult error(String failureKind) {
+        return empty("error", failureKind);
     }
 
     static OcrResult busy() {
-        return empty("busy");
+        return empty("busy", "UNAVAILABLE");
     }
 
     private static OcrResult empty(String status) {
+        return empty(status, null);
+    }
+
+    private static OcrResult empty(String status, String failureKind) {
         return new OcrResult(
                 status,
                 null,
@@ -66,7 +76,8 @@ record OcrResult(
                 null,
                 List.of(),
                 false,
-                "configured-tesseract-tsv-psm11-oem1-v1");
+                "configured-tesseract-tsv-psm11-oem1-v1",
+                failureKind);
     }
 
     Map<String, Object> asMap() {
@@ -77,6 +88,9 @@ record OcrResult(
         response.put("truncated", truncated);
         response.put("engine", engine);
         response.put("confidenceAccepted", confidenceAccepted);
+        if (failureKind != null) {
+            response.put("failureKind", failureKind);
+        }
         if (text != null) {
             response.put("text", text);
             response.put("normalizedText", text);

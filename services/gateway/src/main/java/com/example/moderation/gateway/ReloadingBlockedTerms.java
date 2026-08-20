@@ -36,18 +36,42 @@ import org.springframework.stereotype.Component;
 @Component
 public final class ReloadingBlockedTerms {
     private static final Logger log = LoggerFactory.getLogger(ReloadingBlockedTerms.class);
+    private static final String SEMANTIC_FORMAT_VERSION = "blocked-terms/v4";
     private static final int MAX_FILE_BYTES = 1_048_576;
     private static final int MAX_TERM_COUNT = 10_000;
     private static final int MAX_TERM_CODE_POINTS = 256;
+    /**
+     * Longest run of adjacent text tokens joined before folding, so a spaced term still matches.
+     *
+     * <p>Punctuation splits a spelled-out word into one token per letter, so a token ceiling
+     * truncates exactly the evasion it exists to catch: {@code p.i.c.o.g.l.u} is seven tokens.
+     * The join is therefore bounded by the joined length instead, which no reviewed term exceeds,
+     * and every shorter join along the way is tested too.
+     */
+    private static final int MAX_TEXT_FOLD_TOKENS = 40;
+    /** Longest joined window folded from adjacent text tokens. Bounds the work per start index. */
+    private static final int MAX_TEXT_FOLD_CHARS = 40;
+    /** Total folded readings one text scan may examine before it falls back to literal readings. */
+    private static final int MAX_TEXT_FOLD_READINGS = 4_096;
     private static final Pattern IGNORED_CHARACTER = Pattern.compile("[\\p{Cf}\\u0307]");
     private static final Pattern TERM_SEPARATOR = Pattern.compile("[\\s\\p{Z}\\p{P}\\p{S}_]+");
 
     private final Path file;
     private final AtomicReference<Snapshot> current;
     private final AtomicBoolean reloadInProgress = new AtomicBoolean();
+    private final AtomicBoolean databaseRefreshInProgress = new AtomicBoolean();
     private final AtomicLong nextReloadCheckNanos = new AtomicLong(Long.MIN_VALUE);
     private final long reloadIntervalNanos;
+    private final DatabaseBlockedTermsSource databaseSource;
+    private final BlockedTermsPolicyProperties.SourceMode sourceMode;
+    private final long maxDatabaseStaleNanos;
     private volatile String lastFailure;
+    private volatile String lastDatabaseFailure;
+    private volatile String databaseEtag;
+    private volatile long lastDatabaseSuccessNanos = Long.MIN_VALUE;
+    private volatile boolean databaseSnapshotLoaded;
+    private volatile Snapshot lastDatabaseSnapshot;
+    private volatile DatabasePolicyIdentity databaseIdentity;
 
     public ReloadingBlockedTerms(ModerationProperties properties) {
         this(Path.of(properties.blockedTermsFile()), Duration.ZERO);
@@ -56,10 +80,15 @@ public final class ReloadingBlockedTerms {
     @Autowired
     ReloadingBlockedTerms(
             ModerationProperties properties,
+            BlockedTermsPolicyProperties policyProperties,
+            DatabaseBlockedTermsSource databaseSource,
             @Value("${moderation.policy-reload-interval-ms:250}") long reloadIntervalMillis) {
         this(
                 Path.of(properties.blockedTermsFile()),
-                validatedReloadInterval(reloadIntervalMillis));
+                validatedReloadInterval(reloadIntervalMillis),
+                policyProperties.sourceMode(),
+                databaseSource,
+                policyProperties.maxStale());
     }
 
     ReloadingBlockedTerms(Path file) {
@@ -67,13 +96,31 @@ public final class ReloadingBlockedTerms {
     }
 
     ReloadingBlockedTerms(Path file, Duration reloadInterval) {
+        this(
+                file,
+                reloadInterval,
+                BlockedTermsPolicyProperties.SourceMode.FILE,
+                null,
+                Duration.ofMinutes(15));
+    }
+
+    ReloadingBlockedTerms(
+            Path file,
+            Duration reloadInterval,
+            BlockedTermsPolicyProperties.SourceMode sourceMode,
+            DatabaseBlockedTermsSource databaseSource,
+            Duration maxDatabaseStale) {
         this.file = file.toAbsolutePath().normalize();
         this.reloadIntervalNanos = reloadInterval.toNanos();
+        this.sourceMode = sourceMode;
+        this.databaseSource = databaseSource;
+        this.maxDatabaseStaleNanos = maxDatabaseStale.toNanos();
         this.current = new AtomicReference<>(loadStable(null));
         this.nextReloadCheckNanos.set(saturatedAdd(
                 System.nanoTime(), reloadIntervalNanos));
         log.info(
-                "loaded local blocked terms count={} vulgarCount={} digest={}",
+                "loaded blocked terms bootstrap source=file mode={} count={} vulgarCount={} digest={}",
+                sourceMode,
                 current.get().termCount(),
                 current.get().vulgarTermCount(),
                 current.get().semanticSha256());
@@ -82,6 +129,9 @@ public final class ReloadingBlockedTerms {
     /** Returns one immutable policy snapshot for the complete lifetime of a request. */
     Snapshot snapshot() {
         Snapshot previous = current.get();
+        if (sourceMode == BlockedTermsPolicyProperties.SourceMode.DATABASE) {
+            return previous;
+        }
         long now = System.nanoTime();
         if (now < nextReloadCheckNanos.get()
                 || !reloadInProgress.compareAndSet(false, true)) {
@@ -117,7 +167,161 @@ public final class ReloadingBlockedTerms {
     }
 
     boolean reloadHealthy() {
-        return lastFailure == null;
+        if (sourceMode != BlockedTermsPolicyProperties.SourceMode.DATABASE) {
+            return lastFailure == null;
+        }
+        if (!databaseSnapshotLoaded || lastDatabaseSuccessNanos == Long.MIN_VALUE) {
+            return false;
+        }
+        long elapsed = System.nanoTime() - lastDatabaseSuccessNanos;
+        return elapsed >= 0 && elapsed <= maxDatabaseStaleNanos;
+    }
+
+    /** Refreshes the remote policy without ever performing network I/O on a request thread. */
+    void refreshDatabasePolicy() {
+        if (sourceMode == BlockedTermsPolicyProperties.SourceMode.FILE
+                || !databaseRefreshInProgress.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            DatabaseBlockedTermsSource.FetchResult fetched = databaseSource.fetch(databaseEtag);
+            if (fetched.notModified()) {
+                DatabasePolicyIdentity identity = databaseIdentity;
+                if (identity == null || !identity.etag().equals(fetched.etag())) {
+                    throw new IllegalStateException(
+                            "policy distribution returned an unexpected not-modified response");
+                }
+                verifyShadowParity(lastDatabaseSnapshot);
+                lastDatabaseSuccessNanos = System.nanoTime();
+                recoverDatabaseRefresh();
+                return;
+            }
+            DatabasePolicyIdentity fetchedIdentity = DatabasePolicyIdentity.from(fetched);
+            DatabasePolicyIdentity existingIdentity = databaseIdentity;
+            if (existingIdentity != null
+                    && fetched.activationId() < existingIdentity.activationId()) {
+                throw new IllegalStateException(
+                        "policy distribution activation moved backwards");
+            }
+            if (existingIdentity != null
+                    && fetched.activationId() == existingIdentity.activationId()) {
+                if (!existingIdentity.equals(fetchedIdentity)) {
+                    throw new IllegalStateException(
+                            "policy distribution changed an existing activation");
+                }
+                verifyShadowParity(lastDatabaseSnapshot);
+                lastDatabaseSuccessNanos = System.nanoTime();
+                recoverDatabaseRefresh();
+                return;
+            }
+            if (!SEMANTIC_FORMAT_VERSION.equals(fetched.formatVersion())) {
+                throw new IllegalStateException(
+                        "database blocked terms use an unsupported semantic format");
+            }
+            if (!HandleVulgarSkeleton.PROFILE_VERSION.equals(
+                            fetched.handleFoldProfileVersion())
+                    || !MessageDigest.isEqual(
+                            HandleVulgarSkeleton.PROFILE_SHA256.getBytes(
+                                    StandardCharsets.US_ASCII),
+                            fetched.handleFoldProfileSha256().getBytes(
+                                    StandardCharsets.US_ASCII))) {
+                throw new IllegalStateException(
+                        "database blocked terms use an incompatible handle-fold profile");
+            }
+            SourceVersion sourceVersion = new SourceVersion(
+                    fetched.document().length,
+                    java.nio.file.attribute.FileTime.fromMillis(fetched.activationId()),
+                    "database:" + fetched.releaseId() + ':' + fetched.activationId());
+            Snapshot replacement = parse(
+                    fetched.document(), fetched.sourceSha256(), sourceVersion);
+            if (replacement.termCount() != fetched.termCount()) {
+                throw new IllegalStateException(
+                        "database blocked terms count does not match the compiled policy");
+            }
+            if (!MessageDigest.isEqual(
+                    replacement.semanticSha256().getBytes(StandardCharsets.US_ASCII),
+                    fetched.semanticSha256().getBytes(StandardCharsets.US_ASCII))) {
+                throw new IllegalStateException(
+                        "database blocked terms semantic digest does not match the compiled policy");
+            }
+            lastDatabaseSnapshot = replacement;
+            verifyShadowParity(replacement);
+            if (sourceMode == BlockedTermsPolicyProperties.SourceMode.DATABASE) {
+                current.set(replacement);
+                databaseSnapshotLoaded = true;
+            }
+            databaseIdentity = fetchedIdentity;
+            databaseEtag = fetched.etag();
+            lastDatabaseSuccessNanos = System.nanoTime();
+            log.info(
+                    "loaded blocked terms database releaseId={} releaseVersion={} activationId={} count={} vulgarCount={} digest={} mode={}",
+                    fetched.releaseId(),
+                    fetched.releaseVersion(),
+                    fetched.activationId(),
+                    replacement.termCount(),
+                    replacement.vulgarTermCount(),
+                    replacement.semanticSha256(),
+                    sourceMode);
+            recoverDatabaseRefresh();
+        } catch (RuntimeException exception) {
+            String failure = exception.getClass().getSimpleName() + ':' + exception.getMessage();
+            if (!failure.equals(lastDatabaseFailure)) {
+                log.error(
+                        "blocked terms database refresh failed; retaining last valid policy",
+                        exception);
+                lastDatabaseFailure = failure;
+            }
+        } finally {
+            databaseRefreshInProgress.set(false);
+        }
+    }
+
+    private void verifyShadowParity(Snapshot databaseSnapshot) {
+        if (sourceMode != BlockedTermsPolicyProperties.SourceMode.SHADOW
+                || databaseSnapshot == null) {
+            return;
+        }
+        Snapshot fileSnapshot = current.get();
+        if (!MessageDigest.isEqual(
+                fileSnapshot.semanticSha256().getBytes(StandardCharsets.US_ASCII),
+                databaseSnapshot.semanticSha256().getBytes(StandardCharsets.US_ASCII))) {
+            throw new IllegalStateException(
+                    "database blocked terms do not match the authoritative file snapshot");
+        }
+    }
+
+    private void recoverDatabaseRefresh() {
+        if (lastDatabaseFailure != null) {
+            log.info("blocked terms database refresh recovered");
+            lastDatabaseFailure = null;
+        }
+    }
+
+    private record DatabasePolicyIdentity(
+            long releaseId,
+            String releaseVersion,
+            long activationId,
+            String formatVersion,
+            String handleFoldProfileVersion,
+            String handleFoldProfileSha256,
+            String sourceSha256,
+            String semanticSha256,
+            int termCount,
+            String etag) {
+        private static DatabasePolicyIdentity from(
+                DatabaseBlockedTermsSource.FetchResult fetched) {
+            return new DatabasePolicyIdentity(
+                    fetched.releaseId(),
+                    fetched.releaseVersion(),
+                    fetched.activationId(),
+                    fetched.formatVersion(),
+                    fetched.handleFoldProfileVersion(),
+                    fetched.handleFoldProfileSha256(),
+                    fetched.sourceSha256(),
+                    fetched.semanticSha256(),
+                    fetched.termCount(),
+                    fetched.etag());
+        }
     }
 
     private static Duration validatedReloadInterval(long millis) {
@@ -227,13 +431,24 @@ public final class ReloadingBlockedTerms {
         }
 
         MutableTrieNode trie = new MutableTrieNode();
+        MutableHandleNode foldedTextTrie = new MutableHandleNode();
         MutableHandleNode handleTrie = new MutableHandleNode();
         for (Map.Entry<String, TermCategory> term : terms.entrySet()) {
-            trie.add(term.getKey(), term.getValue().violation());
+            if (term.getValue().textMatchable()) {
+                trie.add(term.getKey(), term.getValue().violation());
+            }
+            // Only the safety-severe categories fold. An obfuscated ethnic slur is exactly the
+            // spelling a hate rule has to catch, so HATE folds alongside VULGAR. POLITICAL_CONTENT
+            // and legacy OTHER terms stay literal: a lossy fold of a public figure's name invites
+            // false political blocks. A term whose fold is shorter than the fragment floor is also
+            // literal-only, so "göt" never folds onto the ordinary English "got".
             String folded = HandleVulgarSkeleton.ofTerm(term.getKey());
-            if (term.getValue() == TermCategory.VULGAR
-                    && folded.length() >= HandleVulgarSkeleton.MIN_PREFIX_MATCH_LENGTH) {
+            if (term.getValue().foldable()
+                    && folded.length() >= HandleVulgarSkeleton.MIN_EXACT_MATCH_LENGTH) {
                 handleTrie.add(folded, term.getValue().violation());
+                if (term.getValue().foldedTextMatchable()) {
+                    foldedTextTrie.add(folded, term.getValue().violation());
+                }
             }
         }
         int vulgarTermCount = Math.toIntExact(terms.values().stream()
@@ -241,6 +456,7 @@ public final class ReloadingBlockedTerms {
                 .count());
         return new Snapshot(
                 trie.freeze(),
+                foldedTextTrie.freeze(),
                 handleTrie.freeze(),
                 semanticDigest(terms),
                 terms.size(),
@@ -263,6 +479,8 @@ public final class ReloadingBlockedTerms {
         TermCategory category = switch (categoryName.toUpperCase(Locale.ROOT)) {
             case "VULGAR" -> TermCategory.VULGAR;
             case "POLITICAL_CONTENT" -> TermCategory.POLITICAL_CONTENT;
+            case "HATE" -> TermCategory.HATE;
+            case "HANDLE_VULGAR" -> TermCategory.HANDLE_VULGAR;
             default -> throw invalidLine(lineNumber, "unknown term category");
         };
         return new ConfiguredTerm(category, canonicalTerm(term, lineNumber));
@@ -297,7 +515,7 @@ public final class ReloadingBlockedTerms {
             if (Character.isLetterOrDigit(current)
                     && (previous < 0 || !isWordCodePoint(previous))) {
                 strongest = strongestViolation(strongest, violationFrom(root, text, start));
-                if (strongest == Violation.VULGAR) {
+                if (isStrongestViolation(strongest)) {
                     return strongest;
                 }
             }
@@ -336,7 +554,7 @@ public final class ReloadingBlockedTerms {
                     && (offset >= text.length()
                             || !isWordCodePoint(text.codePointAt(offset)))) {
                 strongest = strongestViolation(strongest, node.terminalViolation());
-                if (strongest == Violation.VULGAR) {
+                if (isStrongestViolation(strongest)) {
                     return strongest;
                 }
             }
@@ -384,13 +602,16 @@ public final class ReloadingBlockedTerms {
     private static String semanticDigest(Map<String, TermCategory> terms) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            updateDigest(digest, "blocked-terms/v3");
+            updateDigest(digest, SEMANTIC_FORMAT_VERSION);
             updateDigest(digest, HandleVulgarSkeleton.PROFILE_VERSION);
             updateDigest(digest, HandleVulgarSkeleton.PROFILE_SHA256);
-            updateDigest(digest, "folded-handle-category=VULGAR");
+            updateDigest(digest, "folded-text-category=VULGAR,HATE");
+            updateDigest(digest, "folded-handle-category=HANDLE_VULGAR,VULGAR,HATE");
             updateDigest(
                     digest,
-                    "handle-fragments:start-anchored;prefix-min="
+                    "handle-fragments:start-anchored;exact-min="
+                            + HandleVulgarSkeleton.MIN_EXACT_MATCH_LENGTH
+                            + ";prefix-min="
                             + HandleVulgarSkeleton.MIN_PREFIX_MATCH_LENGTH
                             + ";interior-min="
                             + HandleVulgarSkeleton.MIN_INTERIOR_MATCH_LENGTH);
@@ -431,6 +652,7 @@ public final class ReloadingBlockedTerms {
 
     private static int violationPriority(Violation violation) {
         return switch (violation) {
+            case HATE -> 4;
             case VULGAR -> 3;
             case POLITICAL_CONTENT -> 2;
             case OTHER -> 1;
@@ -440,6 +662,15 @@ public final class ReloadingBlockedTerms {
         };
     }
 
+    /**
+     * Whether no other local category could outrank this one, so a scan can stop early. Hate
+     * speech outranks vulgarity, so stopping at the first vulgar hit would report the weaker
+     * category for text that carries both.
+     */
+    private static boolean isStrongestViolation(Violation violation) {
+        return violation == Violation.HATE;
+    }
+
     private static TermCategory strongestCategory(TermCategory first, TermCategory second) {
         return first.priority() >= second.priority() ? first : second;
     }
@@ -447,7 +678,13 @@ public final class ReloadingBlockedTerms {
     private enum TermCategory {
         OTHER(Violation.OTHER, 1),
         POLITICAL_CONTENT(Violation.POLITICAL_CONTENT, 2),
-        VULGAR(Violation.VULGAR, 3);
+        // Username-only derogatory components are kept out of both literal and folded free-text
+        // matching so ordinary vegetable meanings in posts and comments remain classifier-owned.
+        HANDLE_VULGAR(Violation.VULGAR, 3),
+        VULGAR(Violation.VULGAR, 4),
+        // Hate speech outranks vulgarity. An ethnic slur filed as profanity would report the wrong
+        // category in every audit row, which is exactly the data a hate-speech review needs.
+        HATE(Violation.HATE, 5);
 
         private final Violation violation;
         private final int priority;
@@ -463,6 +700,23 @@ public final class ReloadingBlockedTerms {
 
         private int priority() {
             return priority;
+        }
+
+        private boolean textMatchable() {
+            return this != HANDLE_VULGAR;
+        }
+
+        private boolean foldedTextMatchable() {
+            return this == VULGAR || this == HATE;
+        }
+
+        /**
+         * Whether this category may be matched through the lossy fold profile. Only the
+         * safety-severe categories qualify; a folded public figure's name would invite false
+         * political blocks, and legacy bare terms carry no review to justify the looser match.
+         */
+        private boolean foldable() {
+            return this == HANDLE_VULGAR || this == VULGAR || this == HATE;
         }
     }
 
@@ -497,17 +751,43 @@ public final class ReloadingBlockedTerms {
                     continue;
                 }
                 int length = offset - start + 1;
-                boolean accepted = (handlePrefix && start == 0)
-                        || length >= HandleVulgarSkeleton.MIN_INTERIOR_MATCH_LENGTH;
+                boolean leading = handlePrefix && start == 0;
+                boolean whole = leading && offset == candidate.length() - 1;
+                boolean accepted = whole
+                        ? length >= HandleVulgarSkeleton.MIN_EXACT_MATCH_LENGTH
+                        : leading
+                                ? length >= HandleVulgarSkeleton.MIN_PREFIX_MATCH_LENGTH
+                                : length >= HandleVulgarSkeleton.MIN_INTERIOR_MATCH_LENGTH;
                 if (accepted) {
                     strongest = strongestViolation(strongest, node.terminalViolation());
-                    if (strongest == Violation.VULGAR) {
+                    if (isStrongestViolation(strongest)) {
                         return strongest;
                     }
                 }
             }
         }
         return strongest;
+    }
+
+    /**
+     * Matches a folded candidate only when the fold consumes it whole.
+     *
+     * <p>Free text keeps whole-token matching. A handle has no boundaries and so must accept
+     * fragments, but text does have them, and fragment matching there would block the ordinary
+     * word that merely contains a folded key — Turkish {@code eksikim} carries {@code sikim}.
+     */
+    private static Violation exactFoldViolation(HandleNode root, String candidate) {
+        if (candidate.length() < HandleVulgarSkeleton.MIN_EXACT_MATCH_LENGTH) {
+            return Violation.NONE;
+        }
+        HandleNode node = root;
+        for (int index = 0; index < candidate.length(); index++) {
+            node = node.children().get(candidate.charAt(index));
+            if (node == null) {
+                return Violation.NONE;
+            }
+        }
+        return node.terminalViolation();
     }
 
     private record TrieNode(
@@ -577,6 +857,7 @@ public final class ReloadingBlockedTerms {
 
     static final class Snapshot {
         private final TrieNode trie;
+        private final HandleNode foldedTextTrie;
         private final HandleNode handleTrie;
         private final String semanticSha256;
         private final int termCount;
@@ -586,6 +867,7 @@ public final class ReloadingBlockedTerms {
 
         private Snapshot(
                 TrieNode trie,
+                HandleNode foldedTextTrie,
                 HandleNode handleTrie,
                 String semanticSha256,
                 int termCount,
@@ -593,6 +875,7 @@ public final class ReloadingBlockedTerms {
                 String sourceSha256,
                 SourceVersion sourceVersion) {
             this.trie = trie;
+            this.foldedTextTrie = foldedTextTrie;
             this.handleTrie = handleTrie;
             this.semanticSha256 = semanticSha256;
             this.termCount = termCount;
@@ -606,12 +889,56 @@ public final class ReloadingBlockedTerms {
                     ? this
                     : new Snapshot(
                             trie,
+                            foldedTextTrie,
                             handleTrie,
                             semanticSha256,
                             termCount,
                             vulgarTermCount,
                             sourceSha256,
                             replacement);
+        }
+
+        /**
+         * Returns the strongest violation that free text spells through the fold profile.
+         *
+         * <p>Tokens are folded and matched whole, alone and joined with up to two following
+         * tokens, so a term written across a space still matches. Unlike the handle path this
+         * never accepts a fragment, which is what keeps an ordinary word that merely contains a
+         * folded key from blocking. Work is bounded: once the reading budget is spent only the
+         * literal reading of each remaining window is considered.
+         */
+        Violation foldedTextViolation(String text) {
+            if (text == null || text.isBlank()) {
+                return Violation.NONE;
+            }
+            String[] tokens = TERM_SEPARATOR.split(normalize(text));
+            Violation strongest = Violation.NONE;
+            int budget = MAX_TEXT_FOLD_READINGS;
+            for (int start = 0; start < tokens.length; start++) {
+                StringBuilder window = new StringBuilder(tokens[start]);
+                for (int span = 0; span < MAX_TEXT_FOLD_TOKENS; span++) {
+                    if (span > 0) {
+                        if (start + span >= tokens.length
+                                || window.length() + tokens[start + span].length()
+                                        > MAX_TEXT_FOLD_CHARS) {
+                            break;
+                        }
+                        window.append(tokens[start + span]);
+                    }
+                    java.util.Set<String> readings = budget > 0
+                            ? HandleVulgarSkeleton.ofHandle(window.toString())
+                            : java.util.Set.of(HandleVulgarSkeleton.ofTerm(window.toString()));
+                    budget -= readings.size();
+                    for (String candidate : readings) {
+                        strongest = strongestViolation(
+                                strongest, exactFoldViolation(foldedTextTrie, candidate));
+                        if (isStrongestViolation(strongest)) {
+                            return strongest;
+                        }
+                    }
+                }
+            }
+            return strongest;
         }
 
         /** Returns the strongest VULGAR violation found in any bounded folded handle reading. */
@@ -626,7 +953,7 @@ public final class ReloadingBlockedTerms {
                     strongest = strongestViolation(
                             strongest,
                             handleViolationFrom(handleTrie, candidate, suffix.handlePrefix()));
-                    if (strongest == Violation.VULGAR) {
+                    if (isStrongestViolation(strongest)) {
                         return strongest;
                     }
                 }

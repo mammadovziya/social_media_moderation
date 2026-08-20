@@ -4,19 +4,28 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.text.Normalizer;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
  * Collapses an identity string to a comparison skeleton.
  *
- * <p>The skeleton folds the substitutions an impersonator uses to keep a name readable while
- * evading equality: separators, repeated letters, digit and symbol lookalikes, and Cyrillic
- * homoglyphs. It is a comparison key only. A skeleton collision is evidence that two strings look
- * alike, never a statement that either one is a violation.
+ * <p>The primary skeleton removes separators, folds unambiguous Unicode variants, and collapses
+ * repeated characters. It deliberately preserves ordinary ASCII letters and digits. In
+ * particular, {@code i}, Azerbaijani {@code ı}, and {@code l} stay distinct, so a readable cache
+ * key never turns {@code ziya} into {@code zlya} or lets those handles share a model verdict.
+ *
+ * <p>Ambiguous digit and symbol lookalikes are exposed separately through
+ * {@link #comparisonCandidates(String)}. Protected-name matching may consider those bounded
+ * candidates, but storage, audit, and model-cache identity always use the primary skeleton.
  *
  * <p>This class is deliberately duplicated in the gateway. Both services compare against the same
  * stored skeletons, so the two copies must stay identical; {@link #PROFILE_SHA256} is pinned in
@@ -24,12 +33,27 @@ import java.util.regex.Pattern;
  * comparison space.
  */
 public final class HandleSkeleton {
-    public static final String PROFILE_VERSION = "handle-skeleton-v1";
+    public static final String PROFILE_VERSION = "handle-skeleton-v2";
     public static final String PROFILE_SHA256;
 
     private static final Pattern FORMAT_CHARACTER = Pattern.compile("\\p{Cf}");
     private static final int MAX_INPUT_CHARS = 256;
+    private static final int MAX_COMPARISON_CANDIDATES = 64;
     private static final Map<Integer, Integer> FOLD;
+    private static final Map<Integer, List<String>> CONFUSABLE_READINGS = Map.ofEntries(
+            Map.entry((int) '0', List.of("o")),
+            Map.entry((int) '1', List.of("i", "l")),
+            Map.entry((int) '3', List.of("e")),
+            Map.entry((int) '4', List.of("a")),
+            Map.entry((int) '5', List.of("s")),
+            Map.entry((int) '7', List.of("t")),
+            Map.entry((int) '8', List.of("b")),
+            Map.entry((int) '9', List.of("g")),
+            Map.entry((int) '@', List.of("a")),
+            Map.entry((int) '$', List.of("s")),
+            Map.entry((int) '!', List.of("i", "l")),
+            Map.entry((int) '|', List.of("i", "l")),
+            Map.entry((int) 0x0131, List.of("i")));
 
     static {
         FOLD = foldTable();
@@ -38,23 +62,80 @@ public final class HandleSkeleton {
 
     private HandleSkeleton() {}
 
-    /**
-     * Returns the comparison skeleton, or an empty string when nothing comparable remains.
-     *
-     * @param value untrusted identity string
-     */
+    /** Returns the primary comparison skeleton, or an empty string when none remains. */
     public static String of(String value) {
+        String normalized = normalize(value);
+        if (normalized.isEmpty()) {
+            return "";
+        }
+        return ofNormalized(normalized);
+    }
+
+    /**
+     * Returns bounded comparison candidates, with the primary skeleton first.
+     *
+     * <p>Only characters that visibly signal an alternate reading are expanded. Genuine
+     * {@code i} and {@code l} never expand into one another. This keeps ordinary names distinct
+     * while still recognizing handles such as {@code adm1n} and {@code p4sha.bank} when they are
+     * compared with a protected identity.
+     */
+    public static Set<String> comparisonCandidates(String value) {
+        String normalized = normalize(value);
+        if (normalized.isEmpty()) {
+            return Set.of();
+        }
+        List<String> readings = new ArrayList<>();
+        readings.add("");
+        for (int index = 0; index < normalized.length(); ) {
+            int codePoint = normalized.codePointAt(index);
+            index += Character.charCount(codePoint);
+            String literal = new String(Character.toChars(codePoint));
+            List<String> alternatives = CONFUSABLE_READINGS.get(codePoint);
+            if (alternatives == null
+                    || readings.size() * (alternatives.size() + 1)
+                            > MAX_COMPARISON_CANDIDATES) {
+                for (int position = 0; position < readings.size(); position++) {
+                    readings.set(position, readings.get(position) + literal);
+                }
+                continue;
+            }
+            List<String> expanded = new ArrayList<>(
+                    readings.size() * (alternatives.size() + 1));
+            for (String reading : readings) {
+                expanded.add(reading + literal);
+            }
+            for (String alternative : alternatives) {
+                for (String reading : readings) {
+                    expanded.add(reading + alternative);
+                }
+            }
+            readings = expanded;
+        }
+
+        Set<String> candidates = new LinkedHashSet<>();
+        for (String reading : readings) {
+            String candidate = ofNormalized(reading);
+            if (!candidate.isEmpty()) {
+                candidates.add(candidate);
+            }
+        }
+        return Collections.unmodifiableSet(candidates);
+    }
+
+    private static String normalize(String value) {
         if (value == null || value.isBlank()) {
             return "";
         }
         String bounded = value.length() > MAX_INPUT_CHARS
                 ? value.substring(0, MAX_INPUT_CHARS)
                 : value;
-        String normalized = FORMAT_CHARACTER
+        return FORMAT_CHARACTER
                 .matcher(Normalizer.normalize(bounded, Normalizer.Form.NFKC))
                 .replaceAll("")
                 .toLowerCase(Locale.ROOT);
+    }
 
+    private static String ofNormalized(String normalized) {
         StringBuilder skeleton = new StringBuilder(normalized.length());
         int previous = -1;
         for (int index = 0; index < normalized.length(); ) {
@@ -70,14 +151,7 @@ public final class HandleSkeleton {
         return skeleton.toString();
     }
 
-    /**
-     * Returns the folded character, or -1 when the character carries no comparable meaning.
-     *
-     * <p>ASCII letters and digits without a lookalike are kept as they are. A letter outside ASCII
-     * with no governed fold is also kept, so scripts without a Latin lookalike still compare
-     * against each other. Separators and punctuation are dropped, so {@code kapital.bank} and
-     * {@code kapital_bank} compare equal.
-     */
+    /** Returns the unambiguous folded character, or -1 for separators and punctuation. */
     private static int fold(int codePoint) {
         Integer folded = FOLD.get(codePoint);
         if (folded != null) {
@@ -88,20 +162,21 @@ public final class HandleSkeleton {
 
     private static Map<Integer, Integer> foldTable() {
         Map<Integer, Integer> table = new LinkedHashMap<>();
-        put(table, 'a', "4@àáâãäåа");
-        put(table, 'b', "8вб");
+        put(table, 'a', "àáâãäåа");
+        put(table, 'b', "вб");
         put(table, 'c', "çćс");
-        put(table, 'e', "3èéêëəеё");
-        put(table, 'g', "9ğġ");
+        put(table, 'e', "èéêëəеё");
+        put(table, 'g', "ğġ");
         put(table, 'h', "н");
+        put(table, 'i', "ìíîï");
         put(table, 'k', "к");
-        put(table, 'l', "1!|iìíîïıł");
+        put(table, 'l', "ł");
         put(table, 'm', "м");
         put(table, 'n', "ñń");
-        put(table, 'o', "0òóôõöøо");
+        put(table, 'o', "òóôõöøо");
         put(table, 'p', "р");
-        put(table, 's', "5$şśѕ");
-        put(table, 't', "7ţт");
+        put(table, 's', "şśѕ");
+        put(table, 't', "ţт");
         put(table, 'u', "ùúûü");
         put(table, 'x', "х");
         put(table, 'y', "ýÿу");
@@ -126,6 +201,9 @@ public final class HandleSkeleton {
         canonical.append("drop=non-alphanumeric\n");
         canonical.append("keep=unmapped-letters-and-digits\n");
         canonical.append("maxInputChars=").append(MAX_INPUT_CHARS).append('\n');
+        canonical.append("maxComparisonCandidates=")
+                .append(MAX_COMPARISON_CANDIDATES)
+                .append('\n');
         canonical.append("fold=");
         FOLD.entrySet().stream()
                 .sorted(Map.Entry.comparingByKey())
@@ -133,6 +211,14 @@ public final class HandleSkeleton {
                         .append(entry.getKey())
                         .append('>')
                         .append(entry.getValue())
+                        .append(','));
+        canonical.append("\nconfusableReadings=");
+        CONFUSABLE_READINGS.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(entry -> canonical
+                        .append(entry.getKey())
+                        .append('>')
+                        .append(String.join("/", entry.getValue()))
                         .append(','));
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")

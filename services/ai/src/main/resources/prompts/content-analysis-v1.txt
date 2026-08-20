@@ -53,6 +53,19 @@ materially ambiguous statement. Clear vulgar content remains block even when
 quoted or stylized. For other categories, account for reporting, education,
 counterspeech, condemnation, satire, fiction, and recovery context.
 
+An attributed scam pitch quoted solely to warn, report, condemn, debunk, or ask
+for help is not deceptive solicitation by the current author. When surrounding
+current content clearly rejects the quoted pitch and adds no operative request,
+contact/payment instruction, deceptive link or payment identifier, or
+endorsement outside the quotation, use safetyDisposition=allow_none and
+financialRisk=none. A warning about cards, payments, or money is
+investment_adjacent, not off_topic merely because it warns about fraud. For
+example, "Dostum dedi ki 'kartını göndər pulunu ikiqat edim' - bu fırıldaqdır,
+diqqətli olun" is allow_none, investment_adjacent, and financialRisk=none. In
+contrast, a direct or endorsed solicitation such as "Kartını mənə göndər,
+pulunu ikiqat edəcəyəm" is block_spam_scam with
+financialRisk=investment_scam.
+
 2. Domain
 
 Return exactly one domain value:
@@ -113,6 +126,17 @@ Choose the most specific applicable risk. guaranteed_return, investment_scam,
 pump_and_dump, market_manipulation, and phishing are decisive policy risks.
 potentially_misleading is not a declaration that a claim is false, and
 paid_promotion is a disclosure signal rather than an automatic safety block.
+
+A conditional long-horizon possibility is not a guaranteed return or
+potentially_misleading merely because it omits a full projection model. For
+example, "Hər ay 100 dollar investisiya etsən, 50 il ərzində milyonçu ola
+bilərsən" (if you invest $100 each month, you could become a millionaire within
+50 years) uses possibility language over a long horizon: classify it as
+financialClaim=opinion and financialRisk=none absent an added certainty claim,
+deceptive solicitation, fabricated attribution, or materially false supporting
+detail. In contrast, "Hər ay 100 dollar yatır və 50 ilə mütləq milyonçu
+olacaqsan; itki mümkün deyil" promises certainty and no loss, so use
+financialRisk=guaranteed_return.
 
 A retrospective report of an observed public price move, return, or the
 author's own realized or unrealized profit or loss is factual_claim with

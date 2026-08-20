@@ -26,6 +26,8 @@ import org.springframework.web.server.ResponseStatusException;
 public class GatewayExceptionHandler {
     private static final Logger log = LoggerFactory.getLogger(GatewayExceptionHandler.class);
     private static final String REQUEST_ID_HEADER = "X-Request-ID";
+    private static final String CACHE_CONTROL_HEADER = "Cache-Control";
+    private static final String PRIVATE_NO_STORE = "no-store, private";
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiError> handle(
@@ -36,6 +38,7 @@ public class GatewayExceptionHandler {
         ErrorCode code = errorCode(status);
         String requestId = requestId(request, response);
         String message = message(exception, status);
+        response.setHeader(CACHE_CONTROL_HEADER, PRIVATE_NO_STORE);
 
         if (status.is5xxServerError()) {
             log.error(
@@ -55,6 +58,13 @@ public class GatewayExceptionHandler {
     }
 
     private static HttpStatusCode status(Exception exception) {
+        if (exception instanceof ModerationSystemException systemException) {
+            return switch (systemException.kind()) {
+                case INVALID_RESPONSE -> HttpStatus.BAD_GATEWAY;
+                case UNAVAILABLE -> HttpStatus.SERVICE_UNAVAILABLE;
+                case TIMEOUT -> HttpStatus.GATEWAY_TIMEOUT;
+            };
+        }
         if (exception instanceof ResponseStatusException responseStatus) {
             return responseStatus.getStatusCode();
         }
@@ -85,7 +95,9 @@ public class GatewayExceptionHandler {
             case 413 -> ErrorCode.PAYLOAD_TOO_LARGE;
             case 415 -> ErrorCode.UNSUPPORTED_MEDIA_TYPE;
             case 422 -> ErrorCode.UNPROCESSABLE_IMAGE;
+            case 502 -> ErrorCode.UPSTREAM_FAILURE;
             case 503 -> ErrorCode.SERVICE_UNAVAILABLE;
+            case 504 -> ErrorCode.UPSTREAM_TIMEOUT;
             default -> status.is5xxServerError()
                     ? ErrorCode.INTERNAL_ERROR
                     : ErrorCode.INVALID_INPUT;
@@ -93,6 +105,13 @@ public class GatewayExceptionHandler {
     }
 
     private static String message(Exception exception, HttpStatusCode status) {
+        if (exception instanceof ModerationSystemException systemException) {
+            return switch (systemException.kind()) {
+                case INVALID_RESPONSE -> "A required moderation service returned an invalid response.";
+                case UNAVAILABLE -> "A required moderation service is not available.";
+                case TIMEOUT -> "A required moderation service timed out.";
+            };
+        }
         if (status.is5xxServerError()) {
             return status.value() == 503
                     ? "Service is not available."

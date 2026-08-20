@@ -54,7 +54,11 @@ class OpenAiRestClientTransportTest {
             assertThatThrownBy(() -> AiRequestDeadline.call(
                             System.currentTimeMillis() - 1,
                             () -> client.moderateText("already expired")))
-                    .isInstanceOf(OpenAiRestClient.OpenAiResponseException.class)
+                    .isInstanceOfSatisfying(
+                            OpenAiRestClient.OpenAiResponseException.class,
+                            failure -> assertThat(failure.failureKind())
+                                    .isEqualTo(
+                                            OpenAiRestClient.OpenAiFailureKind.TIMEOUT))
                     .hasMessageContaining("deadline expired");
             assertThat(requests).hasValue(1);
         } finally {
@@ -78,7 +82,94 @@ class OpenAiRestClientTransportTest {
         OpenAiRestClient client = client(server, 8, 8, 8, 50);
         try {
             assertThatThrownBy(() -> client.moderateText("one paid attempt"))
-                    .isInstanceOf(OpenAiRestClient.OpenAiResponseException.class);
+                    .isInstanceOfSatisfying(
+                            OpenAiRestClient.OpenAiResponseException.class,
+                            failure -> assertThat(failure.failureKind())
+                                    .isEqualTo(
+                                            OpenAiRestClient.OpenAiFailureKind.UNAVAILABLE));
+            assertThat(requests).hasValue(1);
+        } finally {
+            client.close();
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void providerRateLimitAndGatewayTimeoutRemainDistinguishable()
+            throws Exception {
+        AtomicInteger requests = new AtomicInteger();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/moderations", exchange -> {
+            int request = requests.incrementAndGet();
+            respond(
+                    exchange,
+                    request == 1 ? 429 : 504,
+                    "{\"error\":{\"type\":\"provider_failure\"}}");
+        });
+        server.start();
+        OpenAiRestClient client = client(server, 8, 8, 8, 50);
+        try {
+            assertThatThrownBy(() -> client.moderateText("rate limited"))
+                    .isInstanceOfSatisfying(
+                            OpenAiRestClient.OpenAiResponseException.class,
+                            failure -> assertThat(failure.failureKind())
+                                    .isEqualTo(
+                                            OpenAiRestClient.OpenAiFailureKind.RATE_LIMITED));
+            assertThatThrownBy(() -> client.moderateText("provider timed out"))
+                    .isInstanceOfSatisfying(
+                            OpenAiRestClient.OpenAiResponseException.class,
+                            failure -> assertThat(failure.failureKind())
+                                    .isEqualTo(
+                                            OpenAiRestClient.OpenAiFailureKind.TIMEOUT));
+            assertThat(requests).hasValue(2);
+        } finally {
+            client.close();
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void networkFailureIsReportedAsUnavailable() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.start();
+        OpenAiRestClient client = client(server, 8, 8, 8, 50);
+        server.stop(0);
+        try {
+            assertThatThrownBy(() -> client.moderateText("network failure"))
+                    .isInstanceOfSatisfying(
+                            OpenAiRestClient.OpenAiResponseException.class,
+                            failure -> assertThat(failure.failureKind())
+                                    .isEqualTo(
+                                            OpenAiRestClient.OpenAiFailureKind.UNAVAILABLE));
+        } finally {
+            client.close();
+        }
+    }
+
+    @Test
+    void providerReadDeadlineIsReportedAsTimeout() throws Exception {
+        AtomicInteger requests = new AtomicInteger();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/moderations", exchange -> {
+            requests.incrementAndGet();
+            try {
+                Thread.sleep(500);
+                respond(exchange, 200, moderationResponse());
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        server.start();
+        OpenAiRestClient client = client(server, 8, 8, 8, 50);
+        try {
+            assertThatThrownBy(() -> AiRequestDeadline.call(
+                            System.currentTimeMillis() + 100,
+                            () -> client.moderateText("slow provider")))
+                    .isInstanceOfSatisfying(
+                            OpenAiRestClient.OpenAiResponseException.class,
+                            failure -> assertThat(failure.failureKind())
+                                    .isEqualTo(
+                                            OpenAiRestClient.OpenAiFailureKind.TIMEOUT));
             assertThat(requests).hasValue(1);
         } finally {
             client.close();
@@ -118,10 +209,16 @@ class OpenAiRestClientTransportTest {
                             "359e703e3405ed2f32872265e12cfbf7ffd055a4f6141cf748943df2400a8759")
                     .containsEntry(
                             "classificationProfileSha256",
-                            "cc94a6f69ffc5c58fcddf2bd98c0e2e6e917656fabd5ead1d74a6f71edb05991")
+                            "4b0a68cf80f2de5418f0adcc8d4c5cc3e4674dbcd2c66e48c6af9ff4d580dbfc")
+                    .containsEntry(
+                            "imageAdjudicationProfileSha256",
+                            "04f084ec05acb9c1b121820b7ff3aabe34867181bba480b3e245d708fd5c8aa2")
+                    .containsEntry(
+                            "textAdjudicationProfileSha256",
+                            "dc2594a3533e1176a598abb632f71d0fccce2a01af05f275276ff6072f6a3915")
                     .containsEntry(
                             "adjudicationProfileSha256",
-                            "76ca1baac1c99ddf562834b9662d0a3f0fbe1eb3ba560263810ac4c030f912f0");
+                            "b555a40b314bfae55729a53761a25390bbcbddb72d1594cebb3dc1a50fc3333c");
         } finally {
             client.close();
         }

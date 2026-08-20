@@ -29,7 +29,7 @@ class ImageAdjudicationTest {
     }
 
     @Test
-    void acceptsRestrictedPoliticalEntityBlocksAndPossibleUnknown() {
+    void acceptsRestrictedPoliticalEntityBlocksAndRejectsPossibleUnknown() {
         for (String value : List.of("president", "minister", "yap", "multiple")) {
             ImageAdjudication result = restrictedPoliticalEntity(
                     "block", value, "restricted_political_entity");
@@ -39,14 +39,14 @@ class ImageAdjudicationTest {
 
         ImageAdjudication possible = restrictedPoliticalEntity(
                 "unknown", "possible", "restricted_political_entity");
-        assertThatCode(() -> possible.validate(Set.of(), "classifier_block_recheck"))
-                .doesNotThrowAnyException();
+        assertThatThrownBy(() -> possible.validate(Set.of(), "classifier_unknown_recheck"))
+                .isInstanceOf(OpenAiRestClient.OpenAiResponseException.class);
     }
 
     @Test
-    void possibleRestrictedPoliticalEntityPrecedesOffTopic() {
+    void rejectsPossibleRestrictedPoliticalEntityEvenWhenOffTopic() {
         ImageAdjudication result = new ImageAdjudication(
-                "classifier_block_recheck",
+                "classifier_unknown_recheck",
                 "unknown",
                 "allow",
                 "none",
@@ -63,8 +63,8 @@ class ImageAdjudicationTest {
                 "insufficient_evidence",
                 List.of());
 
-        assertThatCode(() -> result.validate(Set.of(), "classifier_block_recheck"))
-                .doesNotThrowAnyException();
+        assertThatThrownBy(() -> result.validate(Set.of(), "classifier_unknown_recheck"))
+                .isInstanceOf(OpenAiRestClient.OpenAiResponseException.class);
     }
 
     @Test
@@ -77,7 +77,7 @@ class ImageAdjudicationTest {
     }
 
     @Test
-    void overallBlockCanOverrideAnIndependentUnknownSafetySignal() {
+    void rejectsAnIndependentUnknownSafetySignalEvenWhenAnotherAxisBlocks() {
         ImageAdjudication result = new ImageAdjudication(
                 "classifier_block_recheck",
                 "block",
@@ -96,8 +96,8 @@ class ImageAdjudicationTest {
                 "current_policy_violation",
                 List.of());
 
-        assertThatCode(() -> result.validate(Set.of(), "classifier_block_recheck"))
-                .doesNotThrowAnyException();
+        assertThatThrownBy(() -> result.validate(Set.of(), "classifier_block_recheck"))
+                .isInstanceOf(OpenAiRestClient.OpenAiResponseException.class);
     }
 
     @Test
@@ -273,6 +273,14 @@ class ImageAdjudicationTest {
     }
 
     @Test
+    void acceptsABinaryClassifierUnknownRecheckWithNoCandidateIds() {
+        ImageAdjudication result = allow("classifier_unknown_recheck", List.of());
+
+        assertThatCode(() -> result.validate(Set.of(), "classifier_unknown_recheck"))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
     void rejectsClassifierOnlyResultsThatClaimReferenceSimilarity() {
         ImageAdjudication result = new ImageAdjudication(
                 "classifier_block_recheck",
@@ -297,7 +305,7 @@ class ImageAdjudicationTest {
     }
 
     @Test
-    void acceptsEvidenceUnavailableForInconclusiveEvidenceAndRejectsNone() {
+    void rejectsAllSuccessfulInconclusiveEvidenceOutcomes() {
         ImageAdjudication valid = new ImageAdjudication(
                 "classifier_block_recheck",
                 "unknown",
@@ -315,8 +323,8 @@ class ImageAdjudicationTest {
                 "insufficient",
                 "insufficient_evidence",
                 List.of());
-        assertThatCode(() -> valid.validate(Set.of(), "classifier_block_recheck"))
-                .doesNotThrowAnyException();
+        assertThatThrownBy(() -> valid.validate(Set.of(), "classifier_unknown_recheck"))
+                .isInstanceOf(OpenAiRestClient.OpenAiResponseException.class);
 
         ImageAdjudication invalid = new ImageAdjudication(
                 "classifier_block_recheck",
@@ -340,7 +348,7 @@ class ImageAdjudicationTest {
     }
 
     @Test
-    void acceptsUnknownReasonsBoundToTheirUncertainSignals() {
+    void rejectsUnknownReasonsEvenWhenBoundToUncertainSignals() {
         for (ImageAdjudication result : List.of(
                 unknown("safety", "threat", "investment_related", "none", "none", "none"),
                 unknown(
@@ -365,8 +373,8 @@ class ImageAdjudicationTest {
                         "none",
                         "possible"),
                 unknown("off_topic", "none", "uncertain", "none", "none", "none"))) {
-            assertThatCode(() -> result.validate(Set.of(), "classifier_block_recheck"))
-                    .doesNotThrowAnyException();
+            assertThatThrownBy(() -> result.validate(Set.of(), "classifier_unknown_recheck"))
+                    .isInstanceOf(OpenAiRestClient.OpenAiResponseException.class);
         }
     }
 

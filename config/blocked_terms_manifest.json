@@ -1,0 +1,14 @@
+{
+  "formatVersion": "blocked-terms/v4",
+  "handleFoldProfileVersion": "handle-vulgar-skeleton-v3",
+  "handleFoldProfileSha256": "ff191bbb24fe96396f929c0583ed5482b070f9da1c53d5d1c198cf6f76b25d7c",
+  "sourceSha256": "31d8ef74019d9dc03a668f2188d8c842305a127aff612192795f0c764c3dbb61",
+  "semanticSha256": "d058a75e05b1020c0c79258ff5ac68d3d4e20140deffc877c89b2612c2cdfe54",
+  "termCount": 7585,
+  "categoryCounts": {
+    "POLITICAL_CONTENT": 16,
+    "HANDLE_VULGAR": 2,
+    "VULGAR": 7553,
+    "HATE": 14
+  }
+}

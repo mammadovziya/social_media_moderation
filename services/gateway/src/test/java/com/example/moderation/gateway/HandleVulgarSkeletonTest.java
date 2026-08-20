@@ -6,7 +6,7 @@ import org.junit.jupiter.api.Test;
 
 class HandleVulgarSkeletonTest {
     private static final String PINNED_PROFILE_SHA256 =
-            "2ce49e3fbf9b0b230656794ed9bd5be43acff49f1728ec798270c3222442168f";
+            "ff191bbb24fe96396f929c0583ed5482b070f9da1c53d5d1c198cf6f76b25d7c";
 
     @Test
     void dropsSeparatorsSoAnInterruptedSpellingFoldsLikeTheTerm() {
@@ -26,6 +26,14 @@ class HandleVulgarSkeletonTest {
                 .contains(HandleVulgarSkeleton.ofTerm("gicdıllaq"));
         assertThat(HandleVulgarSkeleton.ofHandle("p1dar"))
                 .contains(HandleVulgarSkeleton.ofTerm("pidar"));
+    }
+
+    @Test
+    void foldsTheReviewedLetterLookalikeWithoutDiscardingTheLiteralReading() {
+        assertThat(HandleVulgarSkeleton.ofHandle("xlyarmurad"))
+                .containsExactly("xlyarmurad", "xiyarmurad");
+        assertThat(HandleVulgarSkeleton.ofHandle("badlmcanal"))
+                .contains("badimcanal");
     }
 
     @Test
@@ -55,6 +63,8 @@ class HandleVulgarSkeletonTest {
                 .isEqualTo("valueinvestor");
         assertThat(HandleVulgarSkeleton.ofHandle("1212121212121212"))
                 .hasSizeLessThanOrEqualTo(256);
+        assertThat(HandleVulgarSkeleton.ofHandle("llllllllllllllll"))
+                .hasSizeLessThanOrEqualTo(256);
     }
 
     @Test
@@ -72,7 +82,7 @@ class HandleVulgarSkeletonTest {
     @Test
     void pinsTheProfileIdentity() {
         assertThat(HandleVulgarSkeleton.PROFILE_VERSION)
-                .isEqualTo("handle-vulgar-skeleton-v1");
+                .isEqualTo("handle-vulgar-skeleton-v3");
         assertThat(HandleVulgarSkeleton.PROFILE_SHA256).isEqualTo(PINNED_PROFILE_SHA256);
     }
 }

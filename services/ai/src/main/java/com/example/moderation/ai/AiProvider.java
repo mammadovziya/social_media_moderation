@@ -47,6 +47,19 @@ public interface AiProvider {
             String authorUsername,
             String quotedText);
 
+    /**
+     * Resolves a successful first-pass semantic UNKNOWN into a strict binary text-policy
+     * decision. Implementations must either return a coherent {@code status=ok} ALLOW/BLOCK
+     * adjudication or throw; they must never return a successful UNKNOWN.
+     */
+    Map<String, Object> adjudicateText(
+            ContentType contentType,
+            String text,
+            String parentPostText,
+            String authorUsername,
+            String quotedText,
+            Map<String, Object> classifierSignal);
+
     Map<String, Object> classifyImage(
             ContentType contentType,
             byte[] bytes,
@@ -76,6 +89,11 @@ public interface AiProvider {
                 ocrTruncated);
     }
 
+    /**
+     * Resolves a bound image candidate, classifier block, or semantic UNKNOWN into a strict
+     * binary policy decision. A successful result must be coherent ALLOW/BLOCK; failures must
+     * throw rather than returning successful UNKNOWN.
+     */
     Map<String, Object> adjudicateImage(
             byte[] bytes,
             String imageContentType,

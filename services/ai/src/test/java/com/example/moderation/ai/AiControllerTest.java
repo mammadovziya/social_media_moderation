@@ -34,7 +34,8 @@ class AiControllerTest {
                 "I disagree",
                 "Should I buy this ETF?",
                 "value_investor",
-                "The valuation is attractive"));
+                "The valuation is attractive",
+                null));
 
         assertThat(result).isSameAs(expected);
         verify(analysis)

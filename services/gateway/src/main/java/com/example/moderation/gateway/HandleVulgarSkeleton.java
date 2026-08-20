@@ -21,19 +21,31 @@ import java.util.regex.Pattern;
  * impersonation comparison key and is recorded in decision provenance, so it must stay stable and
  * strictly one-to-one. This profile is lossier on purpose: it folds the substitutions that hide an
  * obscene word inside a machine handle, and one handle can fold to several candidate keys because
- * a digit such as {@code 2} stands for more than one Azerbaijani syllable.
+ * a digit such as {@code 2} stands for more than one Azerbaijani syllable and a letter such as
+ * {@code l} can be substituted for {@code i}.
  *
  * <p>A fold collision is evidence that a handle spells a blocked term, never a statement about a
  * handle that merely contains a folded key as a fragment. The length rules that govern fragment
  * matching live in {@link ReloadingBlockedTerms}, which owns the term index.
  */
 public final class HandleVulgarSkeleton {
-    public static final String PROFILE_VERSION = "handle-vulgar-skeleton-v1";
+    public static final String PROFILE_VERSION = "handle-vulgar-skeleton-v3";
     public static final String PROFILE_SHA256;
 
     /**
-     * Shortest folded term allowed to match a handle as a fragment. A shorter key is an ordinary
-     * word too often: Azerbaijani {@code göt} folds to the English "got".
+     * Shortest folded term allowed to match when the fold consumes the whole handle or token.
+     *
+     * <p>An exact match is the safest rule here, so it carries the lowest floor. Four is where the
+     * reviewed corpus divides cleanly: every four-character fold in it is unambiguous
+     * ({@code diga}, {@code blet}, {@code xuyu}), while the one ordinary word the fold can produce,
+     * Azerbaijani {@code göt} to the English "got", is three characters and so stays excluded by
+     * construction rather than by a maintained list of exceptions.
+     */
+    static final int MIN_EXACT_MATCH_LENGTH = 4;
+
+    /**
+     * Shortest folded term allowed to match a handle as a leading fragment. Longer than the exact
+     * floor, because a prefix match accepts trailing characters the term never accounted for.
      */
     static final int MIN_PREFIX_MATCH_LENGTH = 5;
 
@@ -70,6 +82,10 @@ public final class HandleVulgarSkeleton {
 
     /** Reviewed digit substitutions seen in Azerbaijani handles. */
     private static final Map<Character, List<String>> DIGIT_READINGS = digitReadings();
+
+    /** Reviewed letter-lookalike substitutions seen in Azerbaijani handles. */
+    private static final Map<Character, List<String>> LETTER_READINGS = Map.of(
+            'l', List.of("i"));
 
     static {
         PROFILE_SHA256 = profileSha256();
@@ -159,6 +175,9 @@ public final class HandleVulgarSkeleton {
             char character = prepared.charAt(index);
             String literal = String.valueOf(character);
             List<String> alternatives = DIGIT_READINGS.get(character);
+            if (alternatives == null) {
+                alternatives = LETTER_READINGS.get(character);
+            }
             if (alternatives == null
                     || readings.size() * (alternatives.size() + 1)
                             > MAX_CANDIDATES_PER_SUFFIX) {
@@ -235,6 +254,25 @@ public final class HandleVulgarSkeleton {
         table.put((int) 'ç', 'c');
         table.put((int) 'ğ', 'g');
         table.put((int) 'İ', 'i');
+        // Cyrillic lookalikes. HandleSkeleton already folds these for impersonation matching;
+        // without them here a single confusable character defeats the whole local profanity
+        // layer, because NFKC never maps Cyrillic onto Latin.
+        table.put((int) '\u0430', 'a');
+        table.put((int) '\u0432', 'b');
+        table.put((int) '\u0435', 'e');
+        table.put((int) '\u0451', 'e');
+        table.put((int) '\u0456', 'i');
+        table.put((int) '\u0458', 'j');
+        table.put((int) '\u043a', 'k');
+        table.put((int) '\u043c', 'm');
+        table.put((int) '\u043d', 'h');
+        table.put((int) '\u043e', 'o');
+        table.put((int) '\u0440', 'p');
+        table.put((int) '\u0441', 'c');
+        table.put((int) '\u0442', 't');
+        table.put((int) '\u0443', 'y');
+        table.put((int) '\u0445', 'x');
+        table.put((int) '\u0455', 's');
         return Map.copyOf(table);
     }
 
@@ -259,6 +297,7 @@ public final class HandleVulgarSkeleton {
         canonical.append("collapse=adjacent-duplicate-folded-characters\n");
         canonical.append("drop=non-ascii-alphanumeric\n");
         canonical.append("qFold=q>g\n");
+        canonical.append("minExactMatch=").append(MIN_EXACT_MATCH_LENGTH).append('\n');
         canonical.append("minPrefixMatch=").append(MIN_PREFIX_MATCH_LENGTH).append('\n');
         canonical.append("minInteriorMatch=").append(MIN_INTERIOR_MATCH_LENGTH).append('\n');
         canonical.append("candidateExpansion=literal-first;left-to-right-per-comparable-suffix\n");
@@ -284,6 +323,14 @@ public final class HandleVulgarSkeleton {
                         .append(','));
         canonical.append("\ndigitReadings=");
         DIGIT_READINGS.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(entry -> canonical
+                        .append(entry.getKey())
+                        .append('>')
+                        .append(String.join("|", entry.getValue()))
+                        .append(','));
+        canonical.append("\nletterReadings=");
+        LETTER_READINGS.entrySet().stream()
                 .sorted(Map.Entry.comparingByKey())
                 .forEach(entry -> canonical
                         .append(entry.getKey())

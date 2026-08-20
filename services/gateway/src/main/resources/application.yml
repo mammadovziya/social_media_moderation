@@ -53,13 +53,15 @@ moderation:
   expected-moderation-model: ${OPENAI_MODERATION_MODEL:omni-moderation-2024-09-26}
   expected-moderation-profile-sha256: ${OPENAI_MODERATION_PROFILE_SHA256:25183eb597e1e23190618d13153a1a47edc851efc7d2c55b287d2bbe8d7c1073}
   expected-classification-model: ${OPENAI_CUSTOM_MODEL:gpt-5.4-mini}
-  expected-classification-prompt-bundle-sha256: ${OPENAI_CLASSIFICATION_PROMPT_BUNDLE_SHA256:89f49336572c56af54d924481a3e9cbe7a7a1e623ef688fd736bd80bb02df6f8}
-  expected-classification-profile-sha256: ${OPENAI_CLASSIFICATION_PROFILE_SHA256:d9ee6b9db5f4f5727a27bb2bb91aaf79e603f52d9047e0019309c091b48ba07d}
+  expected-classification-prompt-bundle-sha256: ${OPENAI_CLASSIFICATION_PROMPT_BUNDLE_SHA256:3f16da31ae1f71763b2a5262e694b531abefddb1d626f4dbf731bcef56139928}
+  expected-classification-profile-sha256: ${OPENAI_CLASSIFICATION_PROFILE_SHA256:8ba145c16b484d910a58755598552bf97107880b1dfef0a01d0825f941818b01}
   expected-adjudication-model: ${OPENAI_ADJUDICATION_MODEL:gpt-5.6-terra}
   expected-adjudication-reasoning-effort: ${OPENAI_ADJUDICATION_REASONING_EFFORT:medium}
-  expected-adjudication-prompt-version: image-adjudication-v5
-  expected-adjudication-prompt-sha256: ${OPENAI_ADJUDICATION_PROMPT_SHA256:d9e4dcab95ca4a9d84099247ac353a2faa48f8fba93ede8901ffbeec8c52c505}
-  expected-adjudication-profile-sha256: ${OPENAI_ADJUDICATION_PROFILE_SHA256:9efc6b244bba4ab2cd0ab0747e7a9fbf8f83d4479cf1310cdbbdeb5c0e3e3eef}
+  expected-adjudication-prompt-version: adjudication-prompts-v4
+  expected-adjudication-prompt-sha256: ${OPENAI_ADJUDICATION_PROMPT_SHA256:ac1640fbf75889a8071545ae80fca3adf25706f6b9f3e7b35a60201aa2d82d1c}
+  expected-adjudication-profile-sha256: ${OPENAI_ADJUDICATION_PROFILE_SHA256:c2855ff1698d969d213445a2e278557d8c2d8119a8d3ce5f01bf6d397f5f889e}
+  expected-image-adjudication-prompt-sha256: ${OPENAI_IMAGE_ADJUDICATION_PROMPT_SHA256:14d2daa25d8b31765be1b804c061ab1bfab761a1a854f379e2d331ae82f93132}
+  expected-image-adjudication-profile-sha256: ${OPENAI_IMAGE_ADJUDICATION_PROFILE_SHA256:894d8c98443230496195e0e443b3293e0f4ec359b9a582f20d87dbb58f9fb699}
   expected-open-ai-timeout-seconds: ${OPENAI_TIMEOUT_SECONDS:30}
   blocked-terms-file: ${BLOCKED_TERMS_FILE:${user.dir}/config/blocked_terms.txt}
   restricted-political-entities-file: ${RESTRICTED_POLITICAL_ENTITIES_FILE:${user.dir}/config/restricted_political_entities.txt}
@@ -69,3 +71,15 @@ ai-work-idempotency:
   security:
     internal-token: ${AI_WORK_IDEMPOTENCY_INTERNAL_TOKEN:}
     allow-unauthenticated: ${AI_WORK_IDEMPOTENCY_ALLOW_UNAUTHENTICATED:false}
+
+blocked-terms-policy:
+  source-mode: ${BLOCKED_TERMS_SOURCE_MODE:file}
+  refresh-interval-ms: ${BLOCKED_TERMS_REFRESH_INTERVAL_MS:30000}
+  fetch-timeout-ms: ${BLOCKED_TERMS_FETCH_TIMEOUT_MS:2000}
+  max-stale-seconds: ${BLOCKED_TERMS_MAX_STALE_SECONDS:900}
+
+policy-distribution:
+  security:
+    internal-token: ${POLICY_DISTRIBUTION_INTERNAL_TOKEN:}
+    allow-unauthenticated: ${POLICY_DISTRIBUTION_ALLOW_UNAUTHENTICATED:false}
+    allow-insecure-http: ${POLICY_DISTRIBUTION_ALLOW_INSECURE_HTTP:false}

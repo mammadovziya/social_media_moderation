@@ -45,7 +45,10 @@ class AiWorkIdempotencyService {
             "provider", "moderationModel", "moderationProfileSha256", "customModel",
             "classificationPromptBundleSha256", "classificationProfileSha256",
             "adjudicationModel", "adjudicationReasoningEffort", "adjudicationPromptVersion",
-            "adjudicationPromptSha256", "adjudicationProfileSha256", "openAiTimeoutSeconds",
+            "adjudicationPromptSha256", "adjudicationPromptBundleSha256",
+            "imageAdjudicationPromptSha256", "textAdjudicationPromptSha256",
+            "adjudicationProfileSha256", "imageAdjudicationProfileSha256",
+            "textAdjudicationProfileSha256", "openAiTimeoutSeconds",
             "maxImageBytes", "maxImageRequestBytes");
     private static final Set<String> RAW_CONTENT_KEYS = Set.of(
             "text",

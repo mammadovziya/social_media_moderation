@@ -14,9 +14,13 @@ import java.util.List;
 import java.util.Map;
 
 public final class DecisionPolicy {
-    public static final String POLICY_VERSION = "investment-community-policy-v5";
-    public static final String REDUCER_VERSION = "decision-reducer-v6";
+    public static final String POLICY_VERSION = "investment-community-policy-v8";
+    public static final String REDUCER_VERSION = "decision-reducer-v8";
     public static final String REFERENCE_ASSET_POLICY_VERSION = "image-policy-v1";
+    public static final String IMAGE_ADJUDICATION_PROMPT_VERSION =
+            "image-adjudication-v7";
+    public static final String TEXT_ADJUDICATION_PROMPT_VERSION =
+            "text-adjudication-v3";
     private static final List<String> FLAGGED_CATEGORY_PRIORITY = List.of(
             "sexual/minors",
             "self-harm/intent",
@@ -64,29 +68,10 @@ public final class DecisionPolicy {
         Map<String, Object> moderation = nestedMap(ai, "moderation");
         Map<String, Object> classification = nestedMap(ai, "classification");
 
-        if ("ok".equals(moderation.get("status"))
-                && Boolean.TRUE.equals(moderation.get("flagged"))) {
-            return new Result(
-                    Decision.BLOCK,
-                    resolveFlaggedCategory(
-                            nestedMap(moderation, "categories"), classification),
-                    FinalReason.SAFETY);
-        }
-
-        // The provider's binary flag uses its own operating point. This application binds a
-        // stricter governed operating point to the raw Omni Moderation category scores: any
-        // category strictly above the configured threshold is a terminal safety block.
-        ScoreCategory score = highestScore(nestedMap(moderation, "categoryScores"));
-        if (score.score() < 0) {
-            score = highestScore(nestedMap(moderation, "category_scores"));
-        }
-        if ("ok".equals(moderation.get("status"))
-                && score.score() > moderationScoreBlockThreshold) {
-            Violation scoreViolation = Violation.fromProvider(score.category());
-            return new Result(
-                    Decision.BLOCK,
-                    scoreViolation == Violation.NONE ? Violation.OTHER : scoreViolation,
-                    FinalReason.SAFETY);
+        Violation providerViolation = providerModerationViolation(
+                moderation, classification, moderationScoreBlockThreshold);
+        if (providerViolation != Violation.NONE) {
+            return new Result(Decision.BLOCK, providerViolation, FinalReason.SAFETY);
         }
 
         if (localViolation != null
@@ -118,50 +103,138 @@ public final class DecisionPolicy {
             return analyzerError();
         }
 
-        PolicySignals signals;
+        PolicySignals classifierSignals;
         try {
-            signals = PolicySignals.classifier(classification, contentType)
-                    .withFinancialPrivacy(localFinancialPrivacy);
+            classifierSignals = PolicySignals.classifier(classification, contentType);
         } catch (IllegalArgumentException exception) {
             return analyzerError();
         }
+        PolicySignals signals = classifierSignals.withFinancialPrivacy(localFinancialPrivacy);
 
-        boolean classifierPolicyBlock = requiresPolicyAdjudication(signals);
+        boolean classifierPolicyBlock = requiresBlockingPolicyAdjudication(classifierSignals);
+        boolean classifierUnknownTrigger =
+                reduceSignals(classifierSignals).decision() == Decision.UNKNOWN;
+        boolean classifierAdjudicationTrigger =
+                classifierPolicyBlock || classifierUnknownTrigger;
         if (media == null) {
             Result reduced = reduceSignals(signals);
-            if (reduced.decision() != Decision.ALLOW) {
-                return reduced;
+            if (classifierUnknownTrigger) {
+                return textAdjudicatedResult(
+                        nestedMap(ai, "adjudication"), contentType);
             }
-        } else if (signals.domain() == Domain.OFF_TOPIC && !classifierPolicyBlock) {
+            return reduced;
+        } else if (signals.domain() == Domain.OFF_TOPIC
+                && !classifierAdjudicationTrigger) {
             return offTopic();
         }
 
         boolean candidateTrigger = requiresAdjudication(media);
-        if (candidateTrigger || classifierPolicyBlock) {
+        if (candidateTrigger || classifierAdjudicationTrigger) {
             if (candidateTrigger
-                    && !classifierPolicyBlock
+                    && !classifierAdjudicationTrigger
                     && !hasCompleteRequiredOcr(media)) {
                 return evidenceUnavailable();
             }
             Result adjudicated = adjudicatedResult(
-                    nestedMap(ai, "adjudication"), media, classifierPolicyBlock);
+                    nestedMap(ai, "adjudication"),
+                    media,
+                    classifierPolicyBlock,
+                    classifierUnknownTrigger);
             return adjudicated;
         }
 
         return reduceSignals(signals);
     }
 
+    /** True only when first-pass AI semantics, rather than local evidence, need escalation. */
+    static boolean requiresTextAdjudication(
+            Map<String, Object> classification, ContentType contentType) {
+        try {
+            return reduceSignals(PolicySignals.classifier(classification, contentType))
+                            .decision()
+                    == Decision.UNKNOWN;
+        } catch (IllegalArgumentException exception) {
+            return false;
+        }
+    }
+
+    /** True only when the stronger text adjudicator, rather than an earlier policy layer, won. */
+    static boolean successfulTextAdjudication(
+            Map<String, Object> ai,
+            ContentType contentType,
+            Result result,
+            double moderationScoreBlockThreshold) {
+        return successfulTextAdjudication(
+                ai, contentType, result, moderationScoreBlockThreshold, false);
+    }
+
+    /**
+     * Whether a text adjudication is the authoritative signal.
+     *
+     * <p>{@code adjudicationRequested} covers a recheck the caller demanded for uncertainty the
+     * classifier cannot observe, such as a protected-name near-miss. Without it a forced
+     * adjudication would be computed and then discarded, because a confident first pass never
+     * "requires" adjudication on its own.
+     */
+    static boolean successfulTextAdjudication(
+            Map<String, Object> ai,
+            ContentType contentType,
+            Result result,
+            double moderationScoreBlockThreshold,
+            boolean adjudicationRequested) {
+        Map<String, Object> classification = nestedMap(ai, "classification");
+        if (result == null
+                || !(adjudicationRequested
+                        || requiresTextAdjudication(classification, contentType))
+                || providerModerationViolation(
+                                nestedMap(ai, "moderation"),
+                                classification,
+                                moderationScoreBlockThreshold)
+                        != Violation.NONE) {
+            return false;
+        }
+        Result adjudicated = textAdjudicatedResult(
+                nestedMap(ai, "adjudication"), contentType);
+        return adjudicated.decision() != Decision.UNKNOWN && adjudicated.equals(result);
+    }
+
+    /** Returns the terminal provider-moderation violation, or NONE when that layer did not win. */
+    static Violation providerModerationViolation(
+            Map<String, Object> moderation,
+            Map<String, Object> classification,
+            double moderationScoreBlockThreshold) {
+        if ("ok".equals(moderation.get("status"))
+                && Boolean.TRUE.equals(moderation.get("flagged"))) {
+            return resolveFlaggedCategory(
+                    nestedMap(moderation, "categories"), classification);
+        }
+
+        // The provider's binary flag uses its own operating point. This application binds a
+        // stricter governed operating point to the raw Omni Moderation category scores: any
+        // category strictly above the configured threshold is a terminal safety block.
+        ScoreCategory score = highestScore(nestedMap(moderation, "categoryScores"));
+        if (score.score() < 0) {
+            score = highestScore(nestedMap(moderation, "category_scores"));
+        }
+        if ("ok".equals(moderation.get("status"))
+                && score.score() > moderationScoreBlockThreshold) {
+            Violation scoreViolation = Violation.fromProvider(score.category());
+            return scoreViolation == Violation.NONE ? Violation.OTHER : scoreViolation;
+        }
+        return Violation.NONE;
+    }
+
     public static boolean classifierProposedBlock(
             Map<String, Object> classification, ContentType contentType) {
         try {
-            return requiresPolicyAdjudication(
+            return requiresBlockingPolicyAdjudication(
                     PolicySignals.classifier(classification, contentType));
         } catch (IllegalArgumentException exception) {
             return false;
         }
     }
 
-    private static boolean requiresPolicyAdjudication(PolicySignals signals) {
+    private static boolean requiresBlockingPolicyAdjudication(PolicySignals signals) {
         return signals.safetyDecision() == Decision.BLOCK
                 || PolicySignals.isBlockingFinancialRisk(signals.financialRisk())
                 || signals.financialPrivacy() == FinancialPrivacy.CLEAR
@@ -421,9 +494,16 @@ public final class DecisionPolicy {
     private static Result adjudicatedResult(
             Map<String, Object> adjudication,
             Map<String, Object> media,
-            boolean classifierPolicyBlock) {
+            boolean classifierPolicyBlock,
+            boolean classifierUnknownTrigger) {
         if (!"ok".equals(adjudication.get("status"))) {
             return evidenceUnavailable();
+        }
+        if (!IMAGE_ADJUDICATION_PROMPT_VERSION.equals(
+                        adjudication.get("promptVersion"))
+                || !(adjudication.get("model") instanceof String model)
+                || model.isBlank()) {
+            return analyzerError();
         }
         Decision action;
         FinalReason finalReason;
@@ -437,17 +517,22 @@ public final class DecisionPolicy {
         } catch (IllegalArgumentException exception) {
             return analyzerError();
         }
+        if (action == Decision.UNKNOWN) {
+            return analyzerError();
+        }
         Result signalResult = reduceSignals(signals);
         if (action != signalResult.decision()
-                || (finalReason == FinalReason.EVIDENCE_UNAVAILABLE
-                        ? action != Decision.UNKNOWN
-                        : finalReason != signalResult.reason())) {
+                || finalReason != signalResult.reason()) {
             return analyzerError();
         }
         String disposition = String.valueOf(adjudication.get("candidateDisposition"));
         String evidenceBasis = String.valueOf(adjudication.get("evidenceBasis"));
         String reasonCode = String.valueOf(adjudication.get("reasonCode"));
-        if (!validAdjudicationBinding(adjudication, media, classifierPolicyBlock)) {
+        if (!validAdjudicationBinding(
+                adjudication,
+                media,
+                classifierPolicyBlock,
+                classifierUnknownTrigger)) {
             return analyzerError();
         }
         if (action == Decision.BLOCK
@@ -464,22 +549,93 @@ public final class DecisionPolicy {
                 && !"insufficient".equals(evidenceBasis)
                 && ("current_content_safe".equals(reasonCode)
                         || (!classifierPolicyBlock
+                                && !classifierUnknownTrigger
                                 && "reference_only_similarity".equals(reasonCode)))
                 && finalReason == FinalReason.NONE
                 && signals.safety() == Safety.NONE) {
             return resultForAdjudicatedReason(action, finalReason, signals);
         }
-        if (action == Decision.UNKNOWN
-                && "inconclusive".equals(disposition)
-                && "insufficient".equals(evidenceBasis)
-                && ("evidence_conflict".equals(reasonCode)
-                        || "insufficient_evidence".equals(reasonCode))) {
-            if (finalReason == FinalReason.EVIDENCE_UNAVAILABLE) {
-                return evidenceUnavailable();
-            }
-            return resultForAdjudicatedReason(action, finalReason, signals);
-        }
         return analyzerError();
+    }
+
+    static Result textAdjudicatedResult(
+            Map<String, Object> adjudication, ContentType contentType) {
+        if (!"ok".equals(adjudication.get("status"))) {
+            return analyzerError();
+        }
+        if (!"text_unknown_recheck".equals(adjudication.get("adjudicationMode"))
+                || !TEXT_ADJUDICATION_PROMPT_VERSION.equals(
+                        adjudication.get("promptVersion"))
+                || !(adjudication.get("model") instanceof String model)
+                || model.isBlank()
+                || hasImageAdjudicationFields(adjudication)
+                || (contentType == ContentType.USERNAME
+                        && (adjudication.containsKey("domain")
+                                || adjudication.containsKey("financialClaim")
+                                || adjudication.containsKey("politicalContext")))) {
+            return analyzerError();
+        }
+
+        Decision action;
+        FinalReason finalReason;
+        PolicySignals signals;
+        try {
+            action = Decision.valueOf(
+                    String.valueOf(adjudication.get("action"))
+                            .toUpperCase(java.util.Locale.ROOT));
+            finalReason = adjudicatedFinalReason(adjudication.get("finalReason"));
+            signals = PolicySignals.textAdjudicated(adjudication, contentType);
+        } catch (IllegalArgumentException exception) {
+            return analyzerError();
+        }
+        if ((action != Decision.ALLOW && action != Decision.BLOCK)
+                || !signals.isDecisiveTextAdjudication()) {
+            return analyzerError();
+        }
+
+        Result reduced = reduceSignals(signals);
+        if (action != reduced.decision()
+                || (action == Decision.ALLOW
+                        ? finalReason != FinalReason.NONE
+                        : finalReason != reduced.reason())) {
+            return analyzerError();
+        }
+        return resultForAdjudicatedReason(action, finalReason, signals);
+    }
+
+    /** Validates a standalone successful image-adjudication envelope before it is cacheable. */
+    static Result imageAdjudicatedResultForValidation(
+            Map<String, Object> adjudication,
+            Map<String, Object> media,
+            Map<String, Object> classification) {
+        PolicySignals classifierSignals;
+        try {
+            classifierSignals = PolicySignals.classifier(classification, ContentType.POST);
+        } catch (IllegalArgumentException exception) {
+            return analyzerError();
+        }
+        boolean classifierPolicyBlock =
+                requiresBlockingPolicyAdjudication(classifierSignals);
+        boolean classifierUnknownTrigger =
+                reduceSignals(classifierSignals).decision() == Decision.UNKNOWN;
+        if (!requiresAdjudication(media)
+                && !classifierPolicyBlock
+                && !classifierUnknownTrigger) {
+            return analyzerError();
+        }
+        return adjudicatedResult(
+                adjudication,
+                media,
+                classifierPolicyBlock,
+                classifierUnknownTrigger);
+    }
+
+    private static boolean hasImageAdjudicationFields(
+            Map<String, Object> adjudication) {
+        return adjudication.containsKey("candidateIds")
+                || adjudication.containsKey("candidateDisposition")
+                || adjudication.containsKey("evidenceBasis")
+                || adjudication.containsKey("reasonCode");
     }
 
     private static FinalReason adjudicatedFinalReason(Object value) {
@@ -493,7 +649,8 @@ public final class DecisionPolicy {
     private static boolean validAdjudicationBinding(
             Map<String, Object> adjudication,
             Map<String, Object> media,
-            boolean classifierPolicyBlock) {
+            boolean classifierPolicyBlock,
+            boolean classifierUnknownTrigger) {
         Object value = adjudication.get("candidateIds");
         if (!(value instanceof List<?> ids)
                 || ids.size() > 10
@@ -514,8 +671,12 @@ public final class DecisionPolicy {
                 .collect(java.util.stream.Collectors.toSet());
         boolean candidateTrigger = !allowed.isEmpty();
         String expectedMode = candidateTrigger
-                ? (classifierPolicyBlock ? "both" : "candidate_recheck")
-                : "classifier_block_recheck";
+                ? (classifierPolicyBlock || classifierUnknownTrigger
+                        ? "both"
+                        : "candidate_recheck")
+                : classifierUnknownTrigger
+                        ? "classifier_unknown_recheck"
+                        : "classifier_block_recheck";
         boolean idsValid = candidateTrigger
                 ? java.util.Set.copyOf(stringIds).equals(allowed)
                 : stringIds.isEmpty();
