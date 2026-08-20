@@ -10,9 +10,6 @@ curl -fsS http://localhost:8080/readyz
 
 API reference: <http://localhost:8080/swagger-ui.html>
 
-Backend contract and operations handoff:
-[`docs/backend-handoff.md`](docs/backend-handoff.md)
-
 ## Moderate
 
 ```bash
